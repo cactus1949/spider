@@ -586,7 +586,11 @@ export default function SettingsModal({
               padding: '28px 32px'
             }}
           >
-            <Form form={form} layout="vertical" style={{ maxWidth: 520 }}>
+            <Form
+              form={form}
+              layout="vertical"
+              style={{ maxWidth: activeSection === 'section-upload' ? 'none' : 520 }}
+            >
               {/* ── 基础 ── */}
               {activeSection === 'section-basic' && <>
               <h3
