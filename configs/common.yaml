@@ -1,0 +1,58 @@
+# 公共配置 —— 所有部署模式共享
+platform:
+  domain: "pm.gd.csg.cn"
+  login_url: "https://pm.gd.csg.cn/portal/#/home"
+
+storage:
+  data_dir: "./data"
+  archive_dir: "./archives"
+  sqlite_path: "./data/spider.db"
+  enable_wal: true
+
+log:
+  persist_to_file: true
+  file_dir: "./logs"
+  console_level: "INFO"
+  file_level: "DEBUG"
+  retention_days: 30
+
+crawler:
+  headless: true
+  login_timeout_sec: 60
+  user_data_dir: "./data/.browser"
+
+alert:
+  channels: []
+  silence_window: "23:00-07:00"
+
+# 任务产物稳定发送：任务结束且产生下载文件后，自动压缩并发送文件或下载链接
+delivery:
+  enabled: false
+  env_file: ""                  # 可填 /c/secure/spider-gd-delivery.env，从文件读取 Webhook/Token
+  backend: wecom_webhook        # wecom_webhook / serverchan / pushplus
+  wecom_webhook: ""
+  serverchan_send_key: ""
+  serverchan_channel: ""
+  serverchan_openid: ""
+  pushplus_token: ""
+  pushplus_channel: ""
+  send_message: true
+  send_file: true
+  file_delivery: auto          # auto / wecom_file / remote_link
+  wecom_file_max_mb: 20
+  remote_upload_url: ""        # 可留空，自动读取设置里的 workshopUploadUrl
+  remote_upload_token: ""      # 可留空，自动读取设置里的 workshopUploadToken
+  remote_upload_relative_path: "/upload/publicData"
+  remote_upload_verify_url: true # 上传后验证下载链接是否可访问
+  retry_attempts: 2             # 发送/上传最多尝试次数
+  retry_delay_sec: 0.5          # 每次失败后的等待秒数
+  title: "spider-gd 采集完成"
+
+# RPA 兜底采集：API 失败时，浏览器点击导出按钮所需的页面/选择器映射
+# indicator 名 → (页面URL, 导出按钮CSS选择器)
+# 示例:
+#   rpa:
+#     endpoint_pages:
+#       daily_settlement: ["https://pm.gd.csg.cn/...", "button.export-btn"]
+rpa:
+  endpoint_pages: {}

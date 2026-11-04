@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Date Picker Lab - {{ kind }}</title>
+  <style>
+    body { font-family: Arial, "Microsoft YaHei", sans-serif; padding: 32px; color: #1f2328; }
+    input { width: 220px; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 4px; }
+    .el-date-picker, .ant-picker-dropdown {
+      display: none; position: absolute; top: 82px; left: 32px; z-index: 10; width: 320px;
+      padding: 12px; background: #fff; border: 1px solid #dcdfe6; border-radius: 4px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.12);
+    }
+    .el-date-picker__header, .ant-picker-header { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px; }
+    .el-date-picker__header-label, .ant-picker-header-view button { cursor: pointer; font-weight: 600; border: 0; background: transparent; }
+    table { width: 100%; border-collapse: collapse; }
+    td { text-align: center; padding: 4px; cursor: pointer; }
+    .cell, .el-date-table-cell__text, .ant-picker-cell-inner {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px; border-radius: 14px;
+    }
+    td:hover .cell, td:hover .el-date-table-cell__text, td:hover .ant-picker-cell-inner { background: #e6f4ff; }
+  </style>
+</head>
+<body data-kind="{{ kind }}">
+  <main>
+    {% if kind == "antd" %}
+    <div class="ant-picker">
+      <div class="ant-picker-input"><input id="date-input" value="" placeholder="请选择日期" readonly></div>
+    </div>
+    <div class="ant-picker-dropdown">
+      <div class="ant-picker-panel">
+        <div class="ant-picker-header">
+          <button class="ant-picker-header-prev-btn" data-month="-1">‹</button>
+          <div class="ant-picker-header-view">
+            <button type="button">2026年</button><button type="button">6月</button>
+          </div>
+          <button class="ant-picker-header-next-btn" data-month="1">›</button>
+        </div>
+        <table class="ant-picker-content"><tbody id="antd-days"></tbody></table>
+      </div>
+    </div>
+    {% else %}
+    <div class="el-date-editor el-input">
+      <input id="date-input" class="el-input__inner" value="" placeholder="请选择日期" readonly>
+    </div>
+    <div class="el-date-picker">
+      <div class="el-date-picker__header">
+        <button class="el-picker-panel__icon-btn el-icon-d-arrow-left" data-decade="-1">«</button>
+        <button class="el-picker-panel__icon-btn el-icon-arrow-left" data-month="-1">‹</button>
+        <span class="el-date-picker__header-label" data-open="year">2026 年</span>
+        <span class="el-date-picker__header-label" data-open="month">六月</span>
+        <button class="el-picker-panel__icon-btn el-icon-arrow-right" data-month="1">›</button>
+        <button class="el-picker-panel__icon-btn el-icon-d-arrow-right" data-decade="1">»</button>
+      </div>
+      <div id="element-body"></div>
+    </div>
+    {% endif %}
+  </main>
+
+  <script>
+    const kind = document.body.dataset.kind;
+    let pickerYear = 2026;
+    let pickerMonth = 6;
+    let mode = 'date';
+    const input = document.getElementById('date-input');
+    const monthNames = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+
+    function setPicked(day) {
+      input.value = `${pickerYear}-${String(pickerMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      document.querySelector('.el-date-picker, .ant-picker-dropdown').style.display = 'none';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function renderElement() {
+      const panel = document.querySelector('.el-date-picker');
+      panel.style.display = 'block';
+      panel.querySelectorAll('.el-date-picker__header-label')[0].textContent = `${pickerYear} 年`;
+      panel.querySelectorAll('.el-date-picker__header-label')[1].textContent = monthNames[pickerMonth - 1];
+      const body = document.getElementById('element-body');
+      if (mode === 'year') {
+        let html = '<table class="el-year-table"><tbody><tr>';
+        for (let y = 2020; y < 2032; y++) {
+          if ((y - 2020) % 4 === 0 && y !== 2020) html += '</tr><tr>';
+          html += `<td class="available"><span class="cell" data-year="${y}">${y}</span></td>`;
+        }
+        body.innerHTML = html + '</tr></tbody></table>';
+        return;
+      }
+      if (mode === 'month') {
+        let html = '<table class="el-month-table"><tbody><tr>';
+        for (let m = 1; m <= 12; m++) {
+          if ((m - 1) % 4 === 0 && m !== 1) html += '</tr><tr>';
+          html += `<td class="available"><span class="cell" data-month-pick="${m}">${monthNames[m - 1]}</span></td>`;
+        }
+        body.innerHTML = html + '</tr></tbody></table>';
+        return;
+      }
+      let html = '<table class="el-date-table"><tbody>';
+      for (let r = 0; r < 5; r++) {
+        html += '<tr class="el-date-table__row">';
+        for (let c = 1; c <= 7; c++) {
+          const day = r * 7 + c;
+          const label = kind === 'element-plus'
+            ? `<span class="el-date-table-cell__text" data-day="${day}">${day}</span>`
+            : `<span data-day="${day}">${day}</span>`;
+          html += `<td class="available"><div>${label}</div></td>`;
+        }
+        html += '</tr>';
+      }
+      body.innerHTML = html + '</tbody></table>';
+    }
+
+    function renderAntd() {
+      const panel = document.querySelector('.ant-picker-dropdown');
+      panel.style.display = 'block';
+      const body = document.getElementById('antd-days');
+      let html = '';
+      for (let r = 0; r < 5; r++) {
+        html += '<tr>';
+        for (let c = 1; c <= 7; c++) {
+          const day = r * 7 + c;
+          const date = `${pickerYear}-${String(pickerMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          html += `<td class="ant-picker-cell" title="${date}" data-day="${day}"><div class="ant-picker-cell-inner">${day}</div></td>`;
+        }
+        html += '</tr>';
+      }
+      body.innerHTML = html;
+    }
+
+    input.addEventListener('click', () => {
+      if (kind === 'antd') renderAntd();
+      else { mode = 'date'; renderElement(); }
+    });
+
+    document.addEventListener('click', (event) => {
+      const target = event.target;
+      if (target.dataset.open) { mode = target.dataset.open; renderElement(); }
+      if (target.dataset.year) { pickerYear = Number(target.dataset.year); mode = 'month'; renderElement(); }
+      if (target.dataset.monthPick) { pickerMonth = Number(target.dataset.monthPick); mode = 'date'; renderElement(); }
+      if (target.dataset.day) setPicked(Number(target.dataset.day));
+      if (target.closest('td[title]')) setPicked(Number(target.closest('td[title]').dataset.day));
+    });
+  </script>
+</body>
+</html>

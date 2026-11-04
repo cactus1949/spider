@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>现货出清电量 - 广东电力市场交易系统</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; background: #f0f2f5; color: #333; }
+        .header {
+            background: #1e3c72; color: #fff; padding: 0 24px; height: 56px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .header .title { font-size: 16px; font-weight: bold; }
+        .header .user { font-size: 13px; }
+        .header .user a { color: #cfe2ff; margin-left: 12px; text-decoration: none; }
+
+        .layout { display: flex; min-height: calc(100vh - 56px); }
+        .sidebar { width: 200px; flex-shrink: 0; background: #2c3e50; color: #ecf0f1; padding: 12px 0; font-size: 14px; }
+        .sidebar .group-title { padding: 10px 18px 6px; color: #95a5a6; font-size: 12px; letter-spacing: 1px; }
+        .sidebar a { display: block; padding: 10px 18px 10px 30px; color: #ecf0f1; text-decoration: none; border-left: 3px solid transparent; }
+        .sidebar a:hover { background: #34495e; }
+        .sidebar a.active { background: #34495e; border-left-color: #3498db; color: #fff; font-weight: bold; }
+
+        .main { flex: 1; padding: 18px 24px; min-width: 0; }
+        .toolbar {
+            background: #fff; padding: 14px 18px; border-radius: 4px; margin-bottom: 14px;
+            display: flex; align-items: center; gap: 12px; font-size: 13px;
+        }
+        .toolbar label { color: #555; }
+        .toolbar input[type=date] {
+            height: 30px; border: 1px solid #d0d0d0; border-radius: 3px; padding: 0 8px; font-size: 13px;
+        }
+        .btn { height: 30px; padding: 0 16px; border: none; border-radius: 3px; cursor: pointer; font-size: 13px; text-decoration: none; display: inline-flex; align-items: center; }
+        .btn-primary { background: #2a5298; color: #fff; }
+        .btn-export { background: #28a745; color: #fff; }
+
+        .table-box { background: #fff; border-radius: 4px; padding: 16px; }
+        .table-box .table-title { font-size: 14px; font-weight: bold; margin-bottom: 12px; color: #333; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #eee; font-variant-numeric: tabular-nums; }
+        th:first-child, td:first-child { text-align: left; }
+        thead th { background: #f5f7fa; color: #555; font-weight: 600; }
+        tbody tr:hover { background: #fafbfc; }
+        tbody tr.total { background: #f5f7fa; font-weight: bold; }
+
+        .empty-box {
+            background: #fff; border-radius: 4px; padding: 80px 20px;
+            text-align: center; color: #999; font-size: 14px;
+        }
+        .empty-box .icon { font-size: 42px; color: #d0d0d0; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">广东电力市场交易系统 / 现货出清电量</div>
+        <div class="user">
+            欢迎，<b>{{ username }}</b>
+            <a href="/logout">退出登录</a>
+        </div>
+    </div>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="group-title">账单中心</div>
+            <a href="/daily_overview">日清算概览</a>
+            <a href="/monthly_settlement">月清算汇总</a>
+            <a href="/contract_power">合同电量</a>
+            <div class="group-title">数据查询</div>
+            <a href="/spot_clearance" class="active">现货出清电量</a>
+            <a href="/market_demand">市场用电需求</a>
+        </aside>
+
+        <main class="main">
+            <form class="toolbar" method="get" action="/spot_clearance">
+                <label>交易日期:</label>
+                <input type="date" name="date" value="{{ date }}">
+                <button type="submit" class="btn btn-primary">查询</button>
+                {% if available %}
+                <a class="btn btn-export" href="/spot_clearance/export?date={{ date }}">导出 Excel</a>
+                {% endif %}
+                <span style="margin-left:auto; color:#888; font-size:12px;">
+                    可查范围：2026-06-20 ~ 2026-06-24
+                </span>
+            </form>
+
+            {% if available %}
+            <div class="table-box">
+                <div class="table-title">{{ date }} 现货出清电量（按小时）</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>时刻</th>
+                            <th>电量 (MWh)</th>
+                            <th>开机台数 (台)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in rows %}
+                        <tr class="{% if r.time == '合计' %}total{% endif %}">
+                            <td>{{ r.time }}</td>
+                            <td>{{ "%.2f"|format(r.energy) }}</td>
+                            <td>{{ r.units }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-box">
+                <div class="icon">∅</div>
+                <div>所选日期 <b>{{ date }}</b> 暂无数据</div>
+                <div style="margin-top:6px; font-size:12px;">仅 2026-06-20 至 2026-06-24 有现货出清数据</div>
+            </div>
+            {% endif %}
+        </main>
+    </div>
+</body>
+</html>

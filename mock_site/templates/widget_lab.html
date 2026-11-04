@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Widget Lab - select / daterange</title>
+  <style>
+    body { font-family: Arial, "Microsoft YaHei", sans-serif; padding: 32px; }
+    section { margin-bottom: 28px; position: relative; }
+    .el-select, .ant-select { display: inline-block; width: 220px; position: relative; }
+    .el-input__inner, .ant-select-selector { display: block; height: 32px; line-height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 4px; cursor: pointer; box-sizing: border-box; width: 100%; }
+    .el-select-dropdown, .ant-select-dropdown { display: none; position: absolute; top: 36px; left: 0; width: 220px; background: #fff; border: 1px solid #dcdfe6; z-index: 10; }
+    .el-select-dropdown__item, .ant-select-item-option { padding: 6px 10px; cursor: pointer; }
+    .el-select-dropdown__item:hover, .ant-select-item-option:hover { background: #f5f7fa; }
+    .open { display: block; }
+    .el-range-editor { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dcdfe6; padding: 2px 8px; }
+    .el-range-input { width: 120px; height: 28px; border: 0; outline: none; }
+  </style>
+</head>
+<body>
+  <section id="hover-menu-section">
+    <ul class="ant-menu" style="list-style:none;padding:0;margin:0">
+      <li class="ant-menu-submenu" id="hover-submenu" style="display:inline-block;position:relative">
+        <div class="ant-menu-submenu-title" style="padding:6px 16px;border:1px solid #dcdfe6;cursor:pointer">资讯公告</div>
+        <ul class="ant-menu-sub" id="hover-sub" style="display:none;position:absolute;top:34px;left:0;list-style:none;padding:4px 0;margin:0;background:#fff;border:1px solid #dcdfe6;z-index:20;width:160px">
+          <li class="ant-menu-item" style="padding:6px 16px">市场运行报告</li>
+        </ul>
+      </li>
+    </ul>
+  </section>
+  <section id="el-select-section">
+    <label>Element select</label>
+    <div class="el-select" id="el-select">
+      <input class="el-input__inner" id="el-select-input" readonly placeholder="请选择">
+      <ul class="el-select-dropdown" id="el-select-dropdown">
+        <li class="el-select-dropdown__item"><span>日前市场</span></li>
+        <li class="el-select-dropdown__item"><span>实时市场</span></li>
+        <li class="el-select-dropdown__item"><span>实时市场10</span></li>
+      </ul>
+    </div>
+  </section>
+  <section id="ant-select-section">
+    <label>Ant Design select</label>
+    <div class="ant-select" id="ant-select">
+      <div class="ant-select-selector"><span class="ant-select-selection-item" id="ant-select-value">请选择</span></div>
+      <div class="ant-select-dropdown" id="ant-select-dropdown">
+        <div class="ant-select-item ant-select-item-option"><div class="ant-select-item-option-content">广州</div></div>
+        <div class="ant-select-item ant-select-item-option"><div class="ant-select-item-option-content">深圳</div></div>
+      </div>
+    </div>
+  </section>
+  <section id="range-section">
+    <label>Element daterange</label>
+    <div class="el-date-editor el-range-editor" id="range">
+      <input class="el-range-input" id="range-start" placeholder="开始日期">
+      <span class="el-range-separator">至</span>
+      <input class="el-range-input" id="range-end" placeholder="结束日期">
+    </div>
+    <div id="range-committed"></div>
+  </section>
+  <script>
+    // 行为记录：供测试/指纹脚本判断是否走了真实指针与键盘。
+    const log = window.__inputLog = { events: [], committed: {} };
+    const t = () => Math.round(performance.now());
+    for (const type of ['pointerdown', 'pointerup', 'pointermove', 'mousemove', 'keydown', 'keyup', 'input']) {
+      document.addEventListener(type, (e) => {
+        log.events.push({ type, t: t(), trusted: e.isTrusted, key: e.key || null,
+          target: e.target && e.target.id || null, inputType: e.inputType || null });
+      }, true);
+    }
+    const sub = document.getElementById('hover-submenu');
+    sub.addEventListener('mouseenter', () => { document.getElementById('hover-sub').style.display = 'block'; });
+    sub.addEventListener('mouseleave', () => { document.getElementById('hover-sub').style.display = 'none'; });
+    const toggle = (trigger, dropdown) => trigger.addEventListener('click', (e) => {
+      e.stopPropagation(); dropdown.classList.toggle('open');
+    });
+    const elDrop = document.getElementById('el-select-dropdown');
+    toggle(document.getElementById('el-select-input'), elDrop);
+    elDrop.querySelectorAll('.el-select-dropdown__item').forEach((li) => li.addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('el-select-input').value = li.textContent.trim();
+      elDrop.classList.remove('open');
+    }));
+    const antDrop = document.getElementById('ant-select-dropdown');
+    toggle(document.querySelector('#ant-select .ant-select-selector'), antDrop);
+    antDrop.querySelectorAll('.ant-select-item-option').forEach((item) => item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      document.getElementById('ant-select-value').textContent = item.textContent.trim();
+      antDrop.classList.remove('open');
+    }));
+    document.addEventListener('click', () => { elDrop.classList.remove('open'); antDrop.classList.remove('open'); });
+    for (const id of ['range-start', 'range-end']) {
+      document.getElementById(id).addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          log.committed[id] = e.target.value;
+          document.getElementById('range-committed').textContent = JSON.stringify(log.committed);
+        }
+      });
+    }
+  </script>
+</body>
+</html>

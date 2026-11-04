@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>广东电力市场交易系统 Mock</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Microsoft YaHei", Arial, sans-serif; color: #17233d; background: #f5f7fb; }
+    .topbar { height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; color: #fff; background: #071346; }
+    .layout { display: flex; min-height: calc(100vh - 54px); }
+    .el-menu { width: 230px; margin: 0; padding: 12px 0; list-style: none; background: #fff; border-right: 1px solid #e6e8ef; }
+    .el-submenu__title, .el-menu-item { height: 42px; line-height: 42px; padding: 0 20px; cursor: pointer; color: rgba(7, 19, 70, 0.72); }
+    .el-menu-item { padding-left: 42px; }
+    .el-submenu__title:hover, .el-menu-item:hover { background: #eef4ff; color: #1d6fff; }
+    .main { flex: 1; min-width: 0; padding: 18px; }
+    .portal-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 16px; max-width: 900px; }
+    .portal-card { border: 0; background: #fff; border-radius: 6px; padding: 22px; text-align: left; cursor: pointer; box-shadow: 0 2px 8px rgba(7, 19, 70, 0.08); font-size: 18px; }
+    .portal-card small { display: block; margin-top: 8px; color: #8a8c95; font-size: 13px; }
+    .portal-card .titleName { display: block; color: inherit; text-decoration: none; font-size: 18px; }
+    .portal-card-muted { cursor: default; opacity: 0.72; }
+    .login-shell { min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg, #071346, #1d6fff); }
+    .login-box { width: 420px; background: #fff; border-radius: 6px; padding: 30px; box-shadow: 0 18px 40px rgba(0,0,0,.22); }
+    .login-box h1 { margin: 0 0 22px; font-size: 20px; text-align: center; }
+    .ant-btn, .el-button { height: 32px; padding: 0 16px; border: 1px solid #1d6fff; border-radius: 4px; color: #fff; background: #1d6fff; cursor: pointer; }
+    .ant-btn { width: 100%; height: 38px; font-size: 15px; }
+    .cert-tab { margin: 12px 0; padding: 8px 12px; border: 1px solid #d8deea; border-radius: 4px; cursor: pointer; display: inline-block; }
+    .form-row { margin: 14px 0; }
+    .el-input__inner { height: 32px; width: 210px; padding: 0 10px; border: 1px solid #d8deea; border-radius: 4px; background: #fff; }
+    .captcha { height: 36px; vertical-align: middle; border: 1px solid #d8deea; border-radius: 3px; cursor: pointer; }
+    .dateBox { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .style-box { margin-bottom: 16px; background: #fff; border-radius: 4px; box-shadow: 0 1px 5px rgba(7,19,70,.08); }
+    .style-box-head { height: 46px; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #edf0f6; }
+    .style-box-head .title { font-size: 15px; font-weight: 600; }
+    .rightBut { display: flex; align-items: center; gap: 10px; }
+    .exportBtnColor { background: #15c287; border-color: #15c287; }
+    .copyBtnColor { background: #4080ff; border-color: #4080ff; }
+    .btnList { display: inline-flex; gap: 8px; }
+    .btnStyle { min-width: 42px; height: 26px; line-height: 26px; text-align: center; border-radius: 3px; background: #edf2ff; color: #4080ff; cursor: pointer; }
+    .actvieBtn { color: #fff; background: #4080ff; }
+    .box-body { padding: 16px; min-height: 130px; }
+    .headBox { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+    .headBtnBox, .head-list { display: flex; gap: 10px; padding: 0; margin: 0; list-style: none; }
+    .headBtn, .head-item { padding: 7px 18px; border-radius: 3px; background: #edf2ff; color: #4080ff; cursor: pointer; }
+    .headBtnActive { color: #fff; background: #4080ff; }
+    .elx-table--body, table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { border-bottom: 1px solid #edf0f6; padding: 8px; text-align: left; font-size: 13px; }
+    .overview-top { margin-bottom: 14px; padding: 14px; background: #fff; border-radius: 4px; }
+    .overview-fuc-box { display: flex; align-items: center; gap: 12px; }
+    .overview-fuc-item { display: flex; align-items: center; gap: 8px; }
+    .el-date-picker { position: absolute; z-index: 99; width: 322px; padding: 12px; background: #fff; border: 1px solid #dcdfe6; border-radius: 4px; box-shadow: 0 2px 12px rgba(0,0,0,.1); }
+    .el-date-picker__header { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px; }
+    .el-date-picker__header-label { cursor: pointer; font-weight: 600; }
+    .el-picker-panel__icon-btn { border: 0; background: transparent; cursor: pointer; color: #606266; }
+    .el-date-table, .el-year-table, .el-month-table { width: 100%; border-collapse: collapse; }
+    .el-date-table td, .el-year-table td, .el-month-table td { text-align: center; padding: 5px; cursor: pointer; border: 0; }
+    .el-date-table span, .cell { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px; border-radius: 14px; }
+    td.available:hover span, .cell:hover { background: #ecf5ff; color: #409eff; }
+    td.current span { color: #fff; background: #409eff; }
+  </style>
+</head>
+<body data-app="{{ app }}" data-doc-valid="{{ doc_valid|default('1') }}">
+{% if app == "portal" %}
+  <div class="login-shell" id="loginShell">
+    <div class="login-box">
+      <h1>广东电力市场交易系统</h1>
+      <button class="ant-btn" id="openLogin">登 录</button>
+      <div id="certPane" style="display:none;">
+        <div class="cert-tab">证书登录</div>
+        <div class="form-row"><input class="el-input__inner" type="password" placeholder="证书密码 / PIN"></div>
+        <div class="form-row">
+          <input id="validateOnly_verifyCode" class="el-input__inner" style="width:140px;" placeholder="验证码">
+          <img class="captcha" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='36'%3E%3Crect width='90' height='36' fill='%23f5f7fa'/%3E%3Ctext x='18' y='25' font-size='22' fill='%23071346'%3E1234%3C/text%3E%3C/svg%3E">
+        </div>
+        <button class="ant-btn" id="doLogin">立即登录</button>
+      </div>
+    </div>
+  </div>
+  <div id="portalApp" style="display:none;">
+    <div class="topbar"><b>广东电力市场交易系统 / 工作台</b><span>陈道翔，您好</span></div>
+    <div class="layout">
+      <ul class="el-menu"><li class="el-menu-item">工作台</li></ul>
+      <main class="main">
+        <div class="portal-grid">
+          {% if mock_mode == "stale" %}
+          <a class="portal-card" id="openStaleSpot" href="/pfxh/stc/stale?code=mock" target="_blank">现货交易<small>签名失效演练</small></a>
+          {% else %}
+          <a class="portal-card" href="/pfxh/stc/check?code=mock" target="_blank">现货交易<small>负荷信息、节点电价、披露中心</small></a>
+          <a class="portal-card" href="/pfjs/stc/check?code=mock" target="_blank">结算管理<small>账单中心、日清算概览</small></a>
+          <div class="portal-card">
+            <a class="titleName" href="/pfjy/calendar?code=mock" target="_blank">中长期交易</a>
+            <small>交易日历。月 / 周 / 日，采集走周视图</small>
+          </div>
+          <div class="portal-card portal-card-muted">
+            <span class="titleName">中长期交易（灾备）</span>
+            <small>精确文本「中长期交易」不会点到这里</small>
+          </div>
+          {% endif %}
+        </div>
+      </main>
+    </div>
+  </div>
+{% elif app == "spot" %}
+  <div class="topbar"><b>广东电力市场交易系统 / 现货交易</b><span>Element UI Mock</span></div>
+  <div class="layout">
+    <ul class="el-menu">
+      <li class="el-submenu"><div class="el-submenu__title">组织中心</div>
+        <ul class="el-menu"><li class="el-menu-item">日前节点电价查询</li><li class="el-menu-item">实时节点电价查询</li></ul>
+      </li>
+      <li class="el-submenu"><div class="el-submenu__title">披露中心</div>
+        <ul class="el-menu"><li class="el-menu-item">信息披露查询</li></ul>
+      </li>
+    </ul>
+    <main class="main">
+      <div class="dateBox"><span>交易日期</span><input class="el-input__inner" readonly value="2026-06-29"></div>
+      <section class="style-box">
+        <div class="style-box-head"><div class="title"><span>负荷信息</span></div><div class="rightBut"><button class="el-button exportBtnColor">导出</button></div></div>
+        <div class="box-body">市场用电信息曲线</div>
+      </section>
+      <section class="style-box">
+        <div class="style-box-head"><div class="title"><span>现货分时分类型出清电量</span></div><div class="rightBut"><div class="btnList"><span class="btnStyle actvieBtn">日前</span><span class="btnStyle">实时</span></div><button class="el-button exportBtnColor">导出</button></div></div>
+        <div class="box-body">出清电量趋势</div>
+      </section>
+      <section class="style-box">
+        <div class="style-box-head"><div class="title">日前节点电价查询</div><div class="rightBut"><button class="el-button exportBtnColor">导出</button><button class="el-button copyBtnColor">复制</button></div></div>
+        <div class="box-body"><table><tbody><tr><td>2026-06-29</td><td>节点A</td><td>392.15</td></tr></tbody></table></div>
+      </section>
+      <section class="style-box">
+        <div class="style-box-head"><div class="title">实时节点电价查询</div><div class="rightBut"><button class="el-button exportBtnColor">导出</button></div></div>
+        <div class="box-body"><table><tbody><tr><td>2026-06-29</td><td>节点A</td><td>401.23</td></tr></tbody></table></div>
+      </section>
+      <section class="infoDisclosureBox">
+        <div class="headBox">
+          <ul class="headBtnBox"><li class="headBtn headBtnActive">预测</li><li class="headBtn">实际</li></ul>
+          <ul class="head-list"><li class="head-item">查看详情</li><li class="head-item">全部导出</li></ul>
+        </div>
+        <table class="elx-table--body"><tbody><tr><td>负荷信息</td><td>预测/实际数据</td></tr></tbody></table>
+      </section>
+    </main>
+  </div>
+{% elif app == "settlement" %}
+  <div class="topbar"><b>广东电力市场交易系统 / 结算管理</b><span>Element UI Mock</span></div>
+  <div class="layout">
+    <ul class="el-menu">
+      <li class="el-submenu"><div class="el-submenu__title">账单中心</div>
+        <ul class="el-menu"><li class="el-submenu"><div class="el-submenu__title">日清算概览</div><ul class="el-menu"><li class="el-menu-item">日清算概览</li></ul></li></ul>
+      </li>
+    </ul>
+    <main class="main">
+      <div class="overview-top">
+        <div class="overview-fuc-box">
+          <div class="overview-fuc-item"><div>结算日</div><div class="el-date-editor overview-input el-input el-input--small"><input class="el-input__inner" readonly placeholder="选择选择结算日"></div></div>
+          <div class="overview-fuc-item"><button class="el-button">查询</button><button class="el-button exportBtnColor">导出</button></div>
+        </div>
+      </div>
+      <table><thead><tr><th>结算日</th><th>市场化电量</th><th>电费</th></tr></thead><tbody><tr><td>2026-06-29</td><td>12345</td><td>6789</td></tr></tbody></table>
+    </main>
+  </div>
+{% elif app == "stale" %}
+  <div class="topbar"><b>广东电力市场交易系统 / 现货交易</b><span>签名失效演练</span></div>
+  <div class="layout">
+    <ul class="el-menu">
+      <li class="el-submenu"><div class="el-submenu__title">组织中心</div>
+        <ul class="el-menu"><li class="el-menu-item" id="staleMenuDayahead">日前节点电价查询</li></ul>
+      </li>
+    </ul>
+    <main class="main">
+      <div class="dateBox"><span>交易日期</span><input class="el-input__inner" readonly value="2026-06-29"></div>
+      <div id="stalePanel"></div>
+      <div id="staleHint" style="margin-top: 8px; color: #8a8c95; font-size: 13px;"></div>
+    </main>
+  </div>
+{% endif %}
+<script>
+const monthNames = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+let pickerYear = 2026;
+let pickerMonth = 6;
+let activeInput = null;
+
+function downloadFile(name) {
+  const blob = new Blob(['mock export\n'], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name || 'mock-export.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function ensurePicker() {
+  let panel = document.querySelector('.el-date-picker');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'el-date-picker';
+    document.body.appendChild(panel);
+  }
+  return panel;
+}
+
+function renderPicker(mode='date') {
+  const panel = ensurePicker();
+  const left = activeInput ? activeInput.getBoundingClientRect().left + window.scrollX : 260;
+  const top = activeInput ? activeInput.getBoundingClientRect().bottom + window.scrollY + 6 : 90;
+  panel.style.left = left + 'px';
+  panel.style.top = top + 'px';
+  panel.style.display = 'block';
+  let html = `<div class="el-date-picker__header">
+    <button class="el-picker-panel__icon-btn el-icon-d-arrow-left" data-decade="-1">«</button>
+    <button class="el-picker-panel__icon-btn el-icon-arrow-left" data-month="-1">‹</button>
+    <span class="el-date-picker__header-label" data-open="year">${pickerYear} 年</span>
+    <span class="el-date-picker__header-label" data-open="month">${monthNames[pickerMonth-1]}</span>
+    <button class="el-picker-panel__icon-btn el-icon-arrow-right" data-month="1">›</button>
+    <button class="el-picker-panel__icon-btn el-icon-d-arrow-right" data-decade="1">»</button>
+  </div>`;
+  if (mode === 'year') {
+    html += '<table class="el-year-table"><tbody>';
+    for (let r = 0; r < 3; r++) {
+      html += '<tr>';
+      for (let c = 0; c < 4; c++) {
+        const y = 2020 + r * 4 + c;
+        html += `<td class="available"><a class="cell" data-year="${y}">${y}</a></td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  } else if (mode === 'month') {
+    html += '<table class="el-month-table"><tbody>';
+    for (let r = 0; r < 3; r++) {
+      html += '<tr>';
+      for (let c = 0; c < 4; c++) {
+        const m = r * 4 + c + 1;
+        html += `<td class="${m === pickerMonth ? 'current' : ''}"><div><a class="cell" data-month-pick="${m}">${monthNames[m-1]}</a></div></td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  } else {
+    html += '<table class="el-date-table"><tbody>';
+    for (let r = 0; r < 6; r++) {
+      html += '<tr class="el-date-table__row">';
+      for (let c = 1; c <= 7; c++) {
+        const d = r * 7 + c;
+        const cls = d <= 31 ? 'available' : 'next-month';
+        html += `<td class="${cls}"><div><span data-day="${d <= 31 ? d : d - 31}">${d <= 31 ? d : d - 31}</span></div></td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+  }
+  panel.innerHTML = html;
+}
+
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (target.id === 'openLogin') document.getElementById('certPane').style.display = 'block';
+  if (target.id === 'doLogin') {
+    localStorage.setItem('pfxh-token', 'mock-token');
+    localStorage.setItem('pfxh-userInfo', '{"screenName":"mock"}');
+    document.getElementById('loginShell').style.display = 'none';
+    document.getElementById('portalApp').style.display = 'block';
+    history.replaceState(null, '', '/portal/#/powerEnterprise');
+  }
+  if (target.matches('.exportBtnColor, .head-item')) {
+    if (document.body.dataset.app === 'stale' && !window.__staleReady) {
+      const hint = document.getElementById('staleHint');
+      if (hint) hint.textContent = '数据未加载，导出被拒绝';
+      return;
+    }
+    downloadFile((target.textContent || '').includes('全部导出') ? '信息披露查询.xlsx' : 'mock-export.xlsx');
+  }
+  if (target.matches('.btnStyle')) {
+    document.querySelectorAll('.btnStyle').forEach(x => x.classList.remove('actvieBtn'));
+    target.classList.add('actvieBtn');
+  }
+  if (target.matches('.headBtn')) {
+    document.querySelectorAll('.headBtn').forEach(x => x.classList.remove('headBtnActive'));
+    target.classList.add('headBtnActive');
+  }
+  if (target.matches('.el-input__inner') && !target.closest('#loginShell')) {
+    activeInput = target;
+    renderPicker('date');
+  }
+  if (target.dataset.open) renderPicker(target.dataset.open);
+  if (target.dataset.year) {
+    pickerYear = Number(target.dataset.year);
+    renderPicker('month');
+  }
+  if (target.dataset.monthPick) {
+    pickerMonth = Number(target.dataset.monthPick);
+    renderPicker('date');
+  }
+  if (target.dataset.day && activeInput) {
+    const day = String(target.dataset.day).padStart(2, '0');
+    activeInput.value = `${pickerYear}-${String(pickerMonth).padStart(2, '0')}-${day}`;
+    document.querySelector('.el-date-picker').style.display = 'none';
+    document.dispatchEvent(new CustomEvent('mock-date-picked', { detail: { value: activeInput.value } }));
+  }
+  if (target.dataset.month) {
+    pickerMonth += Number(target.dataset.month);
+    if (pickerMonth < 1) { pickerMonth = 12; pickerYear -= 1; }
+    if (pickerMonth > 12) { pickerMonth = 1; pickerYear += 1; }
+    renderPicker('date');
+  }
+  if (target.dataset.decade) {
+    pickerYear += Number(target.dataset.decade) * 10;
+    renderPicker('year');
+  }
+});
+
+if (location.hash.includes('powerEnterprise')) {
+  const loginShell = document.getElementById('loginShell');
+  const portalApp = document.getElementById('portalApp');
+  if (loginShell && portalApp) {
+    loginShell.style.display = 'none';
+    portalApp.style.display = 'block';
+  }
+}
+
+const openStaleSpot = document.getElementById('openStaleSpot');
+if (openStaleSpot) {
+  openStaleSpot.addEventListener('pointerdown', () => {
+    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const url = new URL(openStaleSpot.href, location.origin);
+    url.searchParams.set('doc', id);
+    openStaleSpot.href = `${url.pathname}${url.search}`;
+  });
+}
+
+if (document.body.dataset.app === 'stale') {
+  const docKey = new URLSearchParams(location.search).get('doc') || 'default';
+  const storedKey = `mock_stale_doc_valid:${docKey}`;
+  const stored = sessionStorage.getItem(storedKey);
+  let docValid;
+  if (stored === '0' || stored === '1') {
+    docValid = stored === '1';
+  } else {
+    docValid = document.body.dataset.docValid === '1';
+    sessionStorage.setItem(storedKey, docValid ? '1' : '0');
+  }
+  const docId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const api = '/pfxh/qctc-pm-trade-market-out-zzzx/daNodePriceQuery';
+  const panel = document.getElementById('stalePanel');
+  const hint = document.getElementById('staleHint');
+  let selectedDate = '2026-06-29';
+  window.__staleReady = false;
+
+  async function loadGrid(value) {
+    selectedDate = value || selectedDate;
+    const response = await fetch(
+      `${api}/getFirstAndLastTen?valid=${docValid ? 1 : 0}&date_str=${encodeURIComponent(selectedDate)}&doc=${docId}`
+    );
+    window.__staleReady = response.ok;
+    hint.textContent = response.ok ? `查询成功：${selectedDate}` : `查询失败：HTTP ${response.status}`;
+  }
+
+  async function initTree() {
+    panel.innerHTML = '';
+    hint.textContent = '';
+    window.__staleReady = false;
+    const response = await fetch(`${api}/getJddjTree?valid=${docValid ? 1 : 0}&doc=${docId}`);
+    if (!response.ok) {
+      hint.textContent = `初始化失败：HTTP ${response.status}（该文档的请求签名已失效）`;
+      return;
+    }
+    await response.json();
+    panel.innerHTML = `<section class="style-box">
+        <div class="style-box-head"><div class="title">日前节点电价查询</div>
+          <div class="rightBut"><button class="el-button exportBtnColor">导出</button></div></div>
+        <div class="box-body"><table class="elx-table--body"><tbody>
+          <tr><td>${selectedDate}</td><td>节点A</td><td>392.15</td></tr>
+        </tbody></table></div>
+      </section>`;
+    await loadGrid(selectedDate);
+  }
+
+  document.getElementById('staleMenuDayahead').addEventListener('click', initTree);
+  document.addEventListener('mock-date-picked', (event) => loadGrid(event.detail.value));
+}
+</script>
+</body>
+</html>

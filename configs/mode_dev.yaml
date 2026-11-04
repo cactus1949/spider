@@ -1,0 +1,12 @@
+# 开发模式：启用所有模块 + Web UI（用于 Electron 前端联调）
+inherits: common.yaml
+
+deploy_mode: offline
+modules:
+  crawler: true
+  network: true
+  scheduler: true
+  local_landing: true
+  alert_gateway: false
+  agent: false
+  web_ui: true

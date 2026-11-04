@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>月清算汇总 - 广东电力市场交易系统</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; background: #f0f2f5; color: #333; }
+        .header {
+            background: #1e3c72; color: #fff; padding: 0 24px; height: 56px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .header .title { font-size: 16px; font-weight: bold; }
+        .header .user { font-size: 13px; }
+        .header .user a { color: #cfe2ff; margin-left: 12px; text-decoration: none; }
+
+        .layout { display: flex; min-height: calc(100vh - 56px); }
+        .sidebar { width: 200px; flex-shrink: 0; background: #2c3e50; color: #ecf0f1; padding: 12px 0; font-size: 14px; }
+        .sidebar .group-title { padding: 10px 18px 6px; color: #95a5a6; font-size: 12px; letter-spacing: 1px; }
+        .sidebar a { display: block; padding: 10px 18px 10px 30px; color: #ecf0f1; text-decoration: none; border-left: 3px solid transparent; }
+        .sidebar a:hover { background: #34495e; }
+        .sidebar a.active { background: #34495e; border-left-color: #3498db; color: #fff; font-weight: bold; }
+
+        .main { flex: 1; padding: 18px 24px; min-width: 0; }
+
+        .toolbar {
+            background: #fff; padding: 14px 18px; border-radius: 4px; margin-bottom: 14px;
+            display: flex; align-items: center; gap: 12px; font-size: 13px;
+        }
+        .toolbar label { color: #555; }
+        .toolbar select, .toolbar input {
+            height: 30px; border: 1px solid #d0d0d0; border-radius: 3px; padding: 0 8px; font-size: 13px;
+        }
+        .btn { height: 30px; padding: 0 16px; border: none; border-radius: 3px; cursor: pointer; font-size: 13px; }
+        .btn-primary { background: #2a5298; color: #fff; }
+        .btn-export { background: #28a745; color: #fff; }
+        .btn-export:disabled { background: #95d5a3; cursor: not-allowed; }
+
+        .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 14px; }
+        .summary-card { background: #fff; padding: 18px; border-radius: 4px; border-left: 4px solid #2a5298; }
+        .summary-card.green { border-left-color: #28a745; }
+        .summary-card.orange { border-left-color: #f39c12; }
+        .summary-card.purple { border-left-color: #8e44ad; }
+        .summary-card .label { font-size: 13px; color: #888; margin-bottom: 8px; }
+        .summary-card .value { font-size: 22px; font-weight: bold; color: #333; }
+        .summary-card .unit { font-size: 12px; color: #999; margin-left: 4px; }
+
+        /* 月度趋势柱状图 */
+        .trend-box { background: #fff; border-radius: 4px; padding: 16px; margin-bottom: 14px; }
+        .trend-title { font-size: 14px; font-weight: bold; margin-bottom: 14px; color: #333; }
+        .trend-bars { display: flex; align-items: flex-end; height: 160px; gap: 8px; padding: 8px 4px 0; border-bottom: 1px solid #e6e6e6; }
+        .trend-col { flex: 1; display: flex; flex-direction: column; align-items: center; }
+        .trend-bar {
+            width: 100%; max-width: 36px;
+            background: linear-gradient(180deg, #5dade2, #2a5298);
+            border-radius: 3px 3px 0 0;
+            position: relative;
+        }
+        .trend-bar:hover { filter: brightness(1.1); }
+        .trend-label { font-size: 11px; color: #666; margin-top: 6px; }
+
+        .table-box { background: #fff; border-radius: 4px; padding: 16px; }
+        .table-box .table-title { font-size: 14px; font-weight: bold; margin-bottom: 12px; color: #333; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #eee; }
+        th:first-child, td:first-child { text-align: left; }
+        thead th { background: #f5f7fa; color: #555; font-weight: 600; }
+        tbody tr:hover { background: #fafbfc; }
+        .neg { color: #c0392b; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+        .tag-green { background: #e8f5e9; color: #2e7d32; }
+        .tag-orange { background: #fff3e0; color: #e65100; }
+
+        #toast {
+            position: fixed; top: 20px; right: 20px;
+            background: #333; color: #fff; padding: 10px 16px; border-radius: 4px;
+            font-size: 13px; display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">广东电力市场交易系统 / 月清算汇总</div>
+        <div class="user">
+            欢迎，<b>{{ username }}</b>
+            <a href="/logout">退出登录</a>
+        </div>
+    </div>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="group-title">账单中心</div>
+            <a href="/daily_overview">日清算概览</a>
+            <a href="/monthly_settlement" class="active">月清算汇总</a>
+            <a href="/contract_power">合同电量</a>
+            <div class="group-title">数据查询</div>
+            <a href="/spot_clearance">现货出清电量</a>
+            <a href="/market_demand">市场用电需求</a>
+        </aside>
+
+        <main class="main">
+            <div class="toolbar">
+                <label>结算年度:</label>
+                <select id="year" onchange="changeYear(this.value)">
+                    {% for y in [year-2, year-1, year] %}
+                    <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}年</option>
+                    {% endfor %}
+                </select>
+                <button class="btn btn-primary" onclick="location.reload()">查询</button>
+                <button class="btn btn-export" id="btnExport" onclick="exportMonthly()">导出 Excel</button>
+            </div>
+
+            <div class="summary-grid">
+                <div class="summary-card">
+                    <div class="label">年度市场化电量</div>
+                    <div class="value">{{ "%.0f"|format(summary.total_energy) }}<span class="unit">兆瓦时</span></div>
+                </div>
+                <div class="summary-card green">
+                    <div class="label">年度用户侧电费</div>
+                    <div class="value">{{ "%.2f"|format(summary.total_user_fee) }}<span class="unit">万元</span></div>
+                </div>
+                <div class="summary-card orange">
+                    <div class="label">年度发电侧电费</div>
+                    <div class="value">{{ "%.2f"|format(summary.total_gen_fee) }}<span class="unit">万元</span></div>
+                </div>
+                <div class="summary-card purple">
+                    <div class="label">平均电价</div>
+                    <div class="value">{{ "%.2f"|format(summary.avg_price) }}<span class="unit">元/兆瓦时</span></div>
+                </div>
+            </div>
+
+            <div class="trend-box">
+                <div class="trend-title">月度市场化电量趋势</div>
+                <div class="trend-bars">
+                    {% set max_e = rows | map(attribute='market_energy') | max %}
+                    {% for r in rows %}
+                    <div class="trend-col">
+                        <div class="trend-bar" style="height: {{ (r.market_energy / max_e * 140) | round(0) }}px;" title="{{ r.month }}: {{ '%.0f'|format(r.market_energy) }}"></div>
+                        <div class="trend-label">{{ r.month[5:] }}月</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <div class="table-box">
+                <div class="table-title">月度结算明细</div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>月份</th>
+                            <th>市场化电量(兆瓦时)</th>
+                            <th>用户侧电费(万元)</th>
+                            <th>发电侧电费(万元)</th>
+                            <th>平均电价(元/兆瓦时)</th>
+                            <th>同比增长(%)</th>
+                            <th>结算状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in rows %}
+                        <tr>
+                            <td>{{ r.month }}</td>
+                            <td>{{ "%.2f"|format(r.market_energy) }}</td>
+                            <td>{{ "%.2f"|format(r.user_fee) }}</td>
+                            <td>{{ "%.2f"|format(r.gen_fee) }}</td>
+                            <td>{{ "%.2f"|format(r.avg_price) }}</td>
+                            <td class="{% if r.yoy_growth < 0 %}neg{% endif %}">{{ "%.2f"|format(r.yoy_growth) }}</td>
+                            <td>
+                                {% if r.settle_status == '已结算' %}
+                                <span class="tag tag-green">{{ r.settle_status }}</span>
+                                {% else %}
+                                <span class="tag tag-orange">{{ r.settle_status }}</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <div id="toast"></div>
+
+    <script>
+        const TOKEN = "{{ token }}";
+        try { localStorage.setItem("token", TOKEN); } catch (e) {}
+
+        function showToast(msg) {
+            const t = document.getElementById("toast");
+            t.textContent = msg;
+            t.style.display = "block";
+            setTimeout(() => { t.style.display = "none"; }, 2500);
+        }
+
+        function changeYear(y) {
+            location.href = "/monthly_settlement?year=" + y;
+        }
+
+        async function exportMonthly() {
+            const btn = document.getElementById("btnExport");
+            const year = document.getElementById("year").value;
+
+            btn.disabled = true;
+            btn.textContent = "导出中...";
+
+            try {
+                const token = localStorage.getItem("token") || TOKEN;
+                const formData = new URLSearchParams();
+                formData.append("year", year);
+
+                const resp = await fetch("/api/export_monthly", {
+                    method: "POST",
+                    headers: {
+                        "Authorization": "Bearer " + token,
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    },
+                    body: formData.toString()
+                });
+
+                if (resp.status === 401) { showToast("未授权，请重新登录"); return; }
+                if (!resp.ok) { showToast("导出失败: " + resp.status); return; }
+
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = "monthly_settlement_" + year + ".xlsx";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showToast("导出成功");
+            } catch (e) {
+                showToast("导出异常: " + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "导出 Excel";
+            }
+        }
+    </script>
+</body>
+</html>

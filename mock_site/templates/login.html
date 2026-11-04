@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>广东电力市场交易系统 - 登录</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: "Microsoft YaHei", Arial, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-box {
+            background: #fff;
+            width: 380px;
+            padding: 36px 32px;
+            border-radius: 6px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+        }
+        .login-box h1 {
+            font-size: 18px;
+            color: #1e3c72;
+            text-align: center;
+            margin-bottom: 6px;
+        }
+        .login-box .subtitle {
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        .form-row {
+            margin-bottom: 16px;
+        }
+        .form-row label {
+            display: block;
+            font-size: 13px;
+            color: #444;
+            margin-bottom: 6px;
+        }
+        .form-row input {
+            width: 100%;
+            height: 36px;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            padding: 0 10px;
+            font-size: 14px;
+            outline: none;
+        }
+        .form-row input:focus {
+            border-color: #2a5298;
+        }
+        .captcha-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .captcha-row input {
+            flex: 1;
+        }
+        .captcha-img {
+            height: 36px;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn-login {
+            width: 100%;
+            height: 38px;
+            background: #2a5298;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        .btn-login:hover { background: #1e3c72; }
+        .error {
+            background: #fde2e2;
+            color: #c0392b;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            margin-bottom: 14px;
+        }
+        .tips {
+            margin-top: 18px;
+            padding-top: 14px;
+            border-top: 1px dashed #e0e0e0;
+            font-size: 12px;
+            color: #999;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>广东电力市场交易系统</h1>
+        <p class="subtitle">Guangdong Power Market Trading System</p>
+
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="/login" autocomplete="off">
+            <div class="form-row">
+                <label>用户名</label>
+                <input type="text" name="username" placeholder="请输入用户名" required>
+            </div>
+            <div class="form-row">
+                <label>密码</label>
+                <input type="password" name="password" placeholder="请输入密码" required>
+            </div>
+            <div class="form-row">
+                <label>验证码</label>
+                <div class="captcha-row">
+                    <input type="text" name="captcha" placeholder="请输入验证码" required maxlength="4">
+                    <img src="/captcha" class="captcha-img" id="captchaImg" title="点击刷新" onclick="this.src='/captcha?t='+Date.now()">
+                </div>
+            </div>
+            <button type="submit" class="btn-login">登录</button>
+        </form>
+
+        <div class="tips">
+            测试账号：<b>admin / admin123</b><br>
+            验证码任意 4 位数字均可
+        </div>
+    </div>
+</body>
+</html>

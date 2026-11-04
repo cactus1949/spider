@@ -1,0 +1,75 @@
+# 采集端点注册表（单文件，复用 interfaces.crawler.EndpointConfig dataclass）
+#
+# 阶段 1：先注册 mock_site 端点（http://localhost:8000），打通可重复测试的 E2E。
+# 阶段 2.5：拿到真实样本后，把 url 切换/补充为广东电力平台真实端点。
+#
+# 字段说明（与 EndpointConfig 对齐）：
+#   name            指标名（同时用作台账/状态库的 indicator_name）
+#   url             端点地址
+#   method          HTTP 方法，默认 POST
+#   params          固定表单参数（pdate 由编排器按目标日期自动注入）
+#   hdkgccbl_source page_url / config / none —— mock 无需 HdKGccbL 用 none
+#   extra_headers   额外请求头
+#   content_type    请求体类型
+
+endpoints:
+  - name: "日清算概览"
+    url: "http://localhost:8000/api/export"
+    method: "POST"
+    params: {}
+    hdkgccbl_source: "none"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+
+  - name: "月度结算"
+    url: "http://localhost:8000/api/export_monthly"
+    method: "POST"
+    params:
+      year: "2026"
+    hdkgccbl_source: "none"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+
+  - name: "现货出清电量"
+    url: "http://localhost:8000/spot_clearance/export"
+    method: "GET"
+    params: {}
+    hdkgccbl_source: "none"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    date_param: "date"
+    date_format: "YYYY-MM-DD"
+
+  - name: "市场用电需求"
+    url: "http://localhost:8000/market_demand/export"
+    method: "GET"
+    params: {}
+    hdkgccbl_source: "none"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+    date_param: "date"
+    date_format: "YYYY-MM-DD"
+
+  # ============================================================
+  #  交易行情 — Portal 公开页面
+  # ============================================================
+
+  # 返回 data.currentPirceVO.details[]: [{currentPrice, dateTime}], 每小时一个点
+  - name: "全省发电侧加权价格曲线"
+    url: "https://pm.gd.csg.cn/portal/xhr/sso-portal/portal/home/marketEntitiesNum"
+    method: "GET"
+    params: {}
+    hdkgccbl_source: "page_url"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+
+  # 待抓包确认（geoChart 的 API 端点）
+  - name: "现货价格地区分布"
+    url: ""
+    method: "GET"
+    params: {}
+    hdkgccbl_source: "page_url"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"
+
+  # GET → data.monthVO.monthDetails[] / data.annualVO.annualDetails[]
+  - name: "中长期交易-月份信息明细"
+    url: "https://pm.gd.csg.cn/portal/xhr/sso-portal/portal/home/trade/marketData/marketSituation/annual"
+    method: "GET"
+    params: {}
+    hdkgccbl_source: "page_url"
+    content_type: "application/x-www-form-urlencoded;charset=UTF-8"

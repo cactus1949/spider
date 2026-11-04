@@ -1,0 +1,37 @@
+appId: com.spidergd.desktop
+productName: 广东电力数据采集
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintrc,.prettierrc,tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+asar: true
+extraResources:
+  - from: resources/backend
+    to: backend
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-setup.${ext}
+  sign: null
+nsis:
+  oneClick: false
+  perMachine: false
+  # 关闭提权：专网机器常关闭 UAC（EnableLUA=0）或以内置 Administrator 运行，
+  # 此时 NSIS 的 UAC 插件调 runas 会失败并报 “Unable to elevate, error 6”。
+  # 本应用装到 %LOCALAPPDATA%\Programs 且后端要往安装目录写 data/logs，
+  # 本来就是当前用户级安装，不需要“为所有用户安装”。
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 广东电力数据采集
+  include: resources/installer.nsh
+publish:
+  provider: generic
+  url: http://47.101.175.39:20152/releases

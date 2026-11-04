@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>中长期交易 - 交易日历</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { position: relative; margin: 0; font-family: "Microsoft YaHei", Arial, sans-serif; color: #17233d; background: #f5f7fb; }
+    .topbar { height: 54px; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; color: #fff; background: #071346; }
+    .main { padding: 18px 22px 40px; }
+    .intro { margin: 0 0 14px; color: #606266; font-size: 13px; line-height: 1.7; }
+    .calendar-box { background: #fff; border-radius: 6px; box-shadow: 0 1px 5px rgba(7,19,70,.08); padding: 14px 16px 18px; }
+    .calendar-head-box { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+    .date-box { display: flex; align-items: center; gap: 10px; }
+    .el-input__inner { width: 160px; height: 32px; padding: 0 10px; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; cursor: pointer; }
+    #week-range { color: #606266; font-size: 13px; }
+    .el-radio-group { display: inline-flex; }
+    .el-radio-button { display: inline-block; margin-left: -1px; padding: 0; border: 1px solid #dcdfe6; background: #fff; color: inherit; font: inherit; cursor: pointer; }
+    .el-radio-button:first-child { border-radius: 4px 0 0 4px; }
+    .el-radio-button:last-child { border-radius: 0 4px 4px 0; }
+    .el-radio-button__inner { display: block; min-width: 48px; padding: 8px 16px; text-align: center; }
+    .el-radio-button.is-active { background: #409eff; border-color: #409eff; color: #fff; position: relative; z-index: 1; }
+    #calendar-note { margin: 0 0 12px; color: #8a8c95; font-size: 12px; line-height: 1.6; }
+    .dow { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-bottom: 6px; color: #909399; font-size: 12px; text-align: center; }
+    .fc-daygrid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+    .fc-dayGridDay-view .dow, .fc-dayGridDay-view .fc-daygrid { grid-template-columns: minmax(0, 640px); }
+    .fc-dayGridWeek-view .dow { display: none; }
+    .fc-dayGridWeek-view .fc-daygrid { grid-template-columns: 1fr; }
+    .fc-dayGridWeek-view .fc-daygrid-day { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; align-items: start; }
+    .fc-dayGridWeek-view .fc-daygrid-day-events { display: flex; flex-wrap: wrap; gap: 6px; max-height: none; }
+    .fc-dayGridWeek-view .fc-event { width: min(100%, 320px); margin-top: 0; }
+    .fc-daygrid-day { min-height: 92px; padding: 6px; background: #fff; border: 1px solid #edf0f6; border-radius: 4px; }
+    .fc-day-other { background: #fafafa; }
+    .fc-daygrid-day-top { color: #909399; font-size: 12px; }
+    .fc-daygrid-day-events { max-height: 240px; overflow: auto; }
+    .fc-event { display: block; margin-top: 4px; color: inherit; text-decoration: none; }
+    .calendar-week, .calendar-month { padding: 4px 6px; border-left: 3px solid #909399; border-radius: 3px; background: #f7f8fa; font-size: 12px; line-height: 1.45; }
+    .calendar-month.tradeBg, .legend-icon.tradeBg { border-left-color: #15c287; }
+    .calendar-month.NotBg, .legend-icon.NotBg { border-left-color: #e6a23c; }
+    .titleOmit { font-weight: 600; }
+    .typeSizeFormal:empty { display: none; }
+    .typeSizeFormal { color: #1d6fff; }
+    .list-text { color: #606266; }
+    .legend-icon { display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%; background: #909399; }
+    .legend-icon.tradeBg { background: #15c287; }
+    .legend-icon.NotBg { background: #e6a23c; }
+    .legend { display: flex; gap: 14px; margin-top: 12px; color: #909399; font-size: 12px; }
+    .el-picker-panel { display: none; position: absolute; z-index: 30; width: 322px; padding: 12px; background: #fff; border: 1px solid #dcdfe6; border-radius: 4px; box-shadow: 0 2px 12px rgba(0,0,0,.12); }
+    .el-date-picker__header { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 8px; }
+    .el-date-picker__header-label { font-weight: 600; }
+    .el-picker-panel__icon-btn { min-width: 28px; height: 28px; border: 0; background: transparent; cursor: pointer; color: #606266; }
+    .el-date-table, .el-month-table { width: 100%; border-collapse: collapse; }
+    .el-date-table th { padding: 4px 0; color: #909399; font-weight: 400; font-size: 12px; }
+    .el-date-table td, .el-month-table td { height: 36px; padding: 0; text-align: center; cursor: pointer; }
+    .day-hit { width: 100%; height: 36px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    .el-date-table td.prev-month, .el-date-table td.next-month { color: #c0c4cc; }
+    .el-date-table.is-week-mode tr:hover td { background: #d9ecff; }
+    .el-date-table td.current, .el-month-table td.current { background: #409eff; color: #fff; }
+    .picker-hint { margin: 8px 0 0; color: #909399; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <b>广东电力市场交易系统 / 中长期交易</b>
+    <span>交易日历 mock，不校验 UKey</span>
+  </div>
+  <main class="main">
+    <p class="intro">
+      月视图一次看整月，但只有交易名称和状态。周视图一次看一周，卡片里有标的时间、申报时间和正式/灾备。
+      日视图最直白，但一个月要点三十次。采集固定走周：日期面板仍按天画，点中某天会选中那一整行。
+    </p>
+    <section class="calendar-box">
+      <div class="calendar-head-box">
+        <div class="date-box">
+          <div class="el-date-editor el-input el-input--small el-date-editor--month">
+            <input class="el-input__inner" readonly value="2026-10">
+          </div>
+          <span id="week-range"></span>
+        </div>
+        <div class="el-radio-group">
+          <button type="button" class="el-radio-button is-active" data-view="month"><span class="el-radio-button__inner">月</span></button>
+          <button type="button" class="el-radio-button" data-view="week"><span class="el-radio-button__inner">周</span></button>
+          <button type="button" class="el-radio-button" data-view="day"><span class="el-radio-button__inner">日</span></button>
+        </div>
+      </div>
+      <p id="calendar-note"></p>
+      <div id="calendar-view"></div>
+      <div class="legend">
+        <span><i class="legend-icon tradeBg"></i>交易中</span>
+        <span><i class="legend-icon NotBg"></i>未开始</span>
+        <span><i class="legend-icon greyBg"></i>已结束</span>
+      </div>
+    </section>
+  </main>
+  <div class="el-picker-panel el-date-picker"></div>
+  <script>
+    const BOOT = {{ bootstrap_json }};
+    const CAPTURED = BOOT.captured || {};
+    const SHORTS = BOOT.shorts || {};
+    const EMPTY = new Set(BOOT.empty || []);
+    const DOW = ['一', '二', '三', '四', '五', '六', '日'];
+    const state = { view: 'month', anchor: new Date(2026, 9, 26) };
+    let panelYear = 2026;
+    let panelMonth = 10;
+
+    function parseISO(iso) {
+      const parts = iso.split('-').map(Number);
+      return new Date(parts[0], parts[1] - 1, parts[2]);
+    }
+    function fmt(dt) {
+      return dt.getFullYear() + '-'
+        + String(dt.getMonth() + 1).padStart(2, '0') + '-'
+        + String(dt.getDate()).padStart(2, '0');
+    }
+    function addDays(iso, count) {
+      const dt = parseISO(iso);
+      dt.setDate(dt.getDate() + count);
+      return fmt(dt);
+    }
+    function mondayOf(value) {
+      const dt = value instanceof Date
+        ? new Date(value.getFullYear(), value.getMonth(), value.getDate())
+        : parseISO(value);
+      dt.setDate(dt.getDate() - (dt.getDay() + 6) % 7);
+      return dt;
+    }
+    function esc(value) {
+      return String(value || '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[ch]));
+    }
+    function statusOf(iso) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const dt = parseISO(iso);
+      if (dt.getTime() < today.getTime()) return '已结束';
+      if (dt.getTime() === today.getTime()) return '交易中';
+      return '未开始';
+    }
+    function statusClass(status) {
+      if (status === '交易中') return 'tradeBg';
+      if (status === '未开始') return 'NotBg';
+      return 'greyBg';
+    }
+    function expandShort(iso, short, index) {
+      const year = Number(iso.slice(0, 4));
+      const month = Number(iso.slice(5, 7));
+      const morning = index % 2 === 0;
+      const minute = index === 0 ? 0 : (index * 5) % 50;
+      const startMin = (morning ? 9 : 14) * 60 + minute;
+      const endMin = startMin + 90;
+      const clock = (total) => String(Math.floor(total / 60)).padStart(2, '0')
+        + ':' + String(total % 60).padStart(2, '0');
+      const plain = short === '交易变更' || short === '需求调查';
+      return {
+        title: year + '年' + month + '月' + short + '(' + iso + ')',
+        delivery: iso + ' ~ ' + addDays(iso, 2),
+        apply: iso.slice(5) + ' ' + clock(startMin) + ' ~ ' + iso.slice(5) + ' ' + clock(endMin),
+        type: plain ? '' : '正式',
+        status: statusOf(iso),
+        short: short,
+      };
+    }
+    function synthetic(iso) {
+      const parts = iso.split('-').map(Number);
+      if (parts[2] >= 30) return [];
+      const weekday = (parseISO(iso).getDay() + 6) % 7;
+      const status = statusOf(iso);
+      const end = addDays(iso, 2);
+      const items = [{
+        title: parts[0] + '年' + parts[1] + '月周双边协商交易(' + iso + ')',
+        delivery: iso + ' ~ ' + end,
+        apply: iso.slice(5) + ' 14:00 ~ ' + iso.slice(5) + ' 15:30',
+        type: '正式',
+        status: status,
+        short: '周双边协商交易',
+      }];
+      if (weekday === 0) {
+        items.unshift({
+          title: parts[0] + '年' + parts[1] + '月机组代购市场电量双边协商转让交易',
+          delivery: iso + ' ~ ' + end,
+          apply: iso.slice(5) + ' 09:00 ~ ' + iso.slice(5) + ' 10:00',
+          type: '正式',
+          status: status,
+          short: '代购市场电量双边协商转让交易',
+        });
+      }
+      return items;
+    }
+    function weekEvents(iso) {
+      if (Object.prototype.hasOwnProperty.call(CAPTURED, iso)) return CAPTURED[iso];
+      if (EMPTY.has(iso)) return [];
+      if (SHORTS[iso] && SHORTS[iso].length) {
+        return SHORTS[iso].map((short, index) => expandShort(iso, short, index));
+      }
+      return synthetic(iso);
+    }
+    function monthTitles(iso) {
+      if (SHORTS[iso]) return SHORTS[iso];
+      return weekEvents(iso).map((item) => item.short || item.title);
+    }
+    function eventCard(item) {
+      return '<a class="fc-event"><div class="fc-event-main"><div class="calendar-week">'
+        + '<div class="item titleOmit">' + esc(item.title) + '</div>'
+        + '<div class="typeSizeFormal">' + esc(item.type) + '</div>'
+        + '<div class="list-text">标的时间：' + esc(item.delivery) + '</div>'
+        + '<div class="list-text">申报时间：' + esc(item.apply) + '</div>'
+        + '<i class="legend-icon ' + statusClass(item.status) + '"></i>'
+        + '</div></div></a>';
+    }
+    function monthCard(title, iso) {
+      const cls = statusClass(statusOf(iso));
+      return '<a class="fc-event"><div class="fc-event-main"><div class="calendar-month ' + cls + '">'
+        + esc(title) + '</div></div></a>';
+    }
+    function datesForView() {
+      if (state.view === 'day') return [fmt(state.anchor)];
+      if (state.view === 'week') {
+        const start = fmt(mondayOf(state.anchor));
+        return [0, 1, 2, 3, 4, 5, 6].map((offset) => addDays(start, offset));
+      }
+      const first = new Date(state.anchor.getFullYear(), state.anchor.getMonth(), 1);
+      const start = mondayOf(first);
+      const days = [];
+      for (let i = 0; i < 42; i += 1) {
+        const dt = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+        days.push(fmt(dt));
+      }
+      return days;
+    }
+    function renderCalendar() {
+      const focus = state.view === 'week' ? mondayOf(state.anchor) : state.anchor;
+      const focusKey = focus.getFullYear() * 12 + focus.getMonth();
+      const dates = datesForView();
+      const cells = dates.map((iso) => {
+        const dt = parseISO(iso);
+        const other = dt.getFullYear() * 12 + dt.getMonth() !== focusKey;
+        const cards = state.view === 'month'
+          ? monthTitles(iso).map((title) => monthCard(title, iso)).join('')
+          : weekEvents(iso).map(eventCard).join('');
+        return '<div class="fc-daygrid-day' + (other ? ' fc-day-other' : '') + '" data-date="' + iso + '">'
+          + '<div class="fc-daygrid-day-top">' + iso.slice(8) + ' 周' + DOW[(dt.getDay() + 6) % 7] + '</div>'
+          + '<div class="fc-daygrid-day-events">' + cards + '</div></div>';
+      }).join('');
+      const viewClass = state.view === 'week' ? 'fc-dayGridWeek-view'
+        : state.view === 'day' ? 'fc-dayGridDay-view' : 'fc-dayGridMonth-view';
+      const head = state.view === 'day' ? '' : '<div class="dow">' + DOW.map((name) => '<span>' + name + '</span>').join('') + '</div>';
+      document.getElementById('calendar-view').innerHTML = '<div class="' + viewClass + ' fc-view">' + head + '<div class="fc-daygrid">' + cells + '</div></div>';
+    }
+    function renderChrome() {
+      document.querySelectorAll('.el-radio-button').forEach((el) => {
+        el.classList.toggle('is-active', el.dataset.view === state.view);
+      });
+      const editor = document.querySelector('.date-box .el-date-editor');
+      const input = editor.querySelector('input');
+      const editorClass = {
+        week: 'el-date-editor el-input el-input--small el-date-editor--week',
+        day: 'el-date-editor el-input el-input--small el-date-editor--date',
+        month: 'el-date-editor el-input el-input--small el-date-editor--month',
+      };
+      editor.className = editorClass[state.view] || editorClass.month;
+      const range = document.getElementById('week-range');
+      if (state.view === 'week') {
+        const start = fmt(mondayOf(state.anchor));
+        input.value = start;
+        range.textContent = '至 ' + addDays(start, 6);
+      } else if (state.view === 'day') {
+        input.value = fmt(state.anchor);
+        range.textContent = '';
+      } else {
+        input.value = fmt(state.anchor).slice(0, 7);
+        range.textContent = '';
+      }
+      const captured = datesForView().some((iso) => CAPTURED[iso]);
+      const note = document.getElementById('calendar-note');
+      if (state.view === 'week') {
+        note.textContent = captured
+          ? '这一周是 2026-10-30 从现场周视图抓下来的明细，标的时间和申报时间保持原样。点日期框里的某一天，会改选那一行对应的一周。'
+          : '这一周不是现场样本。2026-10 里有月视图标题的日期，按那些短标题补了标的时间和申报时间；其它月份用同一套卡片结构生成。点日期框仍然是选中整行。';
+      } else if (state.view === 'day') {
+        note.textContent = '日视图只留当天。结构与周卡片相同，但一个月要逐天翻，采集不走这条。';
+      } else {
+        note.textContent = '月视图对应现场那份整月网格：只有短标题和状态，没有标的时间、申报时间。10 月 30 日、31 日按现场结果留空。';
+      }
+    }
+    function render() {
+      renderChrome();
+      renderCalendar();
+    }
+    function closePanel() {
+      document.querySelector('.el-picker-panel').style.display = 'none';
+    }
+    function shiftPanel(delta) {
+      if (state.view === 'month' || Math.abs(delta) >= 12) {
+        panelYear += delta > 0 ? 1 : -1;
+      } else {
+        panelMonth += delta;
+        if (panelMonth < 1) { panelMonth = 12; panelYear -= 1; }
+        if (panelMonth > 12) { panelMonth = 1; panelYear += 1; }
+      }
+      renderPanel();
+    }
+    function renderPanel() {
+      const panel = document.querySelector('.el-picker-panel');
+      const input = document.querySelector('.date-box input');
+      const rect = input.getBoundingClientRect();
+      panel.style.display = 'block';
+      panel.style.left = (rect.left + window.scrollX) + 'px';
+      panel.style.top = (rect.bottom + window.scrollY + 6) + 'px';
+      const header = '<div class="el-date-picker__header">'
+        + '<button type="button" class="el-picker-panel__icon-btn el-icon-d-arrow-left" data-shift="-12">«</button>'
+        + '<button type="button" class="el-picker-panel__icon-btn el-icon-arrow-left" data-shift="-1">‹</button>'
+        + '<span class="el-date-picker__header-label">' + panelYear + ' 年</span>'
+        + (state.view === 'month' ? '' : '<span class="el-date-picker__header-label">' + panelMonth + ' 月</span>')
+        + '<button type="button" class="el-picker-panel__icon-btn el-icon-arrow-right" data-shift="1">›</button>'
+        + '<button type="button" class="el-picker-panel__icon-btn el-icon-d-arrow-right" data-shift="12">»</button>'
+        + '</div>';
+      if (state.view === 'month') {
+        let body = '<table class="el-month-table"><tbody>';
+        for (let row = 0; row < 3; row += 1) {
+          body += '<tr>';
+          for (let col = 0; col < 4; col += 1) {
+            const month = row * 4 + col + 1;
+            const current = panelYear === state.anchor.getFullYear() && month === state.anchor.getMonth() + 1;
+            body += '<td class="' + (current ? 'current' : '') + '" data-month="' + month + '"><button type="button" class="day-hit">' + month + '月</button></td>';
+          }
+          body += '</tr>';
+        }
+        panel.innerHTML = header + body + '</tbody></table>';
+        return;
+      }
+      const first = new Date(panelYear, panelMonth - 1, 1);
+      const start = mondayOf(first);
+      const selected = fmt(state.view === 'week' ? mondayOf(state.anchor) : state.anchor);
+      let body = '<table class="el-date-table' + (state.view === 'week' ? ' is-week-mode' : '') + '"><thead><tr>'
+        + DOW.map((name) => '<th>' + name + '</th>').join('') + '</tr></thead><tbody>';
+      for (let row = 0; row < 6; row += 1) {
+        body += '<tr>';
+        for (let col = 0; col < 7; col += 1) {
+          const dt = new Date(start.getFullYear(), start.getMonth(), start.getDate() + row * 7 + col);
+          const iso = fmt(dt);
+          const key = dt.getFullYear() * 12 + dt.getMonth();
+          const panelKey = panelYear * 12 + (panelMonth - 1);
+          const classes = [];
+          if (key < panelKey) classes.push('prev-month');
+          else if (key > panelKey) classes.push('next-month');
+          else classes.push('available');
+          const hit = state.view === 'week' ? fmt(mondayOf(dt)) === selected : iso === selected;
+          if (hit) classes.push('current');
+          body += '<td class="' + classes.join(' ') + '" data-iso="' + iso + '"><button type="button" class="day-hit">' + dt.getDate() + '</button></td>';
+        }
+        body += '</tr>';
+      }
+      const hint = state.view === 'week'
+        ? '点某一天即选中该行，周一到周日一起切换。一个月大约 4～6 行。'
+        : '点某一天只切换这一天。';
+      panel.innerHTML = header + body + '</tbody></table><p class="picker-hint">' + hint + '</p>';
+    }
+    function openPanel() {
+      const base = state.view === 'week' ? mondayOf(state.anchor) : state.anchor;
+      panelYear = base.getFullYear();
+      panelMonth = base.getMonth() + 1;
+      renderPanel();
+    }
+    function pickDay(iso) {
+      const dt = parseISO(iso);
+      state.anchor = state.view === 'week' ? mondayOf(dt) : dt;
+      closePanel();
+      render();
+    }
+    function pickMonth(month) {
+      const last = new Date(panelYear, month, 0).getDate();
+      const day = Math.min(state.anchor.getDate(), last);
+      state.anchor = new Date(panelYear, month - 1, day);
+      closePanel();
+      render();
+    }
+
+    document.addEventListener('click', (event) => {
+      const panel = document.querySelector('.el-picker-panel');
+      if (event.target.closest('.date-box')) {
+        openPanel();
+        return;
+      }
+      if (panel.style.display === 'block' && panel.contains(event.target)) {
+        const shift = event.target.closest('[data-shift]');
+        if (shift) {
+          shiftPanel(Number(shift.dataset.shift));
+          return;
+        }
+        const monthCell = event.target.closest('td[data-month]');
+        if (monthCell) {
+          pickMonth(Number(monthCell.dataset.month));
+          return;
+        }
+        const dayCell = event.target.closest('td[data-iso]');
+        if (dayCell) pickDay(dayCell.dataset.iso);
+        return;
+      }
+      closePanel();
+      const radio = event.target.closest('.el-radio-button');
+      if (!radio) return;
+      state.view = radio.dataset.view;
+      if (state.view === 'week') state.anchor = mondayOf(state.anchor);
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>

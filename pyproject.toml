@@ -1,0 +1,116 @@
+[project]
+name = "spider-gd"
+version = "0.1.0"
+description = "广东电力交易数据智能采集系统"
+requires-python = ">=3.11"
+readme = "README.md"
+
+dependencies = [
+    "loguru>=0.7,<1.0",
+    "pydantic>=2.0,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "httpx>=0.25,<1.0",
+    "openpyxl>=3.1,<4.0",
+    "pandas>=2.0,<3.0",
+    "apscheduler>=3.10,<4.0",
+    "playwright>=1.40,<2.0",
+]
+
+[project.optional-dependencies]
+# 联网附加能力（离线核心不需要）
+online = [
+    "fastapi>=0.100,<1.0",
+    "uvicorn[standard]>=0.24,<1.0",
+    "dingtalk-stream>=0.20,<1.0",
+    "mcp>=1.27,<2",
+    "curl_cffi>=0.7,<1.0",
+]
+# TLS 指纹伪装（模拟 Chrome TLS 握手，解决 httpx 被 JA3/JA4 指纹拦截的问题）
+tls = [
+    "curl_cffi>=0.7,<1.0",
+]
+# 验证码 OCR（与 onnxruntime 绑定，单独成组避免拖累核心安装）
+ocr = [
+    "ddddocr>=1.4,<2.0",
+]
+# Windows 平台设备/网络
+win = [
+    "WMI>=1.5; sys_platform == 'win32'",
+    "pywin32>=306; sys_platform == 'win32'",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "pytest-cov>=5.0,<7.0",
+    "pytest-mock>=3.12,<4.0",
+    "respx>=0.21,<1.0",
+    "freezegun>=1.5,<2.0",
+    "ruff>=0.6,<1.0",
+    "mypy>=1.11,<2.0",
+]
+
+[project.scripts]
+spider-gd = "spider_gd.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "PT", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003", "UP042", "RUF022"]  # 中文标点；str+Enum；__all__ 按模块分组
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "N802"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src", "tools"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+]
+markers = [
+    "unit: 纯单元测试，无外部依赖，毫秒级",
+    "integration: 集成测试，需数据库/网络，本地手动运行",
+    "e2e: 端到端测试，需完整环境（U-Key、专网）",
+    "slow: 慢速/非确定性测试（如 OCR 识别率），CI 默认跳过",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["wmi.*", "playwright.*", "ddddocr.*", "apscheduler.*", "win32com.*", "yaml.*", "pandas.*", "openpyxl.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false

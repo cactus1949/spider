@@ -1,0 +1,12 @@
+# 模式 B：单机 + USB 无线/4G（离线核心 + 联网附加）
+inherits: common.yaml
+
+deploy_mode: standalone_wireless
+modules:
+  crawler: true
+  network: true
+  scheduler: true
+  local_landing: true
+  alert_gateway: true
+  agent: false
+  web_ui: true

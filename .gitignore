@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# 打包产物
+build/
+dist/
+frontend/out/
+frontend/dist/
+frontend/resources/backend/
+*.tsbuildinfo
+
+# 依赖
+node_modules/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时产物
+/data/
+/logs/
+/archives/
+/output/
+/result/
+*.db
+*.db-wal
+*.db-shm
+
+# 凭据
+.env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.cursor/
+.qoder/

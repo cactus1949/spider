@@ -1,0 +1,12 @@
+# 模式 D：纯离线保底（默认底座，无外网依赖）
+inherits: common.yaml
+
+deploy_mode: offline
+modules:
+  crawler: true
+  network: true
+  scheduler: true
+  local_landing: true
+  alert_gateway: false   # 离线无外网
+  agent: false
+  web_ui: false

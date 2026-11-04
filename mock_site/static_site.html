@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>广东电力市场交易系统 - 离线复刻版</title>
+<style>
+/* ===== Reset & Base ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "Microsoft YaHei", "PingFang SC", "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 14px; color: #303133; background: #f0f2f5; }
+a { color: #1890ff; text-decoration: none; }
+a:hover { color: #40a9ff; }
+
+/* ===== Ant Design Pro Layout (Portal) ===== */
+.ant-pro-layout { min-height: 100vh; }
+.ant-pro-header { height: 48px; background: #001529; display: flex; align-items: center; padding: 0 24px; color: #fff; position: fixed; top: 0; left: 0; right: 0; z-index: 1000; }
+.ant-pro-header .logo { font-size: 18px; font-weight: bold; margin-right: 40px; white-space: nowrap; color: #fff; }
+.ant-pro-header .logo img { height: 28px; vertical-align: middle; margin-right: 8px; }
+.ant-pro-header .header-menu { flex: 1; display: flex; align-items: center; }
+.ant-pro-header .header-menu a { color: rgba(255,255,255,.65); padding: 0 16px; height: 48px; line-height: 48px; display: inline-block; font-size: 14px; transition: all .3s; }
+.ant-pro-header .header-menu a:hover,
+.ant-pro-header .header-menu a.active { color: #fff; background: rgba(255,255,255,.1); }
+.ant-pro-header .user-info { color: rgba(255,255,255,.65); font-size: 14px; }
+.ant-pro-header .user-info .avatar { width: 24px; height: 24px; border-radius: 50%; background: #1890ff; display: inline-block; vertical-align: middle; margin-right: 6px; text-align: center; line-height: 24px; color: #fff; font-size: 12px; }
+
+/* ===== Content Area ===== */
+.main-content { padding-top: 48px; min-height: 100vh; }
+.page-container { max-width: 1400px; margin: 0 auto; padding: 16px; }
+
+/* ===== Tab Navigation ===== */
+.tab-nav { background: #fff; border-radius: 4px; margin-bottom: 16px; display: flex; border-bottom: 1px solid #e8e8e8; overflow-x: auto; }
+.tab-nav a { padding: 12px 20px; font-size: 14px; color: #666; border-bottom: 2px solid transparent; white-space: nowrap; transition: all .3s; display: inline-block; cursor: pointer; }
+.tab-nav a:hover { color: #1890ff; }
+.tab-nav a.active { color: #1890ff; border-bottom-color: #1890ff; font-weight: 500; }
+
+/* ===== Page Section (hidden/shown via tabs) ===== */
+.page-section { display: none; }
+.page-section.active { display: block; }
+
+/* ===== Cards ===== */
+.card { background: #fff; border-radius: 4px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.card-title { font-size: 16px; font-weight: 600; color: #1f1f1f; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; }
+.card-title .card-actions { display: flex; gap: 8px; align-items: center; }
+
+/* ===== Buttons ===== */
+.btn { display: inline-block; padding: 6px 16px; border-radius: 4px; font-size: 13px; cursor: pointer; text-align: center; border: 1px solid #d9d9d9; background: #fff; color: #333; transition: all .3s; }
+.btn:hover { color: #1890ff; border-color: #1890ff; }
+.btn-primary { background: #1890ff; color: #fff; border-color: #1890ff; }
+.btn-primary:hover { background: #40a9ff; border-color: #40a9ff; color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-group { display: flex; gap: 0; }
+.btn-group .btn { border-radius: 0; border-right: none; }
+.btn-group .btn:first-child { border-radius: 4px 0 0 4px; }
+.btn-group .btn:last-child { border-radius: 0 4px 4px 0; border-right: 1px solid #d9d9d9; }
+.btn-group .btn.active { background: #1890ff; color: #fff; border-color: #1890ff; }
+
+/* ===== Portal Cards (图像卡片) ===== */
+.portal-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.portal-card { background: #fff; border-radius: 8px; padding: 24px; cursor: pointer; transition: all .3s; display: flex; align-items: center; gap: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.portal-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.12); transform: translateY(-2px); }
+.portal-card .card-icon { width: 64px; height: 64px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #fff; flex-shrink: 0; }
+.portal-card .card-icon.spot { background: linear-gradient(135deg, #1890ff, #096dd9); }
+.portal-card .card-icon.longterm { background: linear-gradient(135deg, #fa8c16, #d46b08); }
+.portal-card .card-info h3 { font-size: 18px; margin-bottom: 4px; color: #1f1f1f; }
+.portal-card .card-info p { font-size: 13px; color: #999; }
+
+/* ===== Settlement Info Section ===== */
+.settlement-section { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.settlement-card { background: #fff; border-radius: 8px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.settlement-card h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+.settlement-card h3 .more { font-size: 13px; color: #1890ff; cursor: pointer; font-weight: 400; }
+.settlement-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.settlement-stat { text-align: center; padding: 12px; background: #fafafa; border-radius: 6px; }
+.settlement-stat .label { font-size: 12px; color: #999; margin-bottom: 6px; }
+.settlement-stat .value { font-size: 20px; font-weight: 600; color: #1f1f1f; }
+.settlement-details { margin-top: 12px; }
+.settlement-details .item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f5f5f5; }
+.settlement-details .item .item-label { font-size: 13px; color: #666; display: flex; align-items: center; gap: 8px; }
+.settlement-details .item .item-value { font-size: 16px; font-weight: 600; }
+
+/* ===== Chart Placeholder ===== */
+.chart-placeholder { background: #fafafa; border: 1px dashed #d9d9d9; border-radius: 6px; min-height: 240px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 14px; flex-direction: column; gap: 8px; }
+.chart-placeholder .chart-icon { font-size: 48px; opacity: .3; }
+
+/* ===== Data Panel (Spot page) ===== */
+.data-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.data-panel { background: #fff; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.08); overflow: hidden; }
+.data-panel .panel-header { padding: 16px 20px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; }
+.data-panel .panel-header .title { font-size: 15px; font-weight: 600; }
+.data-panel .panel-body { padding: 16px 20px; }
+.stat-list { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.stat-list li { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f5f5f5; font-size: 14px; }
+.stat-list li:last-child { border-bottom: none; }
+.stat-list li .label { color: #666; }
+.stat-list li .value { font-weight: 600; font-size: 16px; }
+
+/* ===== Table Styles (Element UI like) ===== */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table thead th { background: #fafafa; padding: 10px 12px; text-align: center; font-weight: 500; color: #666; border-bottom: 1px solid #e8e8e8; position: sticky; top: 0; white-space: nowrap; }
+.data-table tbody td { padding: 8px 12px; text-align: center; border-bottom: 1px solid #f0f0f0; }
+.data-table tbody tr:hover { background: #f5f7fa; }
+.data-table tbody tr:nth-child(even) { background: #fafafa; }
+.data-table tbody tr:nth-child(even):hover { background: #f5f7fa; }
+.table-wrap { max-height: 500px; overflow-y: auto; border: 1px solid #e8e8e8; border-radius: 4px; }
+
+/* ===== Filter Bar ===== */
+.filter-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.filter-bar label { font-size: 13px; color: #666; }
+.filter-bar select,
+.filter-bar input { padding: 5px 10px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 13px; }
+
+/* ===== Disclosure query page ===== */
+.query-tabs { display: flex; gap: 0; margin-bottom: 16px; }
+.query-tabs .query-tab { padding: 8px 20px; background: #fff; border: 1px solid #d9d9d9; cursor: pointer; font-size: 13px; }
+.query-tabs .query-tab:first-child { border-radius: 4px 0 0 4px; }
+.query-tabs .query-tab:last-child { border-radius: 0 4px 4px 0; }
+.query-tabs .query-tab.active { background: #1890ff; color: #fff; border-color: #1890ff; }
+
+/* ===== Top action bar ===== */
+.top-action-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.top-action-bar .date-picker { display: flex; align-items: center; gap: 8px; }
+.top-action-bar .date-picker input { padding: 5px 10px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 13px; width: 130px; }
+
+/* ===== Info banner ===== */
+.info-banner { background: #e6f7ff; border: 1px solid #91d5ff; border-radius: 4px; padding: 10px 16px; margin-bottom: 16px; font-size: 13px; color: #0050b3; }
+
+/* ===== Load type selector ===== */
+.type-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+.type-tag { padding: 3px 10px; border: 1px solid #d9d9d9; border-radius: 3px; font-size: 12px; cursor: pointer; background: #fff; }
+.type-tag.active { background: #1890ff; color: #fff; border-color: #1890ff; }
+
+/* ===== Responsive ===== */
+@media (max-width: 900px) {
+  .portal-cards, .data-panels, .settlement-section { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<!-- ===== HEADER ===== -->
+<div class="ant-pro-header">
+  <div class="logo">⚡ 广东电力市场交易系统</div>
+  <div class="header-menu">
+    <a href="#portal" class="active" data-nav="portal">首页</a>
+    <a href="#spot" data-nav="spot">现货交易</a>
+    <a href="#disclosure" data-nav="disclosure">信息披露查询</a>
+    <a href="#settlement" data-nav="settlement">日清算概览</a>
+    <a href="#node-rt" data-nav="node-rt">实时节点电价</a>
+    <a href="#node-da" data-nav="node-da">日前节点电价</a>
+  </div>
+  <div class="user-info">
+    <span class="avatar">陈</span> 陈道翔, 您好！
+  </div>
+</div>
+
+<!-- ===== MAIN CONTENT ===== -->
+<div class="main-content">
+<div class="page-container">
+
+<!-- ========== PORTAL 首页 ========== -->
+<div class="page-section active" id="page-portal">
+  <!-- Notice -->
+  <div class="info-banner">
+    📢 欢迎使用广东电力市场交易系统。请通过U-key完成身份认证后访问各功能模块。
+  </div>
+
+  <!-- Portal Cards -->
+  <div class="portal-cards">
+    <div class="portal-card" onclick="switchTab('spot')">
+      <div class="card-icon spot">⚡</div>
+      <div class="card-info">
+        <h3>现货交易</h3>
+        <p>查看现货分日出清量价、分时分类型出清电量</p>
+      </div>
+    </div>
+    <div class="portal-card">
+      <div class="card-icon longterm">📊</div>
+      <div class="card-info">
+        <h3>中长期交易</h3>
+        <p>中长期成交电量与电价信息（建设中）</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settlement Info -->
+  <div class="settlement-section">
+    <div class="settlement-card">
+      <h3>结算信息 <span class="more" onclick="switchTab('settlement')">查看详情 →</span></h3>
+      <div class="settlement-stats">
+        <div class="settlement-stat">
+          <div class="label">合计电量 · MWh</div>
+          <div class="value">0</div>
+        </div>
+        <div class="settlement-stat">
+          <div class="label">合计电价 · 元/MWh</div>
+          <div class="value">0</div>
+        </div>
+        <div class="settlement-stat">
+          <div class="label">合计电费 · 元</div>
+          <div class="value">0</div>
+        </div>
+      </div>
+      <div class="settlement-details">
+        <div class="item"><span class="item-label">📋 代购合约电费</span><span class="item-value">0</span></div>
+        <div class="item"><span class="item-label">📋 基数合约电费</span><span class="item-value">0</span></div>
+        <div class="item"><span class="item-label">📋 中长期市场化电费</span><span class="item-value">0</span></div>
+        <div class="item"><span class="item-label">📋 现货偏差</span><span class="item-value">0</span></div>
+        <div class="item"><span class="item-label">📋 分摊返还</span><span class="item-value">0</span></div>
+        <div class="item"><span class="item-label">📋 变动成本补偿电费</span><span class="item-value">0</span></div>
+      </div>
+    </div>
+
+    <div class="settlement-card">
+      <h3>2026年12月</h3>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:#8A8C95; font-size:13px;"><span style="background:#4080FF;width:10px;height:10px;display:inline-block;margin-right:5px;"></span>中长期成交电量 · MWh</span>
+          <span style="font-weight:600;">--</span>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:#8A8C95; font-size:13px;"><span style="background:#37D4CF;width:10px;height:10px;display:inline-block;margin-right:5px;"></span>现货成交电量 · MWh</span>
+          <span style="font-weight:600;">--</span>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:#8A8C95; font-size:13px;">📈 中长期成交电价 · 元/MWh</span>
+          <span style="font-weight:600;">--</span>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:#8A8C95; font-size:13px;">📈 现货成交电价 · 元/MWh</span>
+          <span style="font-weight:600;">--</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== SPOT 现货交易 ========== -->
+<div class="page-section" id="page-spot">
+  <div class="tab-nav">
+    <a class="active">首页</a>
+    <a>市场用电需求电量</a>
+    <a>现货分日出清量价</a>
+    <a>信息披露查询</a>
+    <a>日清算概况</a>
+    <a>实时节点电价查询</a>
+    <a>日前节点电价查询</a>
+  </div>
+
+  <div class="data-panels">
+    <!-- 现货分日出清量价 -->
+    <div class="data-panel">
+      <div class="panel-header">
+        <span class="title">现货分日出清量价</span>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <div class="btn-group">
+            <button class="btn btn-sm active">按日</button>
+            <button class="btn btn-sm">按月</button>
+          </div>
+          <button class="btn btn-primary btn-sm">📥 导出</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div style="display:flex; gap:16px;">
+          <div style="flex:1;">
+            <div class="chart-placeholder">
+              <span class="chart-icon">📊</span>
+              <span>现货分日出清量价趋势图</span>
+              <span style="font-size:11px;">（ECharts图表区域）</span>
+            </div>
+          </div>
+          <ul class="stat-list" style="min-width:180px;">
+            <li><span class="label">日前申报均价</span><span class="value">329.09</span></li>
+            <li><span class="label">日前出清均价</span><span class="value">518.71</span></li>
+            <li><span class="label">日前出清电量</span><span class="value">2203243.222</span></li>
+            <li><span class="label">实时出清均价</span><span class="value">0</span></li>
+            <li><span class="label">实时出清电量</span><span class="value">0</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <!-- 现货分时分类型出清电量 -->
+    <div class="data-panel">
+      <div class="panel-header">
+        <span class="title">现货分时分类型出清电量</span>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <div class="btn-group" style="margin-right:10px;">
+            <button class="btn btn-sm active">日前</button>
+            <button class="btn btn-sm">实时</button>
+          </div>
+          <select style="padding:4px 10px; border:1px solid #d9d9d9; border-radius:4px; font-size:12px; width:100px;">
+            <option>全部</option><option>燃煤</option><option>燃气</option><option>风电</option><option>太阳能</option><option>核电</option><option>独立储能</option><option>抽蓄</option>
+          </select>
+          <button class="btn btn-primary btn-sm">📥 导出</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="chart-placeholder">
+          <span class="chart-icon">📈</span>
+          <span>现货分时分类型出清电量图表</span>
+          <span style="font-size:11px;">（ECharts图表区域）</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 市场用电需求电量 Table -->
+  <div class="card" style="margin-top:16px;">
+    <div class="card-title">
+      市场用电需求电量
+      <div class="card-actions">
+        <input type="date" value="2026-06-25" style="padding:5px 10px; border:1px solid #d9d9d9; border-radius:4px; font-size:13px;">
+        <button class="btn btn-primary btn-sm">📥 导出</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>时段</th><th>统调预测 (MW)</th><th>统调实际 (MW)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>00:00</td><td>117810</td><td>--</td></tr>
+          <tr><td>00:15</td><td>129380</td><td>--</td></tr>
+          <tr><td>00:30</td><td>129305</td><td>--</td></tr>
+          <tr><td>00:45</td><td>126435</td><td>--</td></tr>
+          <tr><td>01:00</td><td>124170</td><td>--</td></tr>
+          <tr><td>...</td><td>...</td><td>...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== DISCLOSURE 信息披露查询 ========== -->
+<div class="page-section" id="page-disclosure">
+  <div class="tab-nav">
+    <a class="active">信息披露查询</a>
+    <a onclick="switchTab('settlement')">日清算概览</a>
+    <a onclick="switchTab('node-rt')">实时节点电价查询</a>
+    <a onclick="switchTab('node-da')">日前节点电价查询</a>
+  </div>
+
+  <div class="filter-bar">
+    <label>查询日期：</label>
+    <input type="date" value="2026-06-25">
+    <label>信息类型：</label>
+    <select>
+      <option>全部</option>
+      <option>实际信息</option>
+      <option>预测信息</option>
+    </select>
+    <button class="btn btn-primary btn-sm">🔍 查询</button>
+    <button class="btn btn-sm">📥 导出</button>
+  </div>
+
+  <!-- 统调负荷 Table -->
+  <div class="card">
+    <div class="card-title">统调负荷 <span style="font-size:12px; color:#999; font-weight:400;">2026-06-25</span></div>
+    <div class="type-tags" style="margin-bottom:12px;">
+      <span class="type-tag active">全部</span>
+      <span class="type-tag">燃煤</span><span class="type-tag">燃气</span><span class="type-tag">风电</span><span class="type-tag">太阳能</span><span class="type-tag">核电</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>时段</th><th>统调预测</th><th>统调实际</th></tr>
+        </thead>
+        <tbody id="disclosure-tbody">
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== SETTLEMENT 日清算概览 ========== -->
+<div class="page-section" id="page-settlement">
+  <div class="tab-nav">
+    <a onclick="switchTab('disclosure')">信息披露查询</a>
+    <a class="active">日清算概览</a>
+    <a onclick="switchTab('node-rt')">实时节点电价查询</a>
+    <a onclick="switchTab('node-da')">日前节点电价查询</a>
+  </div>
+
+  <div class="filter-bar">
+    <label>清算日期：</label>
+    <input type="date" value="2026-06-14">
+    <button class="btn btn-primary btn-sm">🔍 查询</button>
+    <button class="btn btn-sm">📥 导出</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">日清算概况 - 2026-06-14</div>
+    <div class="chart-placeholder" style="min-height:300px;">
+      <span class="chart-icon">📋</span>
+      <span>日清算概况数据表</span>
+      <span style="font-size:11px;">（数据来源：日清算概况_2026-06-14.xlsx）</span>
+    </div>
+  </div>
+</div>
+
+<!-- ========== NODE PRICE RT 实时节点电价 ========== -->
+<div class="page-section" id="page-node-rt">
+  <div class="tab-nav">
+    <a onclick="switchTab('disclosure')">信息披露查询</a>
+    <a onclick="switchTab('settlement')">日清算概览</a>
+    <a class="active">实时节点电价查询</a>
+    <a onclick="switchTab('node-da')">日前节点电价查询</a>
+  </div>
+
+  <div class="filter-bar">
+    <label>查询日期：</label>
+    <input type="date" value="2026-06-18">
+    <label>地区：</label>
+    <select><option>全部</option><option>肇庆</option></select>
+    <button class="btn btn-primary btn-sm">🔍 查询</button>
+    <button class="btn btn-sm">📥 导出</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">实时节点电价查询 - 2026-06-18</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>时段</th><th>节点</th><th>地区</th><th>电价 (元/MWh)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>00:00</td><td>东岸站220_KV#1</td><td>肇庆</td><td>--</td></tr>
+          <tr><td>00:15</td><td>万羚储能站万羚储能站万端线4363线路</td><td>肇庆</td><td>--</td></tr>
+          <tr><td>00:30</td><td>--</td><td>--</td><td>--</td></tr>
+          <tr><td colspan="4" style="color:#999;">... 更多数据请查看原始Excel文件 (实时节点电价查询(2026-06-18).xlsx)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== NODE PRICE DA 日前节点电价 ========== -->
+<div class="page-section" id="page-node-da">
+  <div class="tab-nav">
+    <a onclick="switchTab('disclosure')">信息披露查询</a>
+    <a onclick="switchTab('settlement')">日清算概览</a>
+    <a onclick="switchTab('node-rt')">实时节点电价查询</a>
+    <a class="active">日前节点电价查询</a>
+  </div>
+
+  <div class="filter-bar">
+    <label>查询日期：</label>
+    <input type="date" value="2026-06-20">
+    <label>地区：</label>
+    <select><option>全部</option><option>肇庆</option></select>
+    <button class="btn btn-primary btn-sm">🔍 查询</button>
+    <button class="btn btn-sm">📥 导出</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">日前节点电价查询 - 2026-06-20</div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr><th>时段</th><th>节点</th><th>地区</th><th>电价 (元/MWh)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>00:00</td><td>--</td><td>--</td><td>--</td></tr>
+          <tr><td colspan="4" style="color:#999;">... 更多数据请查看原始Excel文件 (日前节点电价查询(2026-06-20).xlsx)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ========== DATA NOTE ========== -->
+<div class="card" style="margin-top:20px; background:#fffbe6; border:1px solid #ffe58f;">
+  <div style="font-size:13px; color:#ad6800;">
+    <strong>📁 本地数据文件索引：</strong><br>
+    参考/披露数据/<br>
+    &nbsp;&nbsp;├── 披露数据6.19更新/ (2026-06-18 实际, 2026-06-20 预测, 2026-06-14 市场用电/日清算)<br>
+    &nbsp;&nbsp;├── 披露数据6.20更新/ (2026-06-19 实际, 2026-06-21/22 预测, 2026-06-15)<br>
+    &nbsp;&nbsp;├── 披露数据6.21更新/ (2026-06-20 实际, 2026-06-22 预测, 2026-06-16)<br>
+    &nbsp;&nbsp;└── 披露数据6.22更新/ (2026-06-21 实际, 2026-06-23 预测, 2026-06-17)
+  </div>
+</div>
+
+</div><!-- /.page-container -->
+</div><!-- /.main-content -->
+
+<script>
+// ===== Navigation =====
+function switchTab(tabName) {
+  // Update header nav
+  document.querySelectorAll('.header-menu a').forEach(function(a) {
+    a.classList.remove('active');
+    if (a.getAttribute('data-nav') === tabName) a.classList.add('active');
+  });
+
+  // Update page sections
+  document.querySelectorAll('.page-section').forEach(function(s) { s.classList.remove('active'); });
+  var target = document.getElementById('page-' + tabName);
+  if (target) target.classList.add('active');
+
+  // Update inner tab-navs
+  document.querySelectorAll('.tab-nav a').forEach(function(a) { a.classList.remove('active'); });
+  var innerTabs = document.querySelectorAll('#page-' + tabName + ' .tab-nav a');
+  if (innerTabs.length > 0) innerTabs[0].classList.add('active');
+
+  window.location.hash = tabName;
+  window.scrollTo(0, 0);
+}
+
+// Header nav clicks
+document.querySelectorAll('.header-menu a').forEach(function(a) {
+  a.addEventListener('click', function(e) {
+    e.preventDefault();
+    var nav = this.getAttribute('data-nav');
+    if (nav) switchTab(nav);
+  });
+});
+
+// Inner tab-nav clicks (only switch if has onclick or data-nav)
+document.querySelectorAll('.tab-nav a').forEach(function(a) {
+  a.addEventListener('click', function(e) {
+    var onclick = this.getAttribute('onclick');
+    var datanav = this.getAttribute('data-nav');
+    if (!onclick && !datanav) {
+      // Just highlight this tab
+      var parent = this.parentElement;
+      parent.querySelectorAll('a').forEach(function(s) { s.classList.remove('active'); });
+      this.classList.add('active');
+    }
+  });
+});
+
+// Btn-group toggle
+document.querySelectorAll('.btn-group').forEach(function(group) {
+  group.querySelectorAll('.btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      group.querySelectorAll('.btn').forEach(function(b) { b.classList.remove('active'); });
+      this.classList.add('active');
+    });
+  });
+});
+
+// Type tags
+document.querySelectorAll('.type-tags').forEach(function(group) {
+  group.querySelectorAll('.type-tag').forEach(function(tag) {
+    tag.addEventListener('click', function() {
+      group.querySelectorAll('.type-tag').forEach(function(t) { t.classList.remove('active'); });
+      this.classList.add('active');
+    });
+  });
+});
+
+// Generate time points for disclosure table
+(function() {
+  var tbody = document.getElementById('disclosure-tbody');
+  if (tbody) {
+    var html = '';
+    for (var h = 0; h < 24; h++) {
+      for (var m = 0; m < 60; m += 15) {
+        var time = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+        html += '<tr><td>' + time + '</td><td>--</td><td>--</td></tr>';
+      }
+    }
+    tbody.innerHTML = html;
+  }
+})();
+
+// Hash-based routing on load
+(function() {
+  var hash = window.location.hash.replace('#', '');
+  if (hash && ['portal','spot','disclosure','settlement','node-rt','node-da'].indexOf(hash) >= 0) {
+    switchTab(hash);
+  }
+})();
+</script>
+
+<!-- 测试按钮：点击新标签页打开百度（验证构建器跨页追踪） -->
+<div style="position:fixed; bottom:10px; right:10px; z-index:9999; background:#fff; padding:8px 12px; border:1px solid #d9d9d9; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,.15); font-size:12px;">
+  🧪 <a href="https://www.baidu.com" target="_blank" style="color:#1677ff; font-weight:600;">新标签页 → 百度</a>
+</div>
+
+</body>
+</html>
