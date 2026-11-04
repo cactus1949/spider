@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Modal, Form, Input, Select, Switch, Button, Space, Menu, Alert, App as AntApp, Segmented, AutoComplete } from 'antd'
 import { CopyOutlined, DownloadOutlined, FolderOpenOutlined, SyncOutlined, ExportOutlined, ImportOutlined, WarningOutlined } from '@ant-design/icons'
 import { api, settingsStore, type DeliveryOutboxItem, type DeliveryOutboxSummary, type UsbDeviceOption, type WifiNetwork } from '../services/api'
+import UploadProfilesPanel, { type UploadProfilesHandle } from './UploadProfilesPanel'
 
 interface Settings {
   downloadDir: string
@@ -59,6 +60,7 @@ type DeliveryOutboxStatusFilter = 'pending' | 'sending' | 'failed' | 'sent' | ''
 
 const SECTIONS = [
   { key: 'section-basic', label: '📦 基础' },
+  { key: 'section-upload', label: '☁️ 数据上传' },
   { key: 'section-site', label: '🌐 网站信息' },
   // { key: 'section-workshop', label: '📹 录制工坊' },
   // { key: 'section-delivery', label: '📤 结果发送' },
@@ -203,6 +205,7 @@ export default function SettingsModal({
   const [stationsReady, setStationsReady] = useState(false)
   const [stationPicking, setStationPicking] = useState(false)
   const stationsDirty = useRef(false)
+  const uploadProfilesRef = useRef<UploadProfilesHandle>(null)
   const [usbDevices, setUsbDevices] = useState<UsbDeviceOption[]>([])
   const [usbError, setUsbError] = useState('')
   const [usbLoading, setUsbLoading] = useState(false)
@@ -321,6 +324,12 @@ export default function SettingsModal({
 
   const save = async (): Promise<void> => {
     await persistSettings()
+    try {
+      await uploadProfilesRef.current?.save()
+    } catch (error: unknown) {
+      message.error(error instanceof Error ? error.message : String(error))
+      return
+    }
     // 保存路由规则（表单保存成功后）
     if (routeRules.length > 0) {
       try {
@@ -815,6 +824,10 @@ export default function SettingsModal({
                 </>
               )}
               </>}
+
+              <div style={{ display: activeSection === 'section-upload' ? 'block' : 'none' }}>
+                <UploadProfilesPanel ref={uploadProfilesRef} open={open} />
+              </div>
 
               {/* ── 录制工坊 ── */}
               {activeSection === 'section-workshop' && <>

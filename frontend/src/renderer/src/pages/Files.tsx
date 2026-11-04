@@ -13,6 +13,8 @@ import {
   Dropdown,
   Checkbox,
   Tooltip,
+  Modal,
+  Select,
   App as AntApp
 } from 'antd'
 import {
@@ -37,7 +39,8 @@ import {
   CloudUploadOutlined,
   HistoryOutlined
 } from '@ant-design/icons'
-import { settingsStore, api } from '../services/api'
+import { settingsStore, api, type UploadProfile } from '../services/api'
+import { startDataUpload } from '../components/UploadProgress'
 
 // ============================================================
 // Types & helpers
@@ -269,6 +272,9 @@ export default function Files(): JSX.Element {
   const [gridSelected, setGridSelected] = useState<Set<string>>(new Set())
   const [treeSelected, setTreeSelected] = useState<Set<string>>(new Set())
   const [childrenMap, setChildrenMap] = useState<Record<string, DirEntry[]>>({})
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [uploadProfiles, setUploadProfiles] = useState<UploadProfile[]>([])
+  const [uploadProfileId, setUploadProfileId] = useState('')
 
   // ---- init ----
   useEffect(() => {
@@ -558,6 +564,40 @@ export default function Files(): JSX.Element {
     })
   }, [selectedPaths, modal, message, load])
 
+  const openUpload = useCallback(async () => {
+    if (!selectedPaths.length) {
+      message.warning('请先选择文件或文件夹')
+      return
+    }
+    try {
+      const res = await api.listUploadProfiles()
+      const profiles = res.profiles || []
+      setUploadProfiles(profiles)
+      setUploadProfileId(profiles[0]?.id || '')
+      if (!profiles.length) {
+        message.warning('请先在设置 → 数据上传里添加配置')
+        return
+      }
+      setUploadOpen(true)
+    } catch (error: unknown) {
+      message.error('读取上传配置失败: ' + (error instanceof Error ? error.message : String(error)))
+    }
+  }, [message, selectedPaths.length])
+
+  const confirmUpload = (): void => {
+    if (!uploadProfileId) {
+      message.warning('请选择上传配置')
+      return
+    }
+    const profile = uploadProfiles.find((item) => item.id === uploadProfileId)
+    startDataUpload({
+      profileId: uploadProfileId,
+      paths: selectedPaths,
+      title: profile ? `上传 · ${profile.name}` : '文件中心上传'
+    })
+    setUploadOpen(false)
+  }
+
   const handleCompress = useCallback(async () => {
     const paths = selectedPaths
     if (!paths.length) { message.warning('请先选择文件或文件夹'); return }
@@ -649,6 +689,9 @@ export default function Files(): JSX.Element {
             </Button>
             <Button icon={<ExportOutlined />} onClick={handleCompress} style={{ borderRadius: 6 }}>
               压缩下载 ({selCount})
+            </Button>
+            <Button icon={<CloudUploadOutlined />} onClick={() => { void openUpload() }} style={{ borderRadius: 6 }}>
+              上传 ({selCount})
             </Button>
           </>
         )}
@@ -864,6 +907,23 @@ export default function Files(): JSX.Element {
           <Empty description="该目录为空" />
         )}
       </div>
+      <Modal
+        title="选择上传配置"
+        open={uploadOpen}
+        okText="开始上传"
+        cancelText="取消"
+        onOk={confirmUpload}
+        onCancel={() => setUploadOpen(false)}
+      >
+        <div style={{ marginBottom: 8 }}>文件夹会先压缩成 zip，再和文件一起上传。</div>
+        <Select
+          style={{ width: '100%' }}
+          value={uploadProfileId || undefined}
+          placeholder="选择上传配置"
+          options={uploadProfiles.map((item) => ({ label: item.name, value: item.id }))}
+          onChange={setUploadProfileId}
+        />
+      </Modal>
     </div>
   )
 }

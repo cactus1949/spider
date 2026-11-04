@@ -6,6 +6,7 @@ import IndicatorTreeSelect from './IndicatorTreeSelect'
 import { workflowPath } from './workflowTree'
 import { formatDOffset, formatMOffset, formatWOffset } from './DateWindowSlider'
 import { OutputName, OutputPanel } from './OutputPanel'
+import TaskUploadFields from './TaskUploadFields'
 
 const { Text } = Typography
 const MAX_DAYS = 62
@@ -18,6 +19,8 @@ export interface CatchupSelection {
   indicatorMonths: Record<string, string[]>
   /** 单个导出另选的日期，键是 指标::输出key；空列表 = 不补 */
   outputDates: Record<string, string[]>
+  uploadProfileId?: string
+  autoUpload?: boolean
 }
 
 type OutputMode = 'follow' | 'own' | 'skip'
@@ -119,6 +122,8 @@ export default function CatchupModal({ open, workflows, groups, defaultLogin, on
   const [outputPicks, setOutputPicks] = useState<Record<string, Dayjs[]>>({})
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [referenceDate] = useState(() => dayjs().startOf('day'))
+  const [uploadProfileId, setUploadProfileId] = useState('')
+  const [autoUpload, setAutoUpload] = useState(false)
 
   const selected = indicators
     .map((name) => workflows.find((item) => item.name === name))
@@ -192,7 +197,15 @@ export default function CatchupModal({ open, workflows, groups, defaultLogin, on
     const months: Record<string, string[]> = {}
     for (const item of dayIndicators) dates[item.name] = indicatorDates[item.name]
     for (const item of monthIndicators) months[item.name] = indicatorMonths[item.name]
-    onRun({ login, indicators, indicatorDates: dates, indicatorMonths: months, outputDates })
+    onRun({
+      login,
+      indicators,
+      indicatorDates: dates,
+      indicatorMonths: months,
+      outputDates,
+      uploadProfileId,
+      autoUpload
+    })
   }
 
   const renderOutputRows = (item: WorkflowInfo): JSX.Element | null => {
@@ -269,6 +282,15 @@ export default function CatchupModal({ open, workflows, groups, defaultLogin, on
     >
       <div className="catchup-editor">
         <div className="catchup-intro">仅执行一次，不会修改定时任务。时间留空时使用该指标的默认采集范围，具体日期见下方预览。</div>
+        <TaskUploadFields
+          active={open}
+          profileId={uploadProfileId}
+          autoUpload={autoUpload}
+          onChange={(next) => {
+            setUploadProfileId(next.profileId)
+            setAutoUpload(next.autoUpload)
+          }}
+        />
         <div className="task-form-grid">
         <div>
           <div className="catchup-field-label">登录方式</div>

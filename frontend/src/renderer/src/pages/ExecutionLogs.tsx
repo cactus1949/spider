@@ -19,7 +19,8 @@ const TYPE_LABELS: Record<string, { label: string; color: string }> = {
   workflow: { label: '指标播放', color: 'blue' },
   scheduled_auto: { label: '定时自动', color: 'purple' },
   scheduled_manual: { label: '定时手动', color: 'cyan' },
-  catchup: { label: '补数据', color: 'gold' }
+  catchup: { label: '补数据', color: 'gold' },
+  data_upload: { label: '数据上传', color: 'green' }
 }
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
@@ -252,7 +253,8 @@ export default function ExecutionLogs(): JSX.Element {
               { label: '指标播放', value: 'workflow' },
               { label: '定时自动', value: 'scheduled_auto' },
               { label: '定时手动', value: 'scheduled_manual' },
-              { label: '补数据', value: 'catchup' }
+              { label: '补数据', value: 'catchup' },
+              { label: '数据上传', value: 'data_upload' }
             ]}
           />
           <Select

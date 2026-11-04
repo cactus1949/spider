@@ -40,6 +40,7 @@ import StoragePathModal, {
 } from '../components/StoragePathModal'
 import { workflowPath } from '../components/workflowTree'
 import ProgressModal, { type CatchupRun } from '../components/ProgressModal'
+import TaskUploadFields from '../components/TaskUploadFields'
 import CatchupModal from '../components/CatchupModal'
 import { OutputName, OutputPanel } from '../components/OutputPanel'
 import DateWindowSlider, {
@@ -77,6 +78,8 @@ interface AutoTask {
   pathFolders?: PathFolder[]
   pathStructure?: string
   downloadDir?: string
+  uploadProfileId?: string
+  autoUpload?: boolean
   enabled: boolean
   remark?: string
   createdAt: number
@@ -151,6 +154,8 @@ interface FormValues {
   time: Dayjs
   enabled: boolean
   remark?: string
+  uploadProfileId?: string
+  autoUpload?: boolean
 }
 
 async function loadTasksFromApi(): Promise<AutoTask[]> {
@@ -172,6 +177,8 @@ async function loadTasksFromApi(): Promise<AutoTask[]> {
         pathTemplate: c.path_template || '',
         pathFolders: Array.isArray(c.path_folders) ? c.path_folders as PathFolder[] : [],
         pathStructure: typeof c.path_structure === 'string' ? c.path_structure : '',
+        uploadProfileId: typeof c.upload_profile_id === 'string' ? c.upload_profile_id : '',
+        autoUpload: Boolean(c.auto_upload),
         downloadDir: c.download_dir_custom ? (c.download_dir || '') : '',
         enabled: c.enabled ?? true,
         remark: c.remark || '',
@@ -202,6 +209,8 @@ async function saveTaskConfigs(tasks: AutoTask[]): Promise<void> {
         path_template: t.pathTemplate || '',
         path_folders: t.pathFolders || [],
         path_structure: t.pathStructure || '',
+        upload_profile_id: t.uploadProfileId || '',
+        auto_upload: Boolean(t.autoUpload),
         enabled: t.enabled,
         remark: t.remark || '',
         download_dir: t.downloadDir || '',
@@ -410,7 +419,9 @@ export default function Tasks(): JSX.Element {
       weekdays: [1, 2, 3, 4, 5],
       time: dayjs('08:00', 'HH:mm'),
       enabled: true,
-      remark: ''
+      remark: '',
+      uploadProfileId: undefined,
+      autoUpload: false
     })
     setWindows({})
     setOutputWindows({})
@@ -433,7 +444,9 @@ export default function Tasks(): JSX.Element {
       weekdays: task.weekdays || [1, 2, 3, 4, 5],
       time: dayjs(task.time, 'HH:mm'),
       enabled: task.enabled,
-      remark: task.remark || ''
+      remark: task.remark || '',
+      uploadProfileId: task.uploadProfileId || undefined,
+      autoUpload: Boolean(task.autoUpload)
     })
     const saved = Object.fromEntries(
       Object.entries(task.indicatorWindows || {}).map(([name, window]) => [name, [window.start, window.end] as [number, number]])
@@ -509,6 +522,8 @@ export default function Tasks(): JSX.Element {
         downloadDir: '',
         pathFolders,
         pathStructure,
+        uploadProfileId: values.uploadProfileId || '',
+        autoUpload: Boolean(values.autoUpload),
         enabled: values.enabled,
         remark: values.remark?.trim() || undefined,
         createdAt: editing?.createdAt || Date.now()
@@ -955,6 +970,8 @@ export default function Tasks(): JSX.Element {
             </strong>
           </div>
 
+          <TaskUploadFields active={modalOpen && step === 0} />
+
           <Form.Item label="备注" name="remark">
             <Input.TextArea
               rows={2}
@@ -1064,7 +1081,9 @@ export default function Tasks(): JSX.Element {
             indicators: selection.indicators,
             indicatorDates: selection.indicatorDates,
             indicatorMonths: selection.indicatorMonths,
-            outputDates: selection.outputDates
+            outputDates: selection.outputDates,
+            uploadProfileId: selection.uploadProfileId || '',
+            autoUpload: Boolean(selection.autoUpload)
           })
           setCatchupOpen(false)
           setTaskProgressOpen(false)

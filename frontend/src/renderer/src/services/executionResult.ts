@@ -10,6 +10,18 @@ export interface ResultFile {
   reason: string
 }
 
+export interface ExecutionUpload {
+  profileId: string
+  profileName?: string
+  execId: string
+  paths: string[]
+  /** 已经按自动上传跑过 */
+  auto: boolean
+  /** 自动上传结果；还没传时为 null */
+  ok: boolean | null
+  message?: string
+}
+
 export interface ExecutionResult {
   /** 弹窗标题，如「执行完成」「指标播放失败」 */
   title: string
@@ -20,6 +32,8 @@ export interface ExecutionResult {
   message?: string
   /** 按存储目录展开的预期文件和实际结果 */
   files: ResultFile[]
+  /** 选了上传配置时，结果里可以手动上传 */
+  upload?: ExecutionUpload
 }
 
 export interface ResultTreeNode {
@@ -224,6 +238,33 @@ export function filesFromLog(detail: string, labels: Record<string, string> = {}
   return ledger.finish()
 }
 
+/** 从执行日志末尾还原上传提议。采集状态不变，上传成败写在详情里。 */
+export function uploadOfferFromLog(detail: string): ExecutionUpload | undefined {
+  const lines = detail.split(/\r?\n/)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const marker = lines[index].indexOf('upload_offer:')
+    if (marker < 0) continue
+    try {
+      const data = JSON.parse(lines[index].slice(marker + 'upload_offer:'.length).trim()) as Record<string, unknown>
+      const paths = Array.isArray(data.paths) ? data.paths.map((item) => text(item)).filter(Boolean) : []
+      const profileId = text(data.profile_id)
+      if (!profileId) continue
+      return {
+        profileId,
+        profileName: text(data.profile_name),
+        execId: text(data.exec_id),
+        paths,
+        auto: Boolean(data.auto),
+        ok: data.ok == null ? null : Boolean(data.ok),
+        message: text(data.message)
+      }
+    } catch {
+      // 坏掉的一行不影响结果弹窗。
+    }
+  }
+  return undefined
+}
+
 /** 按目录分段收成和存储结构一样的树。 */
 export function buildResultTree(files: ResultFile[]): ResultTreeNode[] {
   const roots: ResultTreeNode[] = []
@@ -263,7 +304,8 @@ export function showExecutionResult(result: ExecutionResult): void {
     status: result.status,
     name: result.name.trim() || '未命名',
     message: result.message?.trim() || undefined,
-    files: result.files || []
+    files: result.files || [],
+    upload: result.upload
   }]
   publish()
 }

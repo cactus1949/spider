@@ -2671,6 +2671,24 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 )
                 for line in delivery_execution_log_lines(ctx, exec_id):
                     ctx.state_store.append_execution_log_detail(exec_id, line)
+            try:
+                from spider_gd.gateway.data_upload_flow import maybe_upload_after_run
+
+                await maybe_upload_after_run(
+                    ctx.state_store,
+                    profile_id=str(cfg.get("upload_profile_id") or ""),
+                    auto_upload=bool(cfg.get("auto_upload")),
+                    exec_id=exec_id,
+                    download_dir=str(dl_dir),
+                    before=download_snapshot,
+                    interface_name=str(ctx.state_store.get_setting("wifiInterfaceName") or ""),
+                )
+            except Exception as upload_exc:
+                logger.warning("定时任务自动上传失败但不影响任务结果：{}", upload_exc)
+                ctx.state_store.append_execution_log_detail(
+                    exec_id,
+                    f"☁️ 上传异常: {upload_exc}",
+                )
             if final_status == "failed" and not zip_path:
                 try:
                     alert = getattr(ctx, "alert", None)

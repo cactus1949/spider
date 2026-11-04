@@ -191,6 +191,8 @@ class CatchupRunRequest(BaseModel):
     download_dir: str = ""
     headless: str = "false"
     minimized: str = "true"
+    upload_profile_id: str = ""
+    auto_upload: bool = False
 
 
 def _make_wf_loader(service):
@@ -1427,6 +1429,8 @@ def create_app(
                     "path_structure": cfg.get("path_structure", ""),
                     "indicator_windows": cfg.get("indicator_windows") or {},
                     "output_windows": cfg.get("output_windows") or {},
+                    "upload_profile_id": cfg.get("upload_profile_id", ""),
+                    "auto_upload": bool(cfg.get("auto_upload", False)),
                 }
                 zf.writestr(filename, _json.dumps(export_data, ensure_ascii=False, indent=2))
 
@@ -1471,6 +1475,8 @@ def create_app(
                     "path_structure": f.get("path_structure", ""),
                     "indicator_windows": f.get("indicator_windows") or {},
                     "output_windows": f.get("output_windows") or {},
+                    "upload_profile_id": f.get("upload_profile_id", ""),
+                    "auto_upload": bool(f.get("auto_upload", False)),
                 })
                 imported.append(cfg_id)
             except Exception as exc:
@@ -1694,6 +1700,8 @@ def create_app(
                     "path_structure": db_cfg.get("path_structure", cfg.get("path_structure", "")),
                     "download_dir": db_cfg.get("download_dir", cfg.get("download_dir", "")),
                     "download_dir_custom": db_cfg.get("download_dir_custom", False),
+                    "upload_profile_id": db_cfg.get("upload_profile_id", ""),
+                    "auto_upload": bool(db_cfg.get("auto_upload", False)),
                 })
             if reference_date.strip():
                 cfg["reference_date"] = reference_date.strip()
@@ -2073,6 +2081,30 @@ def create_app(
                         exec_id,
                         f"⚠️ 稳定发送失败，已进入补发队列: {delivery_exc}",
                     )
+                try:
+                    from spider_gd.gateway.data_upload_flow import maybe_upload_after_run
+
+                    def _emit_upload(data: dict) -> None:
+                        try:
+                            event_queue.put_nowait(data)
+                        except Exception:
+                            pass
+
+                    await maybe_upload_after_run(
+                        service._ctx.state_store,
+                        profile_id=str(cfg.get("upload_profile_id") or ""),
+                        auto_upload=bool(cfg.get("auto_upload")),
+                        exec_id=exec_id,
+                        download_dir=str(dl_dir),
+                        before=download_snapshot,
+                        interface_name=str(service._ctx.state_store.get_setting("wifiInterfaceName") or ""),
+                        on_event=_emit_upload,
+                    )
+                except Exception as upload_exc:
+                    service._ctx.state_store.append_execution_log_detail(
+                        exec_id,
+                        f"☁️ 上传异常: {upload_exc}",
+                    )
                 now_ts2 = _time.strftime("%Y-%m-%d %H:%M:%S")
                 service._ctx.state_store.update_execution_log(
                     exec_id, status=final_status, reason=reason, updated_at=now_ts2,
@@ -2083,20 +2115,35 @@ def create_app(
             task = _asyncio.create_task(_execute_and_finalize())
             _browser_background_tasks.add(task)
             task.add_done_callback(_browser_background_tasks.discard)
+            terminal_events = {"task_done", "task_error", "aborted"}
+            seen_terminal = False
+
+            def _render(data: dict) -> str:
+                return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
             while True:
                 try:
                     data = await _asyncio.wait_for(event_queue.get(), timeout=0.5)
-                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-                    if data.get("event") in ("task_done", "task_error", "aborted"):
+                    yield _render(data)
+                    event_name = data.get("event")
+                    if event_name in terminal_events:
+                        seen_terminal = True
+                    if event_name == "upload_settled":
+                        break
+                    if seen_terminal and task.done() and event_queue.empty():
                         break
                 except _asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     if task.done():
                         while not event_queue.empty():
                             data = event_queue.get_nowait()
-                            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                            yield _render(data)
+                            if data.get("event") == "upload_settled":
+                                break
                         break
             await _asyncio.shield(task)
+            while not event_queue.empty():
+                yield _render(event_queue.get_nowait())
 
         return StreamingResponse(
             _event_generator(),
@@ -2356,6 +2403,8 @@ def create_app(
         settings = service._ctx.state_store.get_all_settings()
         if settings.get("wifiPassword"):
             settings["wifiPassword"] = "******"
+        # 上传配置里的密文不走通用设置接口，避免被设置页整包覆盖或展示。
+        settings.pop("dataUploadProfiles", None)
         if settings.get("stationProfiles"):
             settings["stationProfiles"] = mask_station_profiles(settings["stationProfiles"])
         return {"settings": settings}
@@ -3396,6 +3445,89 @@ def create_app(
             "remote": result.response or {},
         }
 
+    # ---- 数据上传配置与执行 ----
+
+    @app.get("/api/upload-profiles")
+    async def list_upload_profiles() -> dict[str, Any]:
+        """返回上传配置。token 和 WiFi 密码不会出现在响应里。"""
+        from spider_gd.gateway.data_upload_flow import list_public_profiles
+
+        return {"profiles": list_public_profiles(service._ctx.state_store)}
+
+    @app.put("/api/upload-profiles")
+    async def put_upload_profiles(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """整包保存上传配置。秘密留空时沿用已加密的旧值。"""
+        from spider_gd.gateway.data_upload_flow import replace_profiles
+
+        incoming = payload.get("profiles", [])
+        if not isinstance(incoming, list):
+            raise HTTPException(status_code=400, detail="profiles 必须是数组")
+        try:
+            profiles = replace_profiles(service._ctx.state_store, incoming)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "ok", "profiles": profiles}
+
+    @app.post("/api/upload-profiles/test-upload")
+    async def test_upload_profile(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """向接口上传一个小测试文件，不切换 WiFi。"""
+        from spider_gd.gateway.data_upload_flow import run_test_upload
+
+        try:
+            return await run_test_upload(service._ctx.state_store, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/upload-profiles/test-wifi")
+    async def test_upload_wifi(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """测试切换到配置里的 WiFi，已连接则直接提示，否则切过去再切回。"""
+        from spider_gd.gateway.data_upload_flow import run_test_wifi
+
+        interface_name = str(service._ctx.state_store.get_setting("wifiInterfaceName") or "")
+        try:
+            return await asyncio.to_thread(
+                run_test_wifi,
+                service._ctx.state_store,
+                payload,
+                None,
+                interface_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/data-upload/stream")
+    async def stream_data_upload(payload: dict[str, Any] = Body(...)):
+        """按选定配置上传文件或文件夹，用 SSE 推送整体进度和每个文件的状态。"""
+        from spider_gd.gateway.data_upload_flow import iter_upload_events
+
+        profile_id = str(payload.get("profileId") or payload.get("profile_id") or "").strip()
+        raw_paths = payload.get("paths") or []
+        if not profile_id:
+            raise HTTPException(status_code=400, detail="请选择上传配置")
+        if not isinstance(raw_paths, list) or not raw_paths:
+            raise HTTPException(status_code=400, detail="请选择要上传的文件或文件夹")
+        paths = [str(item) for item in raw_paths if str(item).strip()]
+        exec_id = str(payload.get("execId") or payload.get("exec_id") or "").strip()
+        log_name = str(payload.get("name") or "数据上传").strip() or "数据上传"
+        interface_name = str(service._ctx.state_store.get_setting("wifiInterfaceName") or "")
+
+        async def _generate():
+            async for event in iter_upload_events(
+                service._ctx.state_store,
+                profile_id=profile_id,
+                paths=paths,
+                exec_id=exec_id,
+                interface_name=interface_name,
+                log_name=log_name,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            _generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
+
     @app.post("/api/workflows/{name}/run/stream")
     async def post_workflow_stream(name: str, body: WorkflowRunRequest):
         return await run_workflow_stream(name, cert_password=body.cert_password,
@@ -3434,6 +3566,8 @@ def create_app(
                 indicator_months=body.indicator_months,
                 output_dates=body.output_dates,
             )
+            cfg["upload_profile_id"] = (body.upload_profile_id or "").strip()
+            cfg["auto_upload"] = bool(body.auto_upload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return await run_task_stream(

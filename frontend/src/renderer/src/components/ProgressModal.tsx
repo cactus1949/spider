@@ -9,7 +9,8 @@ import {
   ExclamationCircleOutlined
 } from '@ant-design/icons'
 import { settingsStore } from '../services/api'
-import { createDownloadLedger, showExecutionResult } from '../services/executionResult'
+import { createDownloadLedger, showExecutionResult, type ExecutionUpload } from '../services/executionResult'
+import { UploadProgressView, type UploadSnapshot } from './UploadProgress'
 
 const { Text } = Typography
 
@@ -29,6 +30,8 @@ export interface CatchupRun {
   indicatorMonths: Record<string, string[]>
   /** 单个导出另选的日期，键是 指标::输出key；空列表 = 不补 */
   outputDates?: Record<string, string[]>
+  uploadProfileId?: string
+  autoUpload?: boolean
 }
 
 interface Props {
@@ -65,10 +68,18 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const indicatorLabelsRef = useRef(indicatorLabels)
   indicatorLabelsRef.current = indicatorLabels
 
+  const pendingResultRef = useRef<{ title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string } | null>(null)
+  const uploadOfferRef = useRef<ExecutionUpload | undefined>(undefined)
+  const [uploadSnapshot, setUploadSnapshot] = useState<UploadSnapshot | null>(null)
+
   const notifyOnce = (result: { title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string }): void => {
     if (notifiedRef.current) return
     notifiedRef.current = true
-    showExecutionResult({ ...result, files: ledgerRef.current.finish() })
+    showExecutionResult({ ...result, files: ledgerRef.current.finish(), upload: uploadOfferRef.current })
+  }
+
+  const queueResult = (result: { title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string }): void => {
+    pendingResultRef.current = result
   }
 
   useEffect(() => {
@@ -83,6 +94,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
     abortedRef.current = false
     runRef.current = null
     notifiedRef.current = false
+    pendingResultRef.current = null
+    uploadOfferRef.current = undefined
+    setUploadSnapshot(null)
     ledgerRef.current.reset()
     terminalRef.current = false
     taskStatsRef.current = { done: 0, failed: 0, seen: new Map() }
@@ -115,7 +129,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               indicators: catchup.indicators,
               indicator_dates: catchup.indicatorDates,
               indicator_months: catchup.indicatorMonths,
-              output_dates: catchup.outputDates || {}
+              output_dates: catchup.outputDates || {},
+              upload_profile_id: catchup.uploadProfileId || '',
+              auto_upload: Boolean(catchup.autoUpload)
             }
           : Object.fromEntries(params)
         const res = await fetch(url, {
@@ -160,6 +176,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         }
       } finally {
         setRunning(false)
+        if (pendingResultRef.current && (!abortedRef.current || terminalRef.current)) {
+          notifyOnce(pendingResultRef.current)
+        }
       }
     }
 
@@ -435,7 +454,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         setError(msg)
         setRunning(false)
         terminalRef.current = true
-        notifyOnce({
+        queueResult({
           title: '执行已停止',
           status: 'warning',
           name: title || workflowName,
@@ -484,7 +503,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
       case 'task_done':
         terminalRef.current = true
         setRunning(false)
-        notifyOnce({
+        queueResult({
           title: '执行完成',
           status: taskStatsRef.current.failed > 0 ? 'warning' : 'success',
           name: title || workflowName,
@@ -496,13 +515,39 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         terminalRef.current = true
         setError(data.error as string)
         setRunning(false)
-        notifyOnce({
+        queueResult({
           title: '执行失败',
           status: 'error',
           name: title || workflowName,
           message: String(data.error || '任务执行失败')
         })
         break
+
+      case 'upload_progress':
+        setUploadSnapshot({
+          phase: String(data.phase || ''),
+          files: Array.isArray(data.files) ? data.files as UploadSnapshot['files'] : [],
+          done: Number(data.done || 0),
+          total: Number(data.total || 0),
+          percent: Number(data.percent || 0),
+          message: String(data.message || ''),
+          ok: data.ok == null ? null : Boolean(data.ok)
+        })
+        break
+
+      case 'upload_offer': {
+        const paths = Array.isArray(data.paths) ? data.paths.map((item) => String(item)) : []
+        uploadOfferRef.current = {
+          profileId: String(data.profile_id || ''),
+          profileName: String(data.profile_name || ''),
+          execId: String(data.exec_id || ''),
+          paths,
+          auto: Boolean(data.auto),
+          ok: data.ok == null ? null : Boolean(data.ok),
+          message: String(data.message || '')
+        }
+        break
+      }
     }
   }
 
@@ -590,6 +635,13 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         <div style={{ textAlign: 'center', padding: 40 }}>
           <LoadingOutlined style={{ fontSize: 32, color: '#1677ff' }} />
           <div style={{ marginTop: 12, color: '#999' }}>正在启动浏览器...</div>
+        </div>
+      )}
+
+      {uploadSnapshot && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 600, marginBottom: 8 }}>上传进度</div>
+          <UploadProgressView snapshot={uploadSnapshot} />
         </div>
       )}
 

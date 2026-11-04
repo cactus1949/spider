@@ -8,8 +8,9 @@ import Indicators from './pages/Indicators'
 import ExecutionLogs from './pages/ExecutionLogs'
 import RecordWorkshop from './pages/RecordWorkshop'
 import ExecutionResultModal from './components/ExecutionResultModal'
+import { UploadProgressHost } from './components/UploadProgress'
 import { api, settingsStore } from './services/api'
-import { filesFromLog, showExecutionResult } from './services/executionResult'
+import { filesFromLog, showExecutionResult, uploadOfferFromLog } from './services/executionResult'
 
 export default function App(): JSX.Element {
   const { notification: notif } = AntApp.useApp()
@@ -40,9 +41,11 @@ export default function App(): JSX.Element {
           if (seenScheduledRef.current.has(item.exec_id)) continue
           seenScheduledRef.current.add(item.exec_id)
           let files = [] as ReturnType<typeof filesFromLog>
+          let upload: ReturnType<typeof uploadOfferFromLog>
           try {
             const detail = await api.getExecutionLog(item.exec_id)
             files = filesFromLog(detail.detail_log || '')
+            upload = uploadOfferFromLog(detail.detail_log || '')
           } catch {
             // 详情取不到时仍弹出结果，树为空。
           }
@@ -51,7 +54,8 @@ export default function App(): JSX.Element {
             status: item.status === 'success' ? 'success' : 'error',
             name: item.name,
             message: item.status === 'success' ? '任务已成功完成' : (item.reason || '任务执行失败'),
-            files
+            files,
+            upload
           })
         }
       } catch {
@@ -143,6 +147,7 @@ export default function App(): JSX.Element {
   return (
     <>
       <ExecutionResultModal />
+      <UploadProgressHost />
       {downloadState && (
         <div
           style={{

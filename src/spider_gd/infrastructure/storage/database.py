@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS task_configs (
     path_template TEXT NOT NULL DEFAULT '',
     path_folders TEXT NOT NULL DEFAULT '',
     path_structure TEXT NOT NULL DEFAULT '',
+    upload_profile_id TEXT NOT NULL DEFAULT '',
+    auto_upload INTEGER NOT NULL DEFAULT 0,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -234,6 +236,8 @@ class TaskStateStore:
             ("path_template", "TEXT NOT NULL DEFAULT ''"),
             ("path_folders", "TEXT NOT NULL DEFAULT ''"),
             ("path_structure", "TEXT NOT NULL DEFAULT ''"),
+            ("upload_profile_id", "TEXT NOT NULL DEFAULT ''"),
+            ("auto_upload", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             if col not in existing:
                 try:
@@ -294,7 +298,8 @@ class TaskStateStore:
                         name=?, login=?, indicators=?, repeat=?, time=?,
                         weekdays=?, backfill_days=?, cover_days=?,
                         enabled=?, remark=?, download_dir=?, download_dir_custom=?, indicator_windows=?,
-                        output_windows=?, path_template=?, path_folders=?, path_structure=?, updated_at=?
+                        output_windows=?, path_template=?, path_folders=?, path_structure=?,
+                        upload_profile_id=?, auto_upload=?, updated_at=?
                     WHERE id=?""",
                     (
                         cfg["name"], cfg.get("login", ""),
@@ -305,7 +310,10 @@ class TaskStateStore:
                         int(cfg.get("enabled", True)), cfg.get("remark", ""),
                         cfg.get("download_dir", ""), int(bool(cfg.get("download_dir_custom", False))), windows_json,
                         output_windows_json, cfg.get("path_template", ""), folders_json,
-                        cfg.get("path_structure", ""), now, cfg["id"],
+                        cfg.get("path_structure", ""),
+                        str(cfg.get("upload_profile_id") or ""),
+                        int(bool(cfg.get("auto_upload", False))),
+                        now, cfg["id"],
                     ),
                 )
             else:
@@ -317,8 +325,8 @@ class TaskStateStore:
                         (id, name, login, indicators, repeat, time, weekdays,
                          backfill_days, cover_days, enabled, remark, download_dir, download_dir_custom,
                          indicator_windows, output_windows, path_template, path_folders, path_structure,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         upload_profile_id, auto_upload, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         cfg["id"], cfg["name"], cfg.get("login", ""),
                         json.dumps(cfg.get("indicators", [])),
@@ -328,7 +336,10 @@ class TaskStateStore:
                         int(cfg.get("enabled", True)), cfg.get("remark", ""),
                         cfg.get("download_dir", ""), int(bool(cfg.get("download_dir_custom", False))), windows_json,
                         output_windows_json, cfg.get("path_template", ""), folders_json,
-                        cfg.get("path_structure", ""), now, now,
+                        cfg.get("path_structure", ""),
+                        str(cfg.get("upload_profile_id") or ""),
+                        int(bool(cfg.get("auto_upload", False))),
+                        now, now,
                     ),
                 )
             self._conn.commit()
@@ -1409,6 +1420,8 @@ def _task_config_row(row: sqlite3.Row) -> dict:
         "path_template": _col("path_template", ""),
         "path_folders": _parse_path_folders(_col("path_folders", "")),
         "path_structure": _col("path_structure", ""),
+        "upload_profile_id": _col("upload_profile_id", "") or "",
+        "auto_upload": bool(_col("auto_upload", 0)),
         "created_at": _col("created_at", 0), "updated_at": _col("updated_at", 0),
     }
 

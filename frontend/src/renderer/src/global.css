@@ -1046,3 +1046,67 @@ body {
   margin-top: 16px;
   color: #8a8f95;
 }
+
+.up-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.up-message {
+  color: #5a6068;
+  line-height: 1.6;
+}
+
+.up-files {
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+}
+
+.up-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.up-file:last-child {
+  border-bottom: none;
+}
+
+.up-file-icon {
+  color: #8a8f95;
+}
+
+.up-file.is-success .up-file-icon {
+  color: #10b981;
+}
+
+.up-file.is-failed .up-file-icon {
+  color: #ef4444;
+}
+
+.up-file-name {
+  flex: 0 1 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.up-file-message {
+  flex: 1;
+  min-width: 0;
+  color: #8a8f95;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.up-empty,
+.up-retry {
+  color: #8a8f95;
+  padding: 8px 0;
+}

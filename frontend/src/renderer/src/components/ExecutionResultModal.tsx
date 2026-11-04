@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Button, Modal, Tag } from 'antd'
-import { FileTextOutlined, FolderOpenOutlined, FolderOutlined } from '@ant-design/icons'
+import { CloudUploadOutlined, FileTextOutlined, FolderOpenOutlined, FolderOutlined } from '@ant-design/icons'
+import { startDataUpload } from './UploadProgress'
 import {
   buildResultTree,
   countTreeFiles,
@@ -81,7 +82,24 @@ export default function ExecutionResultModal(): JSX.Element {
       destroyOnClose
       onCancel={dismissExecutionResult}
       footer={
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {current?.upload && current.upload.profileId && current.upload.paths.length > 0 && current.upload.ok !== true && (
+            <Button
+              icon={<CloudUploadOutlined />}
+              onClick={() => {
+                const upload = current.upload
+                if (!upload) return
+                startDataUpload({
+                  profileId: upload.profileId,
+                  paths: upload.paths,
+                  execId: upload.execId,
+                  title: upload.auto ? '重新上传' : '上传'
+                })
+              }}
+            >
+              {current.upload.auto ? '重新上传' : '上传'}
+            </Button>
+          )}
           <Button type="primary" onClick={dismissExecutionResult}>确认</Button>
         </div>
       }

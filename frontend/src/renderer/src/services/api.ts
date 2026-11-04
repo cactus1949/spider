@@ -99,10 +99,36 @@ export interface WorkflowGroup {
   parent_id: string | null
 }
 
+export interface UploadProfile {
+  id: string
+  name: string
+  url: string
+  token: string
+  tokenSaved: boolean
+  tokenMode: 'header' | 'param'
+  tokenHeaderName: string
+  tokenValuePrefix: string
+  tokenParamName: string
+  tokenParamIn: 'query' | 'form'
+  wifiSsid: string
+  wifiPassword: string
+  wifiPasswordSaved: boolean
+  wifiInterface: string
+}
+
+export interface UploadProfileTestResult {
+  ok: boolean
+  message: string
+  attempts?: number
+  alreadyConnected?: boolean
+  restored?: boolean
+  details?: string[]
+}
+
 export interface ExecutionLogItem {
   exec_id: string
   name: string
-  type: 'workflow' | 'scheduled_auto' | 'scheduled_manual'
+  type: 'workflow' | 'scheduled_auto' | 'scheduled_manual' | 'catchup' | 'data_upload'
   target_id: string
   status: 'running' | 'success' | 'failed'
   reason: string
@@ -624,6 +650,23 @@ export const api = {
   // ---- 文件上传 ----
   uploadFile: (body: { localPath: string; relativePath?: string }) =>
     req<{ status: string; message: string; remote?: unknown }>('/api/files/upload', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    }),
+
+  listUploadProfiles: () => req<{ profiles: UploadProfile[] }>('/api/upload-profiles'),
+  saveUploadProfiles: (profiles: UploadProfile[]) =>
+    req<{ status: string; profiles: UploadProfile[] }>('/api/upload-profiles', {
+      method: 'PUT',
+      body: JSON.stringify({ profiles })
+    }),
+  testUploadProfile: (body: { profileId?: string; profile?: Partial<UploadProfile> }) =>
+    req<UploadProfileTestResult>('/api/upload-profiles/test-upload', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    }),
+  testUploadWifi: (body: { profileId?: string; profile?: Partial<UploadProfile> }) =>
+    req<UploadProfileTestResult>('/api/upload-profiles/test-wifi', {
       method: 'POST',
       body: JSON.stringify(body)
     })
