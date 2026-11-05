@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { Modal, Button, Space, Tag, Typography } from 'antd'
+import { Modal, Button, Space, Tag, Typography, Collapse } from 'antd'
 import {
   LoadingOutlined,
   CheckCircleOutlined,
@@ -34,6 +34,18 @@ export interface CatchupRun {
   autoUpload?: boolean
 }
 
+interface IndicatorRow {
+  key: string
+  indicator: string
+  slot: string
+  slots: string[]
+  label: string
+  target: string
+  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped'
+  retry: number
+  message: string
+}
+
 interface Props {
   open: boolean
   workflowName: string
@@ -43,12 +55,22 @@ interface Props {
   catchup?: CatchupRun | null
   title?: string
   indicatorLabels?: Record<string, string>
+  /** 从某次执行继续。空则按原入口新跑。 */
+  resumeExecId?: string
   onClose: () => void
+}
+
+const INDICATOR_STATUS_TEXT: Record<IndicatorRow['status'], string> = {
+  pending: '待执行',
+  running: '执行中',
+  success: '成功',
+  failed: '失败',
+  skipped: '跳过'
 }
 
 const BASE = 'http://localhost:8800'
 
-export default function ProgressModal({ open, workflowName, headless, minimized = false, isTask, catchup = null, title, indicatorLabels = {}, onClose }: Props): JSX.Element {
+export default function ProgressModal({ open, workflowName, headless, minimized = false, isTask, catchup = null, title, indicatorLabels = {}, resumeExecId = '', onClose }: Props): JSX.Element {
   const [steps, setSteps] = useState<StepProgress[]>([])
   const [running, setRunning] = useState(false)
   const [needInput, setNeedInput] = useState(false)
@@ -71,6 +93,12 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const pendingResultRef = useRef<{ title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string } | null>(null)
   const uploadOfferRef = useRef<ExecutionUpload | undefined>(undefined)
   const [uploadSnapshot, setUploadSnapshot] = useState<UploadSnapshot | null>(null)
+  const [indicators, setIndicators] = useState<IndicatorRow[]>([])
+  const [resumeToken, setResumeToken] = useState(0)
+  const execIdRef = useRef('')
+  const resumeSlotsRef = useRef<string[] | null>(null)
+  const indicatorsRef = useRef<IndicatorRow[]>([])
+  indicatorsRef.current = indicators
 
   const notifyOnce = (result: { title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string }): void => {
     if (notifiedRef.current) return
@@ -83,10 +111,15 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   }
 
   useEffect(() => {
-    if (!open || !workflowName) return
+    if (!open || !workflowName) {
+      if (!open) resumeSlotsRef.current = null
+      return
+    }
+    const continuing = resumeSlotsRef.current !== null && Boolean(execIdRef.current)
 
     // Reset
     setSteps([])
+    if (!continuing) setIndicators([])
     setRunning(true)
     setNeedInput(false)
     setPauseMessage('')
@@ -119,10 +152,17 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         params.set('minimized', String(minimized))
 
         const basePath = isTask ? '/api/tasks' : '/api/workflows'
-        const url = catchup
+        const resumeId = resumeSlotsRef.current !== null ? execIdRef.current : resumeExecId
+        const onlySlots = resumeSlotsRef.current
+        resumeSlotsRef.current = null
+        const url = resumeId
+          ? `${BASE}/api/executions/${encodeURIComponent(resumeId)}/resume/stream`
+          : catchup
           ? `${BASE}/api/catchup/run/stream`
           : `${BASE}${basePath}/${encodeURIComponent(workflowName)}/run/stream`
-        const payload = catchup
+        const payload = resumeId
+          ? { ...Object.fromEntries(params), slots: onlySlots || [] }
+          : catchup
           ? {
               ...Object.fromEntries(params),
               login: catchup.login,
@@ -188,7 +228,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
       abortedRef.current = true
       readerRef.current?.cancel()
     }
-  }, [open, workflowName, headless, minimized, isTask, catchup])
+  }, [open, workflowName, headless, minimized, isTask, catchup, resumeExecId, resumeToken])
 
   const handleEvent = (data: Record<string, unknown>): void => {
     if (data.run_id) runRef.current = { run_id: String(data.run_id), pause_version: Number(data.pause_version || 0) }
@@ -202,6 +242,43 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
           setSteps([])
         }
         break
+
+      case 'run_context':
+        if (data.exec_id) execIdRef.current = String(data.exec_id)
+        break
+
+      case 'indicator_plan': {
+        const items = Array.isArray(data.items) ? data.items as Array<Record<string, unknown>> : []
+        setIndicators(items.map((item, index) => ({
+          key: String(item.slot || item.indicator || index),
+          indicator: String(item.indicator || ''),
+          slot: String(item.slot || ''),
+          slots: Array.isArray(item.slots) ? item.slots.map((slot) => String(slot)) : [String(item.slot || '')],
+          label: indicatorLabelsRef.current[String(item.indicator || '')] || String(item.indicator || ''),
+          target: String(item.target || ''),
+          status: 'pending',
+          retry: 0,
+          message: ''
+        })))
+        break
+      }
+
+      case 'indicator_status': {
+        const slot = String(data.slot || '')
+        const indicator = String(data.indicator || '')
+        const status = String(data.status || 'pending') as IndicatorRow['status']
+        setIndicators((prev) => prev.map((row) => {
+          const hit = (slot && (row.slot === slot || row.slots.includes(slot))) || (!slot && row.indicator === indicator)
+          if (!hit) return row
+          return {
+            ...row,
+            status: status === 'success' || status === 'failed' || status === 'skipped' || status === 'running' ? status : row.status,
+            retry: Number(data.retry || 0),
+            message: String(data.message || '')
+          }
+        }))
+        break
+      }
 
       case 'task_step': {
         // 任务级步骤（登录/指标切换）
@@ -565,6 +642,15 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const handleContinue = (): void => { void controlRun('resume') }
   const handleStop = (): void => { void controlRun('cancel') }
 
+  const retrySlots = (slots: string[]): void => {
+    if (!execIdRef.current || running) return
+    resumeSlotsRef.current = slots
+    setError(null)
+    setResumeToken((value) => value + 1)
+  }
+
+  const failedSlotKeys = indicators.filter((row) => row.status === 'failed').flatMap((row) => row.slots.filter(Boolean))
+
   const statusIcon = (status: string): React.ReactNode => {
     switch (status) {
       case 'running': return <LoadingOutlined style={{ color: '#1677ff' }} />
@@ -599,10 +685,13 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               继续
             </Button>
           )}
+          {!running && failedSlotKeys.length > 0 && (
+            <Button onClick={() => retrySlots(failedSlotKeys)}>重试全部失败项</Button>
+          )}
           <Button onClick={onClose}>关闭</Button>
         </Space>
       }
-      width={560}
+      width={720}
       maskClosable={false}
     >
       {/* Error */}
@@ -645,7 +734,51 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         </div>
       )}
 
+      {indicators.length > 0 && (
+        <div style={{ maxHeight: 280, overflow: 'auto', marginBottom: 12 }}>
+          {indicators.map((row) => (
+            <div
+              key={row.key}
+              style={{
+                display: 'flex',
+                gap: 8,
+                alignItems: 'center',
+                padding: '8px 10px',
+                borderRadius: 6,
+                marginBottom: 6,
+                background: row.status === 'running' ? '#e6f4ff' : '#fafafa',
+                outline: row.status === 'running' ? '1px solid #91caff' : 'none'
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: row.status === 'running' ? 600 : 400 }}>
+                  {row.label || row.indicator}
+                  {row.target ? ` · ${row.target}` : ''}
+                </div>
+                <div style={{ fontSize: 12, color: '#888' }}>
+                  {INDICATOR_STATUS_TEXT[row.status]}
+                  {row.retry > 0 ? ` · 已重试 ${row.retry} 次` : ''}
+                  {row.message ? ` · ${row.message}` : ''}
+                </div>
+              </div>
+              <Tag color={row.status === 'success' ? 'success' : row.status === 'failed' ? 'error' : row.status === 'running' ? 'processing' : 'default'}>
+                {INDICATOR_STATUS_TEXT[row.status]}
+              </Tag>
+              {row.status === 'failed' && !running && (
+                <Button size="small" onClick={() => retrySlots(row.slots.filter(Boolean))}>重试</Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {steps.length > 0 && (
+        <Collapse
+          ghost
+          items={[{
+            key: 'steps',
+            label: '步骤详情',
+            children: (
         <div style={{ maxHeight: 400, overflow: 'auto' }}>
           {steps.map((s, i) => (
             <div
@@ -677,6 +810,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
             </div>
           ))}
         </div>
+            )
+          }]}
+        />
       )}
     </Modal>
   )

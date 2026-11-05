@@ -12,6 +12,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import type { Dayjs } from 'dayjs'
 import { api, settingsStore, type ExecutionLogItem, type ExecutionLogDetail } from '../services/api'
+import ProgressModal from '../components/ProgressModal'
 
 const { Text } = Typography
 
@@ -49,6 +50,7 @@ export default function ExecutionLogs(): JSX.Element {
   const [detailLoading, setDetailLoading] = useState(false)
 
   const [downloading, setDownloading] = useState<string | null>(null)
+  const [resumeTarget, setResumeTarget] = useState<ExecutionLogItem | null>(null)
 
   // 多选批量删除（只针对当前页）
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -108,7 +110,8 @@ export default function ExecutionLogs(): JSX.Element {
 
   // 下载
   const handleDownload = useCallback(async (execId: string) => {
-    const dlDir = settingsStore.get('downloadDir', '')
+    const settings = await settingsStore.load().catch(() => ({} as Record<string, string>))
+    const dlDir = settings.downloadDir || settingsStore.get('downloadDir', '')
     setDownloading(execId)
     try {
       const res = await api.downloadExecutionLog(execId, dlDir)
@@ -205,10 +208,19 @@ export default function ExecutionLogs(): JSX.Element {
     {
       title: '操作',
       key: 'actions',
-      width: 120,
+      width: 168,
       fixed: 'right',
-      render: (_, record) => (
+      render: (_, record) => {
+        const canResume = record.status !== 'success'
+          && record.type !== 'workflow'
+          && record.type !== 'data_upload'
+        return (
         <Space size={4}>
+          {canResume && (
+            <Tooltip title="从中断处继续">
+              <Button type="link" size="small" onClick={() => setResumeTarget(record)}>继续</Button>
+            </Tooltip>
+          )}
           <Tooltip title="查看详情">
             <Button type="link" size="small" icon={<EyeOutlined />}
               onClick={() => handleView(record.exec_id)} />
@@ -225,7 +237,8 @@ export default function ExecutionLogs(): JSX.Element {
             </Tooltip>
           </Popconfirm>
         </Space>
-      )
+        )
+      }
     }
   ]
 
@@ -405,6 +418,15 @@ export default function ExecutionLogs(): JSX.Element {
           </div>
         )}
       </Drawer>
+      <ProgressModal
+        open={Boolean(resumeTarget)}
+        workflowName={resumeTarget?.target_id || resumeTarget?.name || ''}
+        title={`从中断处继续：${resumeTarget?.name || ''}`}
+        headless={false}
+        isTask
+        resumeExecId={resumeTarget?.exec_id || ''}
+        onClose={() => setResumeTarget(null)}
+      />
     </div>
   )
 }

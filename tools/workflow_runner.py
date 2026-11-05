@@ -432,6 +432,71 @@ _CALENDAR_EXTRACT_JS = r"""
 """
 
 
+_CAPTCHA_REFRESH_MIN_MS = 800
+_CAPTCHA_REFRESH_MAX_MS = 1500
+
+
+def captcha_refresh_count(step: dict) -> int:
+    """读取验证码识别前要主动刷新的次数。
+
+    ``refresh_before`` 与旧字段 ``pre_refresh`` 都认，默认 0（不预先刷新）。
+    刷新必须走低痕迹点击，并且两次之间至少间隔 800 毫秒，避免瑞数 400。
+
+    Args:
+        step (dict): captcha 步骤。
+
+    Returns:
+        int: 非负次数。写了非法数字时按 0。
+
+    Examples:
+        >>> captcha_refresh_count({"refresh_before": 2})
+        2
+        >>> captcha_refresh_count({"pre_refresh": 1})
+        1
+        >>> captcha_refresh_count({})
+        0
+    """
+    raw = step.get("refresh_before", step.get("pre_refresh", 0))
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def captcha_refresh_delay_s(step: dict, rng: random.Random | None = None) -> float:
+    """这次刷新之前要等待的秒数，带抖动，并且不会低于 0.8 秒。
+
+    没写 ``refresh_interval_ms`` / ``pre_refresh_interval_ms`` 时，在 800 到 1500 毫秒之间取。
+    写了更小的间隔也会抬到 800 毫秒：点得太密会触发瑞数 HTTP 400。
+
+    Args:
+        step (dict): captcha 步骤。
+        rng (random.Random | None): 随机源。空则用全局随机，测试可传入固定种子。
+
+    Returns:
+        float: 等待秒数，不小于 0.8。
+
+    Examples:
+        >>> captcha_refresh_delay_s({}, random.Random(1)) >= 0.8
+        True
+        >>> captcha_refresh_delay_s({"refresh_interval_ms": 200}, random.Random(1)) >= 0.8
+        True
+    """
+    picker = rng or random
+    raw = step.get("refresh_interval_ms", step.get("pre_refresh_interval_ms"))
+    if raw is None:
+        delay_ms = picker.uniform(_CAPTCHA_REFRESH_MIN_MS, _CAPTCHA_REFRESH_MAX_MS)
+    else:
+        try:
+            base = float(raw)
+        except (TypeError, ValueError):
+            base = float(_CAPTCHA_REFRESH_MIN_MS)
+        base = max(base, float(_CAPTCHA_REFRESH_MIN_MS))
+        delay_ms = base * picker.uniform(0.9, 1.1)
+        delay_ms = max(delay_ms, float(_CAPTCHA_REFRESH_MIN_MS))
+    return delay_ms / 1000
+
+
 class WorkflowRunner:
     """解析 YAML 工作流，通过 CDP 操控 Chrome 逐步执行。"""
 
@@ -3349,7 +3414,12 @@ class WorkflowRunner:
         logger.info("  已勾选: {}", selector)
 
     async def _do_captcha(self, step: dict) -> None:
-        """按需刷新验证码，识别并填入；登录由独立 click 步骤提交。"""
+        """识别 4 位验证码并填入；长度不对就换图重试，登录仍由后面的 click 提交。
+
+        识别前可用 ``refresh_before``（旧名 ``pre_refresh``）先换几张图。
+        每次点击验证码图片都走低痕迹坐标点击，间隔默认在 800–1500 毫秒之间抖动，
+        并且不会低于 800 毫秒，避免瑞数把刷新当成脚本打回 HTTP 400。
+        """
         import sys as _sys
         _src = Path(__file__).resolve().parent.parent / "src"
         if str(_src) not in _sys.path:
@@ -3358,26 +3428,23 @@ class WorkflowRunner:
         img_selector = step.get("captcha_img", "img[src^='data:image']")
         input_selector = step.get("captcha_input", "#validateOnly_verifyCode")
         retry = step.get("retry", 5)
+        try:
+            retry = max(1, int(retry))
+        except (TypeError, ValueError):
+            retry = 5
         if any(key in step for key in ("submit_selector", "login_retry", "submit_wait_ms")):
             raise WorkflowExecutionError("captcha 不再提交登录；请把 submit_selector 改为后续独立 click 步骤，并移除 login_retry / submit_wait_ms")
-        pre_refresh = step.get("pre_refresh", 0)
+        pre_refresh = captcha_refresh_count(step)
 
         from spider_gd.core.crawler.captcha_solver import CaptchaSolver
         solver = CaptchaSolver()
 
-        # 预处理：先刷新验证码 N 次再识别（减少噪点/干扰线）
-        # 注意：每次刷新都是一个新的服务端 key，连点太快既容易和图对不上，
-        # 也可能触发站点对“验证码刷新频率”的限制，所以按间隔来。
+        # 预处理：先刷新验证码 N 次再识别（减少噪点/干扰线）。
+        # 每次刷新都是新的服务端 key。点得太快会和图对不上，也会触发 400。
         if pre_refresh > 0:
-            interval = step.get("pre_refresh_interval_ms", 800) / 1000
-            logger.info("  验证码预刷新 {} 次（间隔 {:.1f}s）...", pre_refresh, interval)
+            logger.info("  验证码预刷新 {} 次（低痕迹点击，间隔至少 0.8s）...", pre_refresh)
             for refresh_index in range(pre_refresh):
-                await self._stop_captcha_on_request_error()
-                await self._trace_browser_action(f"captcha.before_refresh_{refresh_index + 1}")
-                if not await self._low_profile_click(img_selector, timeout=3000):
-                    logger.debug("  验证码图不可见，跳过本次预刷新")
-                await asyncio.sleep(interval)
-                await self._trace_browser_action(f"captcha.after_refresh_{refresh_index + 1}")
+                await self._refresh_captcha_image(img_selector, step, f"before_{refresh_index + 1}")
             await asyncio.sleep(0.3)
 
         _attempt = 0
@@ -3398,21 +3465,17 @@ class WorkflowRunner:
                 return
 
             except CaptchaError as exc:
-                screenshot = await self._capture_failure_screenshot("captcha_failed")
-                self._emit(
-                    "captcha_failed",
-                    error=str(exc),
-                    attempt=_attempt,
-                    screenshot=screenshot,
-                )
-                raise
+                logger.warning("  验证码结果无效（第 {}/{} 次）: {}", _attempt, retry, exc)
+                if _attempt < retry:
+                    await self._refresh_captcha_image(img_selector, step, f"retry_{_attempt}")
+                    continue
             except WorkflowExecutionError:
                 raise
             except Exception as exc:
                 logger.warning("  验证码识别第 {}/{} 次失败: {}", _attempt, retry, exc)
                 if _attempt < retry:
-                    await self._low_profile_click(img_selector, timeout=3000)
-                    await asyncio.sleep(1)
+                    await self._refresh_captcha_image(img_selector, step, f"error_{_attempt}")
+                    continue
 
         # 全部失败 → 暂停等人工输入
         logger.error("  验证码识别全部 {} 次失败，暂停等待人工输入", retry)
@@ -3430,6 +3493,42 @@ class WorkflowRunner:
             if ok:
                 return
         raise WorkflowExecutionError(f"验证码自动识别失败（{retry}次）")
+
+    async def _refresh_captcha_image(self, img_selector: str, step: dict, label: str) -> None:
+        """用低痕迹点击换一张验证码，并等到图片地址变化。
+
+        出现请求异常时沿用原有暂停，不再继续点。点不到图片就记一笔并返回，
+        让识别自己失败，而不是改用 locator.click。
+
+        Args:
+            img_selector (str): 验证码图片选择器。
+            step (dict): captcha 步骤，用来读刷新间隔。
+            label (str): 写进动作轨迹的阶段名。
+
+        Returns:
+            None: 刷新结束后返回。请求异常时改为抛出 ``WorkflowPaused``。
+
+        Examples:
+            >>> captcha_refresh_delay_s({"refresh_interval_ms": 800}, random.Random(0)) >= 0.8
+            True
+        """
+        await self._stop_captcha_on_request_error()
+        before = await self._dom_attr(img_selector, "src")
+        delay_s = captcha_refresh_delay_s(step)
+        await self._trace_browser_action(f"captcha.refresh_{label}")
+        clicked = await self._low_profile_click(img_selector, timeout=3000)
+        if not clicked:
+            logger.warning("  验证码图不可点击，跳过本次刷新")
+        await asyncio.sleep(delay_s)
+        await self._stop_captcha_on_request_error()
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            current = await self._dom_attr(img_selector, "src")
+            if current and current != before:
+                break
+            await asyncio.sleep(0.15)
+        await self._wait_captcha_stable(img_selector)
+        await self._trace_browser_action(f"captcha.refreshed_{label}")
 
     async def _stop_captcha_on_request_error(self) -> None:
         await self._drain_response_captures()

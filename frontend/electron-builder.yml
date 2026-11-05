@@ -31,6 +31,8 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: 广东电力数据采集
+  # 用户数据在 Electron userData（%APPDATA%），卸载安装目录时不能删。
+  deleteAppDataOnUninstall: false
   include: resources/installer.nsh
 publish:
   provider: generic

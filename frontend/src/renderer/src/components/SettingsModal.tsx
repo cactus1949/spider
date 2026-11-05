@@ -212,16 +212,12 @@ export default function SettingsModal({
   const [ukeyChecking, setUkeyChecking] = useState(false)
   const [ukeyChecked, setUkeyChecked] = useState(false)
   const [ukeyDownloading, setUkeyDownloading] = useState(false)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [settingsError, setSettingsError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const baselineRef = useRef<Record<string, string>>({})
 
-  useEffect(() => {
-    if (!open) {
-      stationsDirty.current = false
-      setStationsReady(false)
-      return
-    }
-    stationsDirty.current = false
-    if (open) {
-      settingsStore.load().then((s) => {
+  const applyLoadedSettings = useCallback((s: Record<string, string>): Record<string, string> => {
         window.api.getVersion().then(setVersion)
         const merged = { ...DEFAULTS }
         for (const [k, v] of Object.entries(s)) {
@@ -231,7 +227,7 @@ export default function SettingsModal({
         }
         const mode = merged.loginMode || 'cert'
         setLoginMode(mode)
-        form.setFieldsValue({
+        const formValues = {
           downloadDir: merged.downloadDir,
           autoLaunch: merged.autoLaunch,
           siteUrl: merged.siteUrl,
@@ -281,15 +277,46 @@ export default function SettingsModal({
           wifiConnectTimeoutSec: merged.wifiConnectTimeoutSec,
           wifiFailTaskOnError: merged.wifiFailTaskOnError,
           multiStationEnabled: merged.multiStationEnabled
-        })
+        }
+        form.setFieldsValue(formValues)
         setDir(merged.downloadDir)
         const savedStations = (merged as { stationProfiles?: string }).stationProfiles || ''
         if (!stationsDirty.current) setStations(parseStationDrafts(savedStations))
         setStationsReady(true)
-      })
-      setActiveSection('section-basic')
+        const snapshot: Record<string, string> = {}
+        for (const [key, val] of Object.entries(formValues)) {
+          snapshot[key] = String(val ?? '')
+        }
+        snapshot.stationProfiles = savedStations
+        snapshot.wifiPassword = ''
+        baselineRef.current = snapshot
+        return snapshot
+  }, [form])
+
+  const loadSettings = useCallback(async (): Promise<void> => {
+    setSettingsError('')
+    setSettingsLoaded(false)
+    settingsStore.reset()
+    try {
+      const loaded = await settingsStore.load()
+      applyLoadedSettings(loaded)
+      setSettingsLoaded(true)
+    } catch (error: unknown) {
+      setSettingsLoaded(false)
+      setSettingsError(error instanceof Error ? error.message : '设置加载失败，未使用默认值，避免覆盖已保存的数据')
     }
-  }, [open, form])
+  }, [applyLoadedSettings])
+
+  useEffect(() => {
+    if (!open) {
+      stationsDirty.current = false
+      setStationsReady(false)
+      return
+    }
+    stationsDirty.current = false
+    setActiveSection('section-basic')
+    void loadSettings()
+  }, [open, loadSettings])
 
   const pickDir = async (): Promise<void> => {
     const picked = await window.api.pickDir()
@@ -312,31 +339,59 @@ export default function SettingsModal({
     }
     const kv: Record<string, string> = {}
     for (const [k, val] of Object.entries(merged)) {
-      if (k === 'wifiPassword' && !String(val ?? '').trim()) continue
       kv[k] = String(val ?? '')
     }
     if (stationsReady) kv.stationProfiles = serializeStationDrafts(stations)
-    kv.alertChannelsJson = '[]'
-    await settingsStore.save(kv)
+    const changed: Record<string, string> = {}
+    for (const [key, value] of Object.entries(kv)) {
+      if (baselineRef.current[key] === value) continue
+      if (key === 'wifiPassword' && !value.trim()) continue
+      changed[key] = value
+    }
+    if (Object.keys(changed).length === 0) {
+      window.dispatchEvent(new Event('settings-updated'))
+      return merged
+    }
+    await settingsStore.save(changed)
+    const fresh = await settingsStore.reload()
+    for (const [key, value] of Object.entries(changed)) {
+      const got = fresh[key] ?? ''
+      if (key === 'stationProfiles') continue
+      if ((got === '******' || got === value) && (value === got || got === '******')) continue
+      if (got !== value) {
+        throw new Error(`保存后校验失败：${key}`)
+      }
+    }
+    baselineRef.current = { ...baselineRef.current, ...changed }
     window.dispatchEvent(new Event('settings-updated'))
     return merged
   }
 
   const save = async (): Promise<void> => {
-    await persistSettings()
-    try {
-      await uploadProfilesRef.current?.save()
-    } catch (error: unknown) {
-      message.error(error instanceof Error ? error.message : String(error))
+    if (!settingsLoaded) {
+      message.error(settingsError || '设置还没加载成功，不能保存')
       return
     }
-    // 保存路由规则（表单保存成功后）
-    if (routeRules.length > 0) {
+    setSaving(true)
+    try {
+      await persistSettings()
       try {
-        await api.saveRouteRules(routeRules)
-      } catch { /* ignore */ }
+        await uploadProfilesRef.current?.save()
+      } catch (error: unknown) {
+        message.error(error instanceof Error ? error.message : String(error))
+        return
+      }
+      if (routeRules.length > 0) {
+        try {
+          await api.saveRouteRules(routeRules)
+        } catch { /* ignore */ }
+      }
+      message.success('设置已保存')
+    } catch (error: unknown) {
+      message.error(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSaving(false)
     }
-    message.success('设置已保存')
   }
 
   const editStations = (updater: (rows: StationDraft[]) => StationDraft[]): void => {
@@ -586,6 +641,16 @@ export default function SettingsModal({
               padding: '28px 32px'
             }}
           >
+            {settingsError && (
+              <Alert
+                type="error"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="设置没有加载成功"
+                description={settingsError}
+                action={<Button size="small" onClick={() => { void loadSettings() }}>重试</Button>}
+              />
+            )}
             <Form
               form={form}
               layout="vertical"
@@ -1845,7 +1910,7 @@ export default function SettingsModal({
             }}
           >
             <Button onClick={onClose}>取消</Button>
-            <Button type="primary" onClick={save}>
+            <Button type="primary" onClick={save} disabled={!settingsLoaded} loading={saving}>
               保存
             </Button>
           </div>

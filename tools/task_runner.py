@@ -43,7 +43,7 @@ from spider_gd.core.dates import (
     read_output_windows,
 )
 from spider_gd.core.workflow_outputs import workflow_outputs
-from workflow_runner import WorkflowRunner, plan_download_files
+from workflow_runner import WorkflowExecutionError, WorkflowRunner, plan_download_files
 
 
 def _sanitize_name(name: str) -> str:
@@ -382,11 +382,25 @@ class TaskRunner:
                  cert_password: str = "", account: str = "", account_password: str = "",
                  minimized: bool = False, indicator_dirs: dict[str, str] | None = None,
                  output_dirs: dict[str, dict[str, str]] | None = None,
-                 station_queue: list[dict] | None = None):
+                 station_queue: list[dict] | None = None,
+                 exec_id: str = "", slot_store=None):
         self.config = task_config
         self.name = task_config.get("name", "unnamed")
         self.login_name = task_config.get("login", "")
         self.stop_on_error = task_config.get("stop_on_error", True)
+        from task_retry import DEFAULT_INDICATOR_RETRY
+
+        self.indicator_retry = _coerce_int(
+            task_config.get("indicator_retry", DEFAULT_INDICATOR_RETRY),
+            DEFAULT_INDICATOR_RETRY, 0, 10,
+        )
+        self._exec_id = exec_id or str(task_config.get("_exec_id") or "")
+        self._slot_store = slot_store
+        self._skip_slots = {str(item) for item in (task_config.get("_skip_slots") or [])}
+        only = task_config.get("_only_slots")
+        self._only_slots = {str(item) for item in only} if only else None
+        self._resume_from = str(task_config.get("_resume_from") or "")
+        self._gateway_reset_used = False
         self.indicators = task_config.get("indicators", [])
         self.download_dir = download_dir
         self.headless = headless
@@ -432,6 +446,7 @@ class TaskRunner:
         self._login_done = False
         self._shared_session = None
         self._protected_pages: set = set()
+        self._summary = {"success": 0, "failed": 0, "skipped": 0}
 
         # 共享浏览器状态
         self._browser = None
@@ -528,6 +543,11 @@ class TaskRunner:
             self._protected_pages = set(self._context.pages)
             self._current_page_idx = 0
             session._active_runner = self
+            from task_retry import copy_resume_slots, slot_keys_for_item
+
+            if self._slot_store is not None and self._exec_id and self._resume_from:
+                copy_resume_slots(self._slot_store, self._resume_from, self._exec_id)
+                self._skip_slots.update(self._slot_store.succeeded_slots(self._exec_id))
             configs = {name: self._load_wf_cfg(name) for name in self.indicators}
             runs = plan_workflow_runs(
                 list(self.indicators),
@@ -548,6 +568,20 @@ class TaskRunner:
 
             def _emit(event, **kwargs):
                 emit({"event": event, **kwargs})
+
+            if self._exec_id:
+                _emit("run_context", exec_id=self._exec_id)
+            plan_rows = []
+            for item in runs:
+                keys = slot_keys_for_item(item)
+                plan_rows.append({
+                    "indicator": item.get("indicator"),
+                    "slot": keys[0] if keys else item.get("indicator"),
+                    "slots": keys,
+                    "target": self._item_target_text(item),
+                    "status": "pending",
+                })
+            _emit("indicator_plan", items=plan_rows)
 
             stations = self._station_queue or [None]
             try:
@@ -581,11 +615,33 @@ class TaskRunner:
                         else:
                             _emit("task_step", step=step_idx, total=total_steps, phase="login",
                                   name=self.login_name, status="done", message="复用当前业务登录态")
+                    self._summary = {"success": 0, "failed": 0, "skipped": 0}
                     for index, item in enumerate(runs):
                         if self._stopped or session._cancel_requested or self._failed:
                             self._emit_skipped_download_plans(runs[index:], _emit)
+                            self._mark_plan_skipped(runs[index:], _emit, "任务已停止")
                             break
-                        indicator = item["indicator"]
+                        keys = slot_keys_for_item(item)
+                        skip_reason = self._skip_reason(keys)
+                        if skip_reason:
+                            self._summary["skipped"] += 1
+                            if skip_reason == "已成功":
+                                self._mark_slots(keys, "success")
+                            _emit(
+                                "indicator_status",
+                                indicator=item.get("indicator"),
+                                slot=keys[0] if keys else "",
+                                slots=keys,
+                                status="skipped",
+                                retry=0,
+                                message=skip_reason,
+                            )
+                            _emit(
+                                "task_step", step=index + 1, total=len(runs), phase="indicator",
+                                name=item.get("indicator"), status="skip", message=skip_reason,
+                                target_date=self._item_target_text(item),
+                            )
+                            continue
                         mode = item["mode"]
                         dates = item["dates"]
                         if mode == "replay" and dates:
@@ -596,23 +652,21 @@ class TaskRunner:
                                 total=len(runs),
                             )
                         step_idx += 1
-                        await self._cleanup_between_indicators()
-                        repeat_dates = dates if mode == "repeat" else None
-                        anchor = dates[0] if dates else None
-                        if mode == "month":
-                            anchor = dates[-1] if dates else None
-                        await self._run_indicator_shared(
-                            indicator, step_idx, total_steps, _emit, anchor, repeat_dates,
-                            query_month=item.get("query_month"),
-                            output_dates=item.get("output_dates"),
-                        )
-                    if self._stopped or session._cancel_requested or self._failed or self._had_error:
+                        outcome = await self._run_with_retries(item, step_idx, total_steps, _emit, keys)
+                        if outcome == "fatal":
+                            break
+                    if self._stopped or session._cancel_requested or self._failed:
                         if not self._task_error_emitted:
                             _emit("task_error", error=self._failure_reason or "用户中止")
                             self._task_error_emitted = True
                         break
+                    message = (
+                        f"成功 {self._summary['success']} 项，失败 {self._summary['failed']} 项，"
+                        f"跳过 {self._summary['skipped']} 项"
+                    )
+                    _emit("task_summary", **self._summary, message=message)
                     if station_index == len(stations) - 1:
-                        _emit("task_done", name=self.name)
+                        _emit("task_done", name=self.name, **self._summary, message=message)
                     else:
                         station_name = station.get("name", "") if isinstance(station, dict) else ""
                         _emit(
@@ -898,27 +952,327 @@ class TaskRunner:
             for planned in prepared["files"]:
                 _emit("file_expected", **planned)
 
+    @staticmethod
+    def _item_target_text(item: dict) -> str:
+        """给进度列表用的日期说明。
+
+        Args:
+            item (dict): 计划条目。
+
+        Returns:
+            str: 单日、日期范围或月份。没有日期时为空。
+
+        Examples:
+            >>> TaskRunner._item_target_text({"mode": "month", "query_month": "2026-10", "dates": []})
+            '2026-10'
+        """
+        dates = list(item.get("dates") or [])
+        if item.get("query_month"):
+            return str(item["query_month"])
+        if not dates:
+            return ""
+        if len(dates) == 1:
+            return dates[0].isoformat()
+        return f"{dates[0].isoformat()} 至 {dates[-1].isoformat()}"
+
+    def _skip_reason(self, keys: list[str]) -> str:
+        """判断这条指标要不要跳过。
+
+        Args:
+            keys (list[str]): 这条计划覆盖的「指标 × 日期」键。
+
+        Returns:
+            str: 跳过原因。不跳过时为空字符串。
+
+        Examples:
+            >>> runner = TaskRunner({"name": "t", "_skip_slots": ["a\\t2026-11-01"]})
+            >>> runner._skip_reason(["a\\t2026-11-01"])
+            '已成功'
+        """
+        if not keys:
+            return ""
+        if self._only_slots is not None and not any(key in self._only_slots for key in keys):
+            return "不在本次续跑范围"
+        if all(key in self._skip_slots for key in keys):
+            return "已成功"
+        return ""
+
+    def _mark_slots(self, keys: list[str], status: str) -> None:
+        """把一组日期键写成同一种结果。
+
+        Args:
+            keys (list[str]): ``指标\\t日期``。
+            status (str): ``success`` / ``failed`` / ``skipped``。
+
+        Returns:
+            None: 没有执行 id 或状态库时只更新内存里的成功集合。
+
+        Examples:
+            >>> runner = TaskRunner({"name": "t"})
+            >>> runner._mark_slots(["a\\t2026-11-01"], "success")
+            >>> "a\\t2026-11-01" in runner._skip_slots
+            True
+        """
+        if status == "success":
+            self._skip_slots.update(keys)
+        if not self._exec_id or self._slot_store is None:
+            return
+        for key in keys:
+            indicator = key.split("\t", 1)[0]
+            try:
+                self._slot_store.mark_indicator_slot(self._exec_id, indicator, key, status)
+            except Exception as exc:
+                logger.warning("记录指标结果失败: {}", exc)
+
+    def _mark_plan_skipped(self, items: list[dict], _emit, message: str) -> None:
+        """把还没跑的计划条目标成跳过。
+
+        Args:
+            items (list[dict]): 剩下的计划条目。
+            _emit: 任务事件回调。
+            message (str): 跳过原因。
+
+        Returns:
+            None: 只发事件，不改数据库里的成功记录。
+
+        Examples:
+            >>> TaskRunner({"name": "t"})._summary["skipped"]
+            0
+        """
+        from task_retry import slot_keys_for_item
+
+        for item in items:
+            keys = slot_keys_for_item(item)
+            self._summary["skipped"] += 1
+            _emit(
+                "indicator_status",
+                indicator=item.get("indicator"),
+                slot=keys[0] if keys else "",
+                slots=keys,
+                status="skipped",
+                retry=0,
+                message=message,
+            )
+
+    async def _run_with_retries(self, item: dict, step_idx: int, total: int, _emit, keys: list[str]) -> str:
+        """按失败类型重试单个指标。
+
+        可重试错误会先关掉多余标签、确认登录，再强制打开工作台。
+        HTTP 400 整次任务只允许这样复位一次。第二次 400 停止整个任务。
+
+        Args:
+            item (dict): 计划条目。
+            step_idx (int): 展示用步骤号。
+            total (int): 步骤总数。
+            _emit: 任务事件回调。
+            keys (list[str]): 这条计划的日期键。
+
+        Returns:
+            str: ``ok``、``failed`` 或 ``fatal``。
+
+        Examples:
+            >>> TaskRunner({"name": "t", "indicator_retry": 3}).indicator_retry
+            3
+        """
+        from task_retry import FailureKind, classify_failure
+
+        indicator = str(item.get("indicator") or "")
+        attempt = 0
+        force_reset = False
+        target_text = self._item_target_text(item)
+        while True:
+            if force_reset:
+                try:
+                    await self._reset_workbench(_emit)
+                except Exception as exc:
+                    reason = f"回到工作台失败：{exc}"
+                    self._summary["failed"] += 1
+                    self._mark_slots(keys, "failed")
+                    self._record_failure(reason, stop=True)
+                    _emit(
+                        "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                        slots=keys, status="failed", retry=attempt, message=reason,
+                    )
+                    _emit("task_error", error=reason)
+                    self._task_error_emitted = True
+                    return "fatal"
+                if self._failed:
+                    self._summary["failed"] += 1
+                    return "fatal"
+                force_reset = False
+            _emit(
+                "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                slots=keys, status="running", retry=attempt,
+                message="执行中..." if attempt == 0 else f"第 {attempt} 次重试",
+                target=target_text,
+            )
+            dates = list(item.get("dates") or [])
+            mode = item.get("mode")
+            repeat_dates = dates if mode == "repeat" else None
+            anchor = dates[-1] if mode == "month" and dates else (dates[0] if dates else None)
+            failed, reason = await self._run_indicator_shared(
+                indicator, step_idx, total, _emit, anchor, repeat_dates,
+                query_month=item.get("query_month"),
+                output_dates=item.get("output_dates"),
+            )
+            if not failed:
+                self._summary["success"] += 1
+                self._mark_slots(keys, "success")
+                _emit(
+                    "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                    slots=keys, status="success", retry=attempt, message="成功", target=target_text,
+                )
+                return "ok"
+            kind = classify_failure(reason)
+            if kind is FailureKind.GATEWAY_400:
+                if self._gateway_reset_used:
+                    message = "同一任务再次出现 HTTP 400（瑞数拦截），已停止以免被封禁。请稍后再运行。"
+                    self._summary["failed"] += 1
+                    self._mark_slots(keys, "failed")
+                    self._record_failure(message, stop=True)
+                    _emit(
+                        "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                        slots=keys, status="failed", retry=attempt, message=message,
+                    )
+                    _emit("task_step", step=step_idx, total=total, phase="indicator",
+                          name=indicator, status="error", message=message, target_date=target_text)
+                    _emit("task_error", error=message)
+                    self._task_error_emitted = True
+                    return "fatal"
+                self._gateway_reset_used = True
+                force_reset = True
+                _emit(
+                    "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                    slots=keys, status="running", retry=attempt,
+                    message="出现 HTTP 400，回到工作台后只再试一次",
+                )
+                continue
+            if kind is FailureKind.FATAL:
+                self._summary["failed"] += 1
+                self._mark_slots(keys, "failed")
+                self._record_failure(reason, stop=True)
+                _emit(
+                    "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                    slots=keys, status="failed", retry=attempt, message=reason,
+                )
+                _emit("task_error", error=f"{indicator} 失败: {reason}")
+                self._task_error_emitted = True
+                return "fatal"
+            if kind is FailureKind.RETRYABLE and attempt < self.indicator_retry:
+                attempt += 1
+                force_reset = True
+                _emit(
+                    "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                    slots=keys, status="running", retry=attempt,
+                    message=f"第 {attempt} 次重试：{reason}",
+                )
+                continue
+            self._summary["failed"] += 1
+            self._mark_slots(keys, "failed")
+            self._record_failure(reason, stop=False)
+            _emit(
+                "indicator_status", indicator=indicator, slot=keys[0] if keys else "",
+                slots=keys, status="failed", retry=attempt, message=reason,
+            )
+            return "failed"
+
+    async def _reset_workbench(self, _emit) -> None:
+        """关掉多余标签，必要时重新登录，再强制打开工作台。
+
+        重试时忽略指标 YAML 里的 ``skip_if_loaded``：必须真的 ``goto`` 一次，
+        让被瑞数打过标的文档换成仍保持登录的工作台。
+
+        Args:
+            _emit: 任务事件回调。
+
+        Returns:
+            None: 回到工作台后返回。登录失败时由登录流程把任务标成失败。
+
+        Raises:
+            WorkflowExecutionError: 打开工作台或等待标记超时。
+
+        Examples:
+            >>> TaskRunner({"name": "t"})._shared_session is None
+            True
+        """
+        import asyncio
+        import time as _time
+
+        from task_retry import DEFAULT_WORKBENCH_URL
+
+        await self._cleanup_between_indicators()
+        session = self._shared_session
+        if session is not None:
+            auth = await session.check_auth()
+            if auth.get("state") != "authenticated":
+                if self.login_name:
+                    self._login_done = False
+                    await self._run_login_shared(0, 0, _emit)
+                    if self._failed:
+                        return
+                else:
+                    raise WorkflowExecutionError("登录已失效，且任务没有配置登录流程")
+        page = session.page if session is not None else None
+        if page is None:
+            raise WorkflowExecutionError("没有可复位的页面")
+        url = str(self.config.get("workbench_url") or DEFAULT_WORKBENCH_URL)
+        _emit("page_recovery", message=f"正在回到工作台：{url}")
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        deadline = _time.monotonic() + 8
+        while _time.monotonic() < deadline:
+            current = ""
+            try:
+                current = page.url or ""
+            except Exception:
+                current = ""
+            if "powerEnterprise" in current:
+                return
+            try:
+                found = await page.evaluate(
+                    "() => !!(document.body && document.body.innerText && document.body.innerText.includes('工作台'))"
+                )
+            except Exception:
+                found = False
+            if found:
+                return
+            await asyncio.sleep(0.25)
+        raise WorkflowExecutionError("复位后未看到工作台")
+
     async def _run_indicator_shared(
         self, indicator_name: str, step_idx: int, total: int, _emit,
         target_date: date | None = None, repeat_dates: list[date] | None = None,
         query_month: str | None = None, output_dates: dict[str, list[date]] | None = None,
-    ):
+    ) -> tuple[bool, str]:
         """共享浏览器模式下执行单个指标。有循环日期时整份流程只走一遍，日期在循环里换。
 
-        ``output_dates`` 是单个导出另配的日期（键是输出 key），循环里按天合并执行。
+        这里不决定要不要停掉整个任务，只返回这次成没成。调用方按失败原因重试或继续。
+
+        Args:
+            indicator_name (str): 指标 id。
+            step_idx (int): 展示用步骤号。
+            total (int): 步骤总数。
+            _emit: 任务事件回调。
+            target_date (date | None): 锚定日期。
+            repeat_dates (list[date] | None): 按天循环的日期。
+            query_month (str | None): 按月指标的月份。
+            output_dates (dict[str, list[date]] | None): 单个导出另配的日期。
+
+        Returns:
+            tuple[bool, str]: ``(是否失败, 原因)``。成功时原因为空。
+
+        Examples:
+            >>> TaskRunner({"name": "t"}).indicator_retry
+            3
         """
         prepared = self._prepare_indicator(
             indicator_name, target_date, repeat_dates, query_month, output_dates,
         )
         if not prepared:
-            self._record_failure(f"指标不存在: {indicator_name}", stop=self.stop_on_error)
+            reason = f"指标不存在: {indicator_name}"
             _emit("task_step", step=step_idx, total=total,
                   phase="indicator", name=indicator_name, status="error",
-                  message=f"指标不存在: {indicator_name}")
-            if self.stop_on_error:
-                _emit("task_error", error=f"指标不存在: {indicator_name}")
-                self._task_error_emitted = True
-            return
+                  message=reason)
+            return True, reason
 
         _emit("task_step", step=step_idx, total=total,
               phase="indicator", name=indicator_name, status="running",
@@ -953,24 +1307,18 @@ class TaskRunner:
             self._current_page_idx = runner._current_page_idx
             if runner.failed:
                 reason = runner.failure_reason or f"{indicator_name} 工作流失败"
-                self._record_failure(reason, stop=self.stop_on_error)
                 _emit("task_step", step=step_idx, total=total,
                       phase="indicator", name=indicator_name, status="error",
                       message=reason, target_date=prepared["target_text"])
-                if self.stop_on_error:
-                    _emit("task_error", error=f"{indicator_name} 失败: {reason}")
-                    self._task_error_emitted = True
-                return
+                return True, reason
             _emit("task_step", step=step_idx, total=total,
                   phase="indicator", name=indicator_name, status="done", target_date=prepared["target_text"])
+            return False, ""
         except Exception as exc:
-            self._record_failure(str(exc), stop=self.stop_on_error)
             _emit("task_step", step=step_idx, total=total,
                   phase="indicator", name=indicator_name, status="error",
                   message=str(exc), target_date=prepared["target_text"])
-            if self.stop_on_error:
-                _emit("task_error", error=f"{indicator_name} 失败: {exc}")
-                self._task_error_emitted = True
+            return True, str(exc)
 
     def _on_new_page(self, new_page) -> None:
         logger.info("  检测到新标签页 #{}", len(self._shared_pages))

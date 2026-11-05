@@ -191,9 +191,16 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def load_config(config_path: str | Path) -> AppSettings:
-    """从 yaml 配置文件加载 :class:`AppSettings`。"""
+    """从 yaml 配置文件加载 :class:`AppSettings`。
+
+    若进程带有 ``SPIDER_GD_HOME``，会先把安装目录里的旧用户数据复制过去，
+    再把相对的数据路径改到该目录下。未设置时与原来一样，相对当前工作目录。
+    """
+    from spider_gd.config.user_home import prepare_user_home, rebase_user_paths
+
+    prepare_user_home(Path.cwd())
     raw = _load_yaml(Path(config_path))
-    return AppSettings(**raw)
+    return rebase_user_paths(AppSettings(**raw))
 
 
 def load_endpoints(path: str | Path) -> list[EndpointConfig]:

@@ -20,7 +20,7 @@ export default function App(): JSX.Element {
   } | null>(null)
 
   // 启动时从 SQLite 加载设置到内存缓存
-  useEffect(() => { void settingsStore.load() }, [])
+  useEffect(() => { void settingsStore.load().catch(() => undefined) }, [])
 
   // 调度器在后台执行时没有进度弹窗，轮询只监听 scheduled_auto，避免和手动执行重复通知。
   const seenScheduledRef = useRef<Set<string>>(new Set())

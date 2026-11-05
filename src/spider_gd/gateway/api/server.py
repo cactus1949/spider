@@ -106,6 +106,7 @@ class WorkflowRunRequest(BaseModel):
     minimized: str = "false"
     skip_steps: str = ""
     reference_date: str = ""
+    slots: list[str] = Field(default_factory=list)
 
 
 class DateProfileRequest(BaseModel):
@@ -312,6 +313,84 @@ def _find_recent_storage_state(base_dir: str) -> str | None:
     return str(candidates[0]) if candidates else None
 
 
+def _diagnostic_secret_values(store: Any) -> list[str]:
+    """从场站、上传配置和 .env 里取出诊断包需要打星的明文。
+
+    Args:
+        store: 状态库。
+
+    Returns:
+        list[str]: 明文密钥。读失败的来源直接跳过。
+    """
+    secrets: list[str] = []
+    try:
+        from spider_gd.core.station_profile import parse_station_profiles
+
+        raw = store.get_setting("stationProfiles") or ""
+        for profile in parse_station_profiles(raw):
+            secrets.extend([profile.wifi_password, profile.cert_password])
+    except Exception:
+        pass
+    try:
+        from spider_gd.gateway.upload_profiles import load_profiles
+
+        for profile in load_profiles(store):
+            secrets.append(getattr(profile, "wifi_password", "") or "")
+            for header in getattr(profile, "headers", []) or []:
+                if getattr(header, "secret", False):
+                    secrets.append(getattr(header, "value", "") or "")
+            for param in getattr(profile, "params", []) or []:
+                if getattr(param, "secret", False):
+                    secrets.append(getattr(param, "value", "") or "")
+    except Exception:
+        pass
+    return [item for item in secrets if item and item != "******"]
+
+
+def _diagnostic_host_facts(service: Any) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """采集网卡、当前 WiFi 和 UKey。任何一项失败都不影响打包。
+
+    Args:
+        service: 控制服务，用来读设置里的网卡名。
+
+    Returns:
+        tuple[dict, str, dict]: 网卡信息、当前 SSID、UKey 检测结果。
+    """
+    network: dict[str, Any] = {}
+    ssid = ""
+    ukey: dict[str, Any] = {}
+    try:
+        from spider_gd.infrastructure.network.wifi_connector import WifiConnector
+
+        ssid = WifiConnector().current_ssid(
+            str(service._ctx.state_store.get_setting("wifiInterfaceName") or "")
+        )
+    except Exception as exc:
+        ssid = ""
+        network["wifi_error"] = str(exc)
+    try:
+        import socket
+
+        network["hostname"] = socket.gethostname()
+        network["interfaces"] = socket.getaddrinfo(socket.gethostname(), None)
+        network["interfaces"] = sorted({item[4][0] for item in network["interfaces"]})
+    except Exception as exc:
+        network["interfaces_error"] = str(exc)
+    try:
+        from spider_gd.infrastructure.network.usb_devices import probe_ukeys
+
+        report = probe_ukeys()
+        if isinstance(report, dict):
+            ukey = {
+                "summary": report.get("summary", ""),
+                "distinguishable": report.get("distinguishable", False),
+                "device_count": len(report.get("devices") or []),
+            }
+    except Exception as exc:
+        ukey = {"error": str(exc)}
+    return network, ssid, ukey
+
+
 def create_app(
     service: ControlService, *, enable_web_ui: bool = False, enable_mcp: bool = False
 ) -> Any:
@@ -466,10 +545,11 @@ def create_app(
     @app.get("/api/tasks/list")
     async def list_tasks_api() -> list[dict[str, Any]]:
         """返回任务配置列表（从 tasks/ YAML 文件）。"""
-        if not _TASKS_DIR.exists():
+        tasks_root = _tasks_dir()
+        if not tasks_root.exists():
             return []
         result = []
-        for f in sorted(_TASKS_DIR.glob("*.yml")):
+        for f in sorted(tasks_root.glob("*.yml")):
             try:
                 cfg = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
             except Exception:
@@ -498,8 +578,16 @@ def create_app(
     _stop_flags: dict[str, list[bool]] = {}  # name -> [bool] 用于 step-stream 的中止信号
 
     def _wf_path(name: str) -> Path:
+        from spider_gd.config.user_home import resolve_workflow_file, user_workflows_dir
+
+        found = resolve_workflow_file(name)
+        if found is not None:
+            return found
         safe = re.sub(r"[^\w\-.]", "_", name)
-        return _WORKFLOWS_DIR / f"{safe}.yml"
+        folder = user_workflows_dir(create=False)
+        if not folder.exists():
+            folder = _WORKFLOWS_DIR
+        return folder / f"{safe}.yml"
 
     def _workflow_meta(parsed: dict[str, Any]) -> dict[str, Any]:
         import sys
@@ -1624,8 +1712,10 @@ def create_app(
 
         return {"status": "ok"}
     # ---- 任务 YAML 执行（保留兼容） ----
-    import os as _os
-    _TASKS_DIR = Path(_os.getcwd()) / "tasks"
+    from spider_gd.config.user_home import tasks_dir as _tasks_dir
+
+    def _task_file(name: str) -> Path:
+        return _tasks_dir() / f"{name}.yml"
 
     @app.put("/api/tasks/{name}")
     async def save_task(name: str, req: WorkflowSaveRequest) -> dict[str, Any]:
@@ -1638,15 +1728,15 @@ def create_app(
                 raise ValueError("YAML 必须是字典")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"YAML 语法错误: {e}")
-        _TASKS_DIR.mkdir(parents=True, exist_ok=True)
-        path = _TASKS_DIR / f"{name}.yml"
+        path = _task_file(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         logger.info("任务已保存: {}", path)
         return {"status": "ok", "name": name}
 
     @app.delete("/api/tasks/{name}")
     async def delete_task(name: str) -> dict[str, Any]:
-        path = _TASKS_DIR / f"{name}.yml"
+        path = _task_file(name)
         if path.exists():
             path.unlink()
             logger.info("任务已删除: {}", path)
@@ -1669,7 +1759,7 @@ def create_app(
             cfg = dict(prepared)
             name = str(cfg.get("_control_name") or name)
         else:
-            task_path = _TASKS_DIR / f"{name}.yml"
+            task_path = _task_file(name)
             db_cfg = None
             try:
                 db_cfg = service._ctx.state_store.get_task_config(name)
@@ -1702,6 +1792,7 @@ def create_app(
                     "download_dir_custom": db_cfg.get("download_dir_custom", False),
                     "upload_profile_id": db_cfg.get("upload_profile_id", ""),
                     "auto_upload": bool(db_cfg.get("auto_upload", False)),
+                    "indicator_retry": db_cfg.get("indicator_retry", cfg.get("indicator_retry", 3)),
                 })
             if reference_date.strip():
                 cfg["reference_date"] = reference_date.strip()
@@ -1709,10 +1800,16 @@ def create_app(
         # 创建执行日志记录
         now_ts = _time.strftime("%Y-%m-%d %H:%M:%S")
         exec_id = f"tsk_{_uuid.uuid4().hex[:12]}"
+        resuming = bool(prepared and prepared.get("_resume_from"))
+        if resuming:
+            control_name = str((prepared or {}).get("_control_name") or name)
+            log_type = "catchup" if control_name == "catchup" else "scheduled_manual"
+        else:
+            log_type = "catchup" if prepared is not None else "scheduled_manual"
         service._ctx.state_store.create_execution_log(
             ExecutionLogRecord(
                 exec_id=exec_id, name=cfg.get("name", name),
-                type="catchup" if prepared is not None else "scheduled_manual", target_id=name,
+                type=log_type, target_id=name,
                 status="running", reason="",
                 created_at=now_ts, updated_at=now_ts,
             )
@@ -1913,6 +2010,15 @@ def create_app(
         if is_minimized:
             logger.info("任务隐藏运行已切换为离屏可见 Chrome，避免真 headless 下目标元素不可见")
         cfg["_control_name"] = name
+        cfg["_exec_id"] = exec_id
+        if prepared is not None and prepared.get("_resume_from"):
+            cfg["_resume_from"] = prepared.get("_resume_from")
+            cfg["_skip_slots"] = list(prepared.get("_skip_slots") or [])
+            if prepared.get("_only_slots"):
+                cfg["_only_slots"] = list(prepared.get("_only_slots") or [])
+        from task_retry import remember_run_plan
+
+        remember_run_plan(service._ctx.state_store, exec_id, cfg)
         station_queue: list[dict[str, str]] = []
         multi_station = _bool_text(service._ctx.state_store.get_setting("multiStationEnabled"))
         if multi_station:
@@ -1953,7 +2059,9 @@ def create_app(
                           account=account,
                           account_password=account_password,
                           output_dirs=output_dirs,
-                          station_queue=station_queue)
+                          station_queue=station_queue,
+                          exec_id=exec_id,
+                          slot_store=service._ctx.state_store)
 
         event_queue: _asyncio.Queue = _asyncio.Queue()
         cont_evt: _asyncio.Event = _asyncio.Event()
@@ -2024,7 +2132,13 @@ def create_app(
                         )
 
                 if evt in ("task_done",):
-                    if _log_final_status[0] == "running":
+                    failed_count = int(data.get("failed") or 0)
+                    if failed_count:
+                        _log_final_status[:] = [
+                            "failed",
+                            str(data.get("message") or "部分指标失败")[:200],
+                        ]
+                    elif _log_final_status[0] == "running":
                         _log_final_status[0] = "success"
                 elif evt in ("task_error", "aborted", "site_unreachable", "captcha_failed"):
                     already_failed = _log_final_status[0] == "failed"
@@ -2424,7 +2538,13 @@ def create_app(
                 kv["stationProfiles"] = merge_station_profiles(kv["stationProfiles"], existing)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        from spider_gd.gateway.settings_update import filter_settings_update
+
+        kv = filter_settings_update(kv)
+        if not kv:
+            return {"status": "ok", "settings": {}}
         service._ctx.state_store.save_settings(kv)
+        stored = service._ctx.state_store.get_all_settings()
         if "downloadDir" in kv:
             _sync_browser_download_dir()
         try:
@@ -2433,7 +2553,10 @@ def create_app(
             service._ctx.alert = build_alert_gateway(service._ctx.settings, service._ctx.state_store)
         except Exception as exc:
             logger.warning("刷新告警网关失败: {}", exc)
-        return {"status": "ok"}
+        readback = {key: stored.get(key, "") for key in kv}
+        if readback.get("wifiPassword"):
+            readback["wifiPassword"] = "******"
+        return {"status": "ok", "settings": readback}
 
     @app.get("/api/stations/usb-devices")
     async def list_station_usb_devices() -> dict[str, Any]:
@@ -3231,9 +3354,16 @@ def create_app(
         }
         # 收集所有 workflows yaml
         workflows = []
-        wf_dir = Path("workflows")
-        if wf_dir.exists():
-            for yf in sorted(wf_dir.rglob("*.yml")):
+        from spider_gd.config.user_home import bundled_workflows_dir, user_workflows_dir
+
+        seen_names: set[str] = set()
+        for wf_dir in (user_workflows_dir(), bundled_workflows_dir()):
+            if not wf_dir.exists():
+                continue
+            for yf in sorted(wf_dir.glob("*.yml")):
+                if yf.stem in seen_names:
+                    continue
+                seen_names.add(yf.stem)
                 try:
                     content = yf.read_text("utf-8")
                     workflows.append({"name": yf.stem, "path": str(yf), "content": content})
@@ -3319,7 +3449,9 @@ def create_app(
                     name = wf.get("name", "")
                     content = wf.get("content", "")
                     if name and content:
-                        wf_path = Path("workflows") / f"{name}.yml"
+                        from spider_gd.config.user_home import user_workflows_dir
+
+                        wf_path = user_workflows_dir(create=True) / f"{name}.yml"
                         wf_path.parent.mkdir(parents=True, exist_ok=True)
                         wf_path.write_text(content, "utf-8")
                         imported_count += 1
@@ -3377,8 +3509,10 @@ def create_app(
         except Exception as e:
             logger.warning("清空执行日志失败: {}", e)
 
-        # 删除工作流 YAML 文件
-        wf_dir = Path("workflows")
+        # 删除用户目录里的工作流 YAML。安装包自带的 workflows 不动。
+        from spider_gd.config.user_home import user_workflows_dir
+
+        wf_dir = user_workflows_dir()
         if wf_dir.exists():
             for yf in wf_dir.glob("*.yml"):
                 try:
@@ -3545,6 +3679,88 @@ def create_app(
         return await run_task_stream(name, cert_password=body.cert_password,
             account=body.account, account_password=body.account_password,
             download_dir=body.download_dir, headless=body.headless, minimized=body.minimized, reference_date=body.reference_date)
+
+    @app.post("/api/diagnostics/bundle")
+    async def download_diagnostics_bundle(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        """打包最近两天的日志、执行记录和失败现场，密钥打星后保存到下载目录。
+
+        Args:
+            payload: 可选 ``download_dir``。空则写到数据目录下的「诊断包」文件夹。
+
+        Returns:
+            dict[str, Any]: ``path`` 是 zip 路径，``filename`` 是文件名。
+        """
+        from spider_gd.config.user_home import bundled_workflows_dir, tasks_dir, user_home, user_workflows_dir
+        from spider_gd.gateway.diagnostics_bundle import build_diagnostics_zip
+
+        body = payload or {}
+        settings = service._ctx.state_store.get_all_settings()
+        data_dir = Path(service._ctx.settings.storage.data_dir)
+        requested = str(body.get("download_dir") or body.get("downloadDir") or "").strip()
+        dl_dir = Path(requested) if requested else data_dir
+        out_dir = dl_dir / "诊断包"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        zip_path = out_dir / filename
+        extra_secrets = _diagnostic_secret_values(service._ctx.state_store)
+        network, wifi_ssid, ukey = await asyncio.to_thread(_diagnostic_host_facts, service)
+        download_dirs = [data_dir]
+        if requested:
+            download_dirs.append(Path(requested))
+        saved_download = str(settings.get("downloadDir") or "").strip()
+        if saved_download:
+            download_dirs.append(Path(saved_download))
+        notes = await asyncio.to_thread(
+            build_diagnostics_zip,
+            zip_path,
+            settings=settings,
+            store=service._ctx.state_store,
+            log_dir=Path(service._ctx.settings.log.file_dir),
+            download_dirs=download_dirs,
+            workflow_dirs=[user_workflows_dir(), bundled_workflows_dir()],
+            tasks_dir=tasks_dir(),
+            install_path=str(Path.cwd()),
+            data_path=str(data_dir),
+            sqlite_path=str(service._ctx.settings.storage.sqlite_path),
+            user_home=str(user_home() or ""),
+            app_version=str(body.get("app_version") or ""),
+            extra_secrets=extra_secrets,
+            network=network,
+            wifi_ssid=wifi_ssid,
+            ukey=ukey,
+        )
+        logger.info("诊断包已生成: {} ({})", zip_path, "; ".join(notes) or "ok")
+        return {"status": "ok", "path": str(zip_path), "filename": filename}
+
+    @app.post("/api/executions/{exec_id}/resume/stream")
+    async def resume_execution_stream(exec_id: str, body: WorkflowRunRequest | None = None):
+        """从某次中断的执行继续：跳过已经成功的指标日期，重跑其余项。
+
+        请求体里的 ``slots`` 非空时只重跑这些键（用于「重试失败项」）。
+        补数据的快照同样可用，不另建定时任务。
+        """
+        plan = service._ctx.state_store.get_resume_plan(exec_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="这次执行没有可继续的任务快照")
+        cfg = dict(plan)
+        cfg["_resume_from"] = exec_id
+        cfg["_skip_slots"] = sorted(service._ctx.state_store.succeeded_slots(exec_id))
+        slots = list(getattr(body, "slots", None) or [])
+        if slots:
+            cfg["_only_slots"] = [str(item) for item in slots if str(item).strip()]
+        name = str(cfg.get("_control_name") or "resume")
+        request = body or WorkflowRunRequest()
+        return await run_task_stream(
+            name,
+            cert_password=request.cert_password,
+            account=request.account,
+            account_password=request.account_password,
+            download_dir=request.download_dir,
+            headless=request.headless,
+            minimized=request.minimized,
+            reference_date=request.reference_date,
+            prepared=cfg,
+        )
 
     @app.post("/api/catchup/run/stream")
     async def run_catchup_stream(body: CatchupRunRequest):

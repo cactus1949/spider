@@ -1,4 +1,8 @@
 ; NSIS 自定义脚本：跳过 electron-builder 的进程检测 + 强制杀残留
+;
+; 用户数据（spider.db、tasks、日志、.env）在 Electron userData，
+; 也就是 %APPDATA% 下的应用目录，不在安装目录里。
+; 安装、升级、卸载都不得删除该目录。这里只结束残留进程。
 
 ; 用 customCheckAppRunning 空宏跳过 "应用正在运行" 检测
 ; electron-builder 检测到此宏存在时会直接跳过 CHECK_APP_RUNNING

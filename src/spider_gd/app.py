@@ -2583,13 +2583,19 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 )
                 return
             station_queue = chosen
+        from task_retry import remember_run_plan
+
+        task_cfg["_exec_id"] = exec_id
+        remember_run_plan(ctx.state_store, exec_id, task_cfg)
         runner = TaskRunner(task_cfg, download_dir=dl_dir, headless=False, minimized=True,
                            workflow_loader=_db_wf_loader,
                            cert_password=cert_password,
                            account=account,
                            account_password=account_password,
                            output_dirs=output_dirs,
-                           station_queue=station_queue)
+                           station_queue=station_queue,
+                           exec_id=exec_id,
+                           slot_store=ctx.state_store)
 
         errors: list[str] = []
         pause_alerts: set[str] = set()
@@ -2719,7 +2725,9 @@ def _load_task_config_from_yaml(task_name: str) -> dict | None:
     """从 YAML 文件加载单个任务配置（兼容旧数据）。"""
     import yaml as _yaml
 
-    yaml_path = Path("tasks") / f"{task_name}.yml"
+    from spider_gd.config.user_home import tasks_dir
+
+    yaml_path = tasks_dir() / f"{task_name}.yml"
     if not yaml_path.exists():
         return None
     try:
@@ -2745,11 +2753,13 @@ def _load_task_configs(ctx: AppContext) -> list[dict]:
     return enabled
 
 
-def _load_task_configs_from_yaml(tasks_dir: str = "tasks") -> list[dict]:
+def _load_task_configs_from_yaml(tasks_directory: str = "") -> list[dict]:
     """从 YAML 文件读取任务配置（兼容旧数据）。"""
     import yaml as _yaml
 
-    dir_path = Path(tasks_dir)
+    from spider_gd.config.user_home import tasks_dir
+
+    dir_path = Path(tasks_directory) if tasks_directory else tasks_dir()
     if not dir_path.is_absolute():
         dir_path = Path.cwd() / dir_path
     if not dir_path.exists():

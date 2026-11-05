@@ -3,6 +3,7 @@ import {
   Card,
   Button,
   Input,
+  InputNumber,
   Tag,
   Space,
   Empty,
@@ -80,6 +81,7 @@ interface AutoTask {
   downloadDir?: string
   uploadProfileId?: string
   autoUpload?: boolean
+  indicatorRetry?: number
   enabled: boolean
   remark?: string
   createdAt: number
@@ -156,6 +158,7 @@ interface FormValues {
   remark?: string
   uploadProfileId?: string
   autoUpload?: boolean
+  indicatorRetry?: number
 }
 
 async function loadTasksFromApi(): Promise<AutoTask[]> {
@@ -179,6 +182,7 @@ async function loadTasksFromApi(): Promise<AutoTask[]> {
         pathStructure: typeof c.path_structure === 'string' ? c.path_structure : '',
         uploadProfileId: typeof c.upload_profile_id === 'string' ? c.upload_profile_id : '',
         autoUpload: Boolean(c.auto_upload),
+        indicatorRetry: Number(c.indicator_retry ?? 3),
         downloadDir: c.download_dir_custom ? (c.download_dir || '') : '',
         enabled: c.enabled ?? true,
         remark: c.remark || '',
@@ -211,6 +215,7 @@ async function saveTaskConfigs(tasks: AutoTask[]): Promise<void> {
         path_structure: t.pathStructure || '',
         upload_profile_id: t.uploadProfileId || '',
         auto_upload: Boolean(t.autoUpload),
+        indicator_retry: t.indicatorRetry ?? 3,
         enabled: t.enabled,
         remark: t.remark || '',
         download_dir: t.downloadDir || '',
@@ -317,6 +322,7 @@ export default function Tasks(): JSX.Element {
   const [step, setStep] = useState(0)
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([])
   const [groups, setGroups] = useState<WorkflowGroup[]>([])
+  const [downloadRoot, setDownloadRoot] = useState('')
   const [taskProgressOpen, setTaskProgressOpen] = useState(false)
   const [taskProgressName, setTaskProgressName] = useState('')
   const [taskProgressTitle, setTaskProgressTitle] = useState('')
@@ -325,6 +331,21 @@ export default function Tasks(): JSX.Element {
   const [catchupProgressOpen, setCatchupProgressOpen] = useState(false)
   const [catchupRun, setCatchupRun] = useState<CatchupRun | null>(null)
   const [catchupTitle, setCatchupTitle] = useState('补数据')
+
+  useEffect(() => {
+    let alive = true
+    const pull = (): void => {
+      settingsStore.load().then((settings) => {
+        if (alive) setDownloadRoot(settings.downloadDir || '')
+      }).catch(() => undefined)
+    }
+    pull()
+    window.addEventListener('settings-updated', pull)
+    return () => {
+      alive = false
+      window.removeEventListener('settings-updated', pull)
+    }
+  }, [])
 
   useEffect(() => {
     if (!modalOpen || !indicatorsWatch) return
@@ -421,7 +442,8 @@ export default function Tasks(): JSX.Element {
       enabled: true,
       remark: '',
       uploadProfileId: undefined,
-      autoUpload: false
+      autoUpload: false,
+      indicatorRetry: 3
     })
     setWindows({})
     setOutputWindows({})
@@ -446,7 +468,8 @@ export default function Tasks(): JSX.Element {
       enabled: task.enabled,
       remark: task.remark || '',
       uploadProfileId: task.uploadProfileId || undefined,
-      autoUpload: Boolean(task.autoUpload)
+      autoUpload: Boolean(task.autoUpload),
+      indicatorRetry: task.indicatorRetry ?? 3
     })
     const saved = Object.fromEntries(
       Object.entries(task.indicatorWindows || {}).map(([name, window]) => [name, [window.start, window.end] as [number, number]])
@@ -524,6 +547,7 @@ export default function Tasks(): JSX.Element {
         pathStructure,
         uploadProfileId: values.uploadProfileId || '',
         autoUpload: Boolean(values.autoUpload),
+        indicatorRetry: Number(values.indicatorRetry ?? 3),
         enabled: values.enabled,
         remark: values.remark?.trim() || undefined,
         createdAt: editing?.createdAt || Date.now()
@@ -549,6 +573,7 @@ export default function Tasks(): JSX.Element {
           `time: "${payload.time}"`,
           `backfill_days: ${payload.backfillDays}`,
           `cover_days: ${payload.coverDays}`,
+          `indicator_retry: ${payload.indicatorRetry ?? 3}`,
           weekdaysStr,
           'indicator_windows:',
           ...Object.entries(payload.indicatorWindows || {}).flatMap(([name, window]) => [
@@ -933,6 +958,13 @@ export default function Tasks(): JSX.Element {
           <Form.Item label="状态" name="enabled" valuePropName="checked">
             <Switch checkedChildren="启用" unCheckedChildren="关闭" />
           </Form.Item>
+          <Form.Item
+            label="单指标重试次数"
+            name="indicatorRetry"
+            tooltip="下载超时、元素等待超时、业务页丢失、导航失败时，先回到工作台再试。默认 3 次。登录失败、证书错误和第二次 HTTP 400 会停止整个任务。"
+          >
+            <InputNumber min={0} max={10} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
           </div>
 
           {repeatWatch === 'weekly' && (
@@ -1042,7 +1074,7 @@ export default function Tasks(): JSX.Element {
           <StoragePathModal
             embedded
             open
-            root={settingsStore.get('downloadDir', '')}
+            root={downloadRoot}
             structure={pathStructure}
             template={pathTemplate}
             folders={pathFolders}

@@ -262,7 +262,8 @@ function FileTree({
 
 export default function Files(): JSX.Element {
   const { message, modal } = AntApp.useApp()
-  const [root, setRoot] = useState<string>(() => settingsStore.get('downloadDir', ''))
+  const [root, setRoot] = useState('')
+  const [settingsReady, setSettingsReady] = useState(false)
   const [cwd, setCwd] = useState<string>('')
   const [entries, setEntries] = useState<DirEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -276,14 +277,25 @@ export default function Files(): JSX.Element {
   const [uploadProfiles, setUploadProfiles] = useState<UploadProfile[]>([])
   const [uploadProfileId, setUploadProfileId] = useState('')
 
-  // ---- init ----
+  // ---- init：先等设置加载完，失败时不要用空目录覆盖已保存的下载路径 ----
   useEffect(() => {
-    if (!root) {
-      window.api.getDataDir().then((dir) => {
-        if (dir) { setRoot(dir); setCwd(dir); settingsStore.save({ downloadDir: dir }) }
-      })
-    }
+    let alive = true
+    settingsStore.load().then((settings) => {
+      if (!alive) return
+      const stored = settings.downloadDir || ''
+      setSettingsReady(true)
+      if (stored) { setRoot(stored); setCwd(stored) }
+    }).catch(() => {
+      if (alive) setSettingsReady(true)
+    })
+    return () => { alive = false }
   }, [])
+  useEffect(() => {
+    if (!settingsReady || root) return
+    window.api.getDataDir().then((dir) => {
+      if (dir) { setRoot(dir); setCwd(dir); void settingsStore.save({ downloadDir: dir }) }
+    })
+  }, [settingsReady, root])
   useEffect(() => { if (root && !cwd) setCwd(root) }, [root, cwd])
 
   const syncRoot = useCallback(() => {

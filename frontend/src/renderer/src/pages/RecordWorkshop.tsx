@@ -30,7 +30,8 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function resolveBuildStartUrl(): string | undefined {
+async function resolveBuildStartUrl(): Promise<string | undefined> {
+  await settingsStore.load()
   const raw = settingsStore.get('siteUrl', '').trim()
   if (!raw) return undefined
   if (raw.startsWith('http://') || raw.startsWith('https://')) return raw
@@ -52,6 +53,7 @@ export default function RecordWorkshop(): JSX.Element {
   const loadRecords = useCallback(async () => {
     setLoading(true)
     try {
+      await settingsStore.load()
       const dlDir = settingsStore.get('downloadDir', '')
       setExportDir(dlDir ? `${dlDir}/录制工坊` : '')
       setRecords(await api.listWorkshopExports(dlDir || undefined))
@@ -60,11 +62,12 @@ export default function RecordWorkshop(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    settingsStore.load().then(loadRecords)
-  }, [loadRecords])
+    settingsStore.load().then(loadRecords).catch(() => { message.error('设置加载失败') })
+  }, [loadRecords, message])
 
   const handleBuild = async () => {
     const values = await form.validateFields()
+    await settingsStore.load()
     const downloadDir = settingsStore.get('downloadDir', '')
     if (!downloadDir) {
       message.warning('请先在设置中配置下载路径')
@@ -75,7 +78,7 @@ export default function RecordWorkshop(): JSX.Element {
     try {
       const res = await api.buildWorkshop({
         name: values.name.trim(),
-        url: resolveBuildStartUrl(),
+        url: await resolveBuildStartUrl(),
         description: values.description?.trim() || undefined,
         download_dir: downloadDir
       })
@@ -94,6 +97,7 @@ export default function RecordWorkshop(): JSX.Element {
   }
 
   const handleSubmit = async (record: WorkshopExport) => {
+    await settingsStore.load()
     const downloadDir = settingsStore.get('downloadDir', '')
     if (!downloadDir) {
       message.warning('请先在设置中配置下载路径')
@@ -120,6 +124,7 @@ export default function RecordWorkshop(): JSX.Element {
   }
 
   const handleDelete = async (record: WorkshopExport) => {
+    await settingsStore.load()
     const downloadDir = settingsStore.get('downloadDir', '')
     if (!downloadDir) {
       message.warning('请先在设置中配置下载路径')

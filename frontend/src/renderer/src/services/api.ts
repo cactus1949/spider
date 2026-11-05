@@ -541,7 +541,7 @@ export const api = {
   // ---- 应用设置 ----
   getSettings: () => req<{ settings: Record<string, string> }>('/api/settings'),
   saveSettings: (settings: Record<string, string>) =>
-    req<{ status: string }>('/api/settings', {
+    req<{ status: string; settings?: Record<string, string> }>('/api/settings', {
       method: 'PUT',
       body: JSON.stringify({ settings })
     }),
@@ -632,6 +632,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ download_dir: downloadDir })
     }),
+  downloadDiagnostics: (downloadDir = '', appVersion = '') =>
+    req<{ status: string; path: string; filename: string }>('/api/diagnostics/bundle', {
+      method: 'POST',
+      body: JSON.stringify({ download_dir: downloadDir, app_version: appVersion })
+    }),
   pickStation: (body: {
     choice?: string
     forceWindow?: boolean
@@ -705,19 +710,32 @@ function maskStationProfiles(raw: string): string {
 }
 
 export const settingsStore = {
-  /** 加载设置（幂等，首次调 API，后续走缓存） */
+  /** 是否已经从服务端成功加载过。失败时为 false，不能拿默认值冒充。 */
+  ready(): boolean {
+    return _settingsCache !== null
+  },
+
+  /** 加载设置（幂等，首次调 API，后续走缓存）。失败会抛出，不把空对象当成成功。 */
   async load(): Promise<Record<string, string>> {
     if (_settingsCache) return _settingsCache
     if (!_settingsPromise) {
       _settingsPromise = api.getSettings().then(r => {
         _settingsCache = r.settings || {}
         return _settingsCache
-      }).catch(() => {
+      }).catch((error: unknown) => {
         _settingsPromise = null
-        return {} as Record<string, string>
+        _settingsCache = null
+        throw error
       })
     }
     return _settingsPromise
+  },
+
+  /** 丢掉缓存后重新读取，用来核对刚刚保存的值。 */
+  async reload(): Promise<Record<string, string>> {
+    _settingsCache = null
+    _settingsPromise = null
+    return this.load()
   },
 
   /** 同步获取单个值（需先 load） */
@@ -731,13 +749,14 @@ export const settingsStore = {
   },
 
   /** 保存并更新缓存 */
-  async save(settings: Record<string, string>): Promise<void> {
-    await api.saveSettings(settings)
+  async save(settings: Record<string, string>): Promise<Record<string, string>> {
+    const saved = await api.saveSettings(settings)
     if (!_settingsCache) _settingsCache = {}
     const cached = { ...settings }
     if (cached.wifiPassword) cached.wifiPassword = '******'
     if (cached.stationProfiles) cached.stationProfiles = maskStationProfiles(cached.stationProfiles)
     Object.assign(_settingsCache, cached)
+    return saved.settings || {}
   },
 
   /** 重置缓存（下次 load 重新拉） */

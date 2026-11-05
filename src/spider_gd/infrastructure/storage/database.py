@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS task_configs (
     path_structure TEXT NOT NULL DEFAULT '',
     upload_profile_id TEXT NOT NULL DEFAULT '',
     auto_upload INTEGER NOT NULL DEFAULT 0,
+    indicator_retry INTEGER NOT NULL DEFAULT 3,
     created_at  REAL NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -95,11 +96,22 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     status      TEXT NOT NULL DEFAULT 'running',
     reason      TEXT DEFAULT '',
     detail_log  TEXT DEFAULT '',
+    resume_plan TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_exec_logs_status ON execution_logs(status);
 CREATE INDEX IF NOT EXISTS idx_exec_logs_created ON execution_logs(created_at DESC);
+
+-- 一次执行里每个「指标 × 日期」的结果，供从中断处继续时跳过已成功项
+CREATE TABLE IF NOT EXISTS indicator_run_items (
+    exec_id    TEXT NOT NULL,
+    indicator  TEXT NOT NULL,
+    slot_key   TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (exec_id, slot_key)
+);
 
 -- 应用设置（key-value，替代 localStorage）
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -178,6 +190,7 @@ class TaskStateStore:
         self._conn.commit()
         # 兼容旧库：补齐 task_configs 的下载目录/路径模板列
         self._migrate_task_configs_schema()
+        self._migrate_execution_log_schema()
         self._migrate_workflow_groups_schema()
         self._migrate_route_rules_schema()
         self._migrate_workshop_submissions_schema()
@@ -238,6 +251,7 @@ class TaskStateStore:
             ("path_structure", "TEXT NOT NULL DEFAULT ''"),
             ("upload_profile_id", "TEXT NOT NULL DEFAULT ''"),
             ("auto_upload", "INTEGER NOT NULL DEFAULT 0"),
+            ("indicator_retry", "INTEGER NOT NULL DEFAULT 3"),
         ]:
             if col not in existing:
                 try:
@@ -246,6 +260,25 @@ class TaskStateStore:
                     logger.info("数据库迁移：task_configs 添加列 {}", col)
                 except Exception as exc:
                     logger.warning("数据库迁移跳过 {}: {}", col, exc)
+
+    def _migrate_execution_log_schema(self) -> None:
+        """为旧库补上续跑快照列。指标结果表由建表语句自行补齐。"""
+        try:
+            existing = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(execution_logs)").fetchall()
+            }
+        except Exception:
+            return
+        if "resume_plan" not in existing:
+            try:
+                self._conn.execute(
+                    "ALTER TABLE execution_logs ADD COLUMN resume_plan TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.commit()
+                logger.info("数据库迁移：execution_logs 添加列 resume_plan")
+            except Exception as exc:
+                logger.warning("数据库迁移跳过 execution_logs.resume_plan: {}", exc)
 
     def _migrate_route_rules_schema(self) -> None:
         """为旧路由规则表补充可选 SSID 校验列。"""
@@ -299,7 +332,7 @@ class TaskStateStore:
                         weekdays=?, backfill_days=?, cover_days=?,
                         enabled=?, remark=?, download_dir=?, download_dir_custom=?, indicator_windows=?,
                         output_windows=?, path_template=?, path_folders=?, path_structure=?,
-                        upload_profile_id=?, auto_upload=?, updated_at=?
+                        upload_profile_id=?, auto_upload=?, indicator_retry=?, updated_at=?
                     WHERE id=?""",
                     (
                         cfg["name"], cfg.get("login", ""),
@@ -313,6 +346,7 @@ class TaskStateStore:
                         cfg.get("path_structure", ""),
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
+                        _indicator_retry_value(cfg.get("indicator_retry", 3)),
                         now, cfg["id"],
                     ),
                 )
@@ -325,8 +359,8 @@ class TaskStateStore:
                         (id, name, login, indicators, repeat, time, weekdays,
                          backfill_days, cover_days, enabled, remark, download_dir, download_dir_custom,
                          indicator_windows, output_windows, path_template, path_folders, path_structure,
-                         upload_profile_id, auto_upload, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                         upload_profile_id, auto_upload, indicator_retry, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         cfg["id"], cfg["name"], cfg.get("login", ""),
                         json.dumps(cfg.get("indicators", [])),
@@ -339,6 +373,7 @@ class TaskStateStore:
                         cfg.get("path_structure", ""),
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
+                        _indicator_retry_value(cfg.get("indicator_retry", 3)),
                         now, now,
                     ),
                 )
@@ -737,6 +772,140 @@ class TaskStateStore:
         if deleted:
             logger.info("清理了 {} 条过期执行日志（{} 天前）", deleted, retention_days)
         return deleted
+
+    def save_resume_plan(self, exec_id: str, plan: dict) -> None:
+        """保存这次执行的续跑快照，供「从中断处继续」还原当时的指标和日期。
+
+        Args:
+            exec_id (str): 执行 id。
+            plan (dict): 已去掉密钥的任务配置。
+
+        Returns:
+            None: 写入 ``execution_logs.resume_plan``。
+
+        Examples:
+            >>> store = TaskStateStore(":memory:")
+            >>> from spider_gd.interfaces.storage import ExecutionLogRecord
+            >>> store.create_execution_log(ExecutionLogRecord(
+            ...     "e1", "日常", "scheduled_manual", "t1", "running", "", "", "2026-11-05 01:00:00", "2026-11-05 01:00:00"))
+            >>> store.save_resume_plan("e1", {"indicators": ["spot"]})
+            >>> store.get_resume_plan("e1")["indicators"]
+            ['spot']
+        """
+        import json
+
+        text = json.dumps(plan, ensure_ascii=False)
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE execution_logs SET resume_plan = ? WHERE exec_id = ?",
+                (text, exec_id),
+            )
+            self._conn.commit()
+
+    def get_resume_plan(self, exec_id: str) -> dict | None:
+        """读取续跑快照。
+
+        Args:
+            exec_id (str): 执行 id。
+
+        Returns:
+            dict | None: 快照；没有记录或还没写入时为 None。
+
+        Examples:
+            >>> TaskStateStore(":memory:").get_resume_plan("missing") is None
+            True
+        """
+        import json
+
+        try:
+            row = self._conn.execute(
+                "SELECT resume_plan FROM execution_logs WHERE exec_id = ?",
+                (exec_id,),
+            ).fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        raw = row["resume_plan"] or ""
+        if not str(raw).strip():
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def mark_indicator_slot(self, exec_id: str, indicator: str, slot_key: str, status: str) -> None:
+        """记下某个指标在某个日期上的结果。
+
+        Args:
+            exec_id (str): 执行 id。
+            indicator (str): 指标 id。可与 slot_key 重复，便于按指标筛选。
+            slot_key (str): ``指标\\t日期`` 形式的唯一键。
+            status (str): ``success`` / ``failed`` / ``skipped``。
+
+        Returns:
+            None: 同一键再次写入会覆盖。
+
+        Examples:
+            >>> store = TaskStateStore(":memory:")
+            >>> store.mark_indicator_slot("e1", "spot", "spot\\t2026-11-01", "success")
+            >>> store.succeeded_slots("e1") == {"spot\\t2026-11-01"}
+            True
+        """
+        import time as _time
+
+        now = _time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._write_lock:
+            self._conn.execute(
+                """INSERT INTO indicator_run_items (exec_id, indicator, slot_key, status, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(exec_id, slot_key) DO UPDATE SET
+                     indicator=excluded.indicator, status=excluded.status, updated_at=excluded.updated_at""",
+                (exec_id, indicator, slot_key, status, now),
+            )
+            self._conn.commit()
+
+    def list_indicator_slots(self, exec_id: str) -> list[dict[str, str]]:
+        """列出一次执行里全部指标日期结果。
+
+        Args:
+            exec_id (str): 执行 id。
+
+        Returns:
+            list[dict[str, str]]: 每条含 ``indicator``、``slot_key``、``status``。
+
+        Examples:
+            >>> TaskStateStore(":memory:").list_indicator_slots("none")
+            []
+        """
+        rows = self._conn.execute(
+            "SELECT indicator, slot_key, status FROM indicator_run_items WHERE exec_id = ?",
+            (exec_id,),
+        ).fetchall()
+        return [
+            {"indicator": row["indicator"], "slot_key": row["slot_key"], "status": row["status"]}
+            for row in rows
+        ]
+
+    def succeeded_slots(self, exec_id: str) -> set[str]:
+        """一次执行里已经成功的「指标 × 日期」键。
+
+        Args:
+            exec_id (str): 执行 id。
+
+        Returns:
+            set[str]: 状态为 ``success`` 的 slot_key。
+
+        Examples:
+            >>> TaskStateStore(":memory:").succeeded_slots("none") == set()
+            True
+        """
+        rows = self._conn.execute(
+            "SELECT slot_key FROM indicator_run_items WHERE exec_id = ? AND status = 'success'",
+            (exec_id,),
+        ).fetchall()
+        return {row["slot_key"] for row in rows}
 
     # ── 应用设置（key-value） ──
 
@@ -1422,8 +1591,31 @@ def _task_config_row(row: sqlite3.Row) -> dict:
         "path_structure": _col("path_structure", ""),
         "upload_profile_id": _col("upload_profile_id", "") or "",
         "auto_upload": bool(_col("auto_upload", 0)),
+        "indicator_retry": _indicator_retry_value(_col("indicator_retry", 3)),
         "created_at": _col("created_at", 0), "updated_at": _col("updated_at", 0),
     }
+
+
+def _indicator_retry_value(raw) -> int:
+    """把任务上的重试次数收成 0 到 10 的整数。
+
+    Args:
+        raw: 配置里的原始值。空或非法时用 3。``0`` 表示不再额外重试。
+
+    Returns:
+        int: 重试次数。
+
+    Examples:
+        >>> _indicator_retry_value(0)
+        0
+        >>> _indicator_retry_value("bad")
+        3
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 3
+    return max(0, min(10, value))
 
 
 def _indicator_windows_json(raw) -> str:

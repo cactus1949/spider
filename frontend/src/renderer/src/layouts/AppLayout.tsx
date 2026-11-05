@@ -1,7 +1,7 @@
 import BrowserSessionPanel from '../components/BrowserSessionPanel'
 import { useEffect, useRef, useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Button, Tooltip, Tag, Modal, Input } from 'antd'
+import { Layout, Menu, Button, Tooltip, Tag, Modal, Input, Dropdown } from 'antd'
 import {
   FolderOutlined,
   ScheduleOutlined,
@@ -17,7 +17,7 @@ import {
 import HealthIndicators from '../components/HealthIndicators'
 import SettingsModal from '../components/SettingsModal'
 import { App } from 'antd'
-import { api } from '../services/api'
+import { api, settingsStore } from '../services/api'
 
 const { Sider, Header, Content } = Layout
 
@@ -66,6 +66,7 @@ export default function AppLayout(): JSX.Element {
   const [gateOpen, setGateOpen] = useState(false)
   const [gateCode, setGateCode] = useState('')
   const [gateError, setGateError] = useState('')
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false)
   const versionClicks = useRef({ count: 0, at: 0 })
   const { message } = App.useApp()
   const indicatorsLocked = location.pathname === '/indicators' && !indicatorsUnlocked
@@ -423,21 +424,36 @@ export default function AppLayout(): JSX.Element {
               </Tooltip>
             </div>
             <HealthIndicators />
-            <Tooltip title="查看日志">
-              <Button
-                type="text"
-                icon={<FileTextOutlined />}
-                size="small"
-                onClick={async () => {
+            <Dropdown.Button
+              size="small"
+              loading={diagnosticsLoading}
+              menu={{
+                items: [{ key: 'logs', label: '打开日志目录' }],
+                onClick: async () => {
                   try {
                     const { path } = await api.logPath()
                     window.api.openDir(path)
                   } catch {
                     message.error('无法获取日志路径')
                   }
-                }}
-              />
-            </Tooltip>
+                }
+              }}
+              onClick={async () => {
+                setDiagnosticsLoading(true)
+                try {
+                  const settings = await settingsStore.load().catch(() => ({} as Record<string, string>))
+                  const res = await api.downloadDiagnostics(settings.downloadDir || '', version)
+                  message.success(`诊断包已保存: ${res.filename}`)
+                  if (res.path) await window.api.revealFile(res.path)
+                } catch (error: unknown) {
+                  message.error('诊断包下载失败: ' + (error instanceof Error ? error.message : String(error)))
+                } finally {
+                  setDiagnosticsLoading(false)
+                }
+              }}
+            >
+              下载诊断包
+            </Dropdown.Button>
           </div>
         </Header>
         <BrowserSessionPanel />

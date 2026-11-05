@@ -22,6 +22,25 @@ let stopping = false
 
 type BackendLaunch = { command: string; args: string[]; cwd: string }
 
+function userDataHome(): string {
+  try {
+    return app.getPath('userData')
+  } catch {
+    const base = process.env.APPDATA || app.getPath('home')
+    return join(base, 'SpiderGD')
+  }
+}
+
+function backendEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  // 打包后把用户数据放到 Electron userData，避免升级时被安装目录清掉。
+  // 开发环境不设置，后端继续使用仓库工作目录。
+  if (app.isPackaged && !env.SPIDER_GD_HOME) {
+    env.SPIDER_GD_HOME = userDataHome()
+  }
+  return env
+}
+
 function findBackendLaunch(): BackendLaunch | null {
   const envPath = process.env['SPIDER_GD_BACKEND_EXE']
   if (envPath && existsSync(envPath)) {
@@ -100,8 +119,11 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
 
   console.log('[backend] 启动:', launch.command, ...launch.args)
 
+  const env = backendEnv()
+  console.log('[backend] SPIDER_GD_HOME=', env.SPIDER_GD_HOME || '(未设置，使用工作目录)')
   const proc = spawn(launch.command, launch.args, {
     cwd: launch.cwd,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })

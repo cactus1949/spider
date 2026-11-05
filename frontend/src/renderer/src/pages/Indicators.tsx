@@ -576,8 +576,9 @@ steps:
     }
 
     try {
-      const certPwd = settingsStore.get('certPassword', '')
-      const downloadDir = settingsStore.get('downloadDir', '')
+      const settings = await settingsStore.load()
+      const certPwd = settings.certPassword || ''
+      const downloadDir = settings.downloadDir || ''
       const params = new URLSearchParams({ mode })
       if (certPwd) params.set('cert_password', certPwd)
       if (downloadDir) params.set('download_dir', downloadDir)
