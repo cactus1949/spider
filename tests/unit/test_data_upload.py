@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -144,7 +145,69 @@ def test_task_config_stores_upload_fields(tmp_path: Path) -> None:
     store.close()
 
 
-def test_prepare_upload_files_zips_directory(tmp_path: Path) -> None:
+def _zip_names(path: Path) -> set[str]:
+    with zipfile.ZipFile(path) as handle:
+        return set(handle.namelist())
+
+
+def test_prepare_single_file_is_not_zipped(tmp_path: Path) -> None:
+    sample = tmp_path / "only.txt"
+    sample.write_text("甲", encoding="utf-8")
+    ready, failed = prepare_upload_files([sample, sample], tmp_path / "work")
+    assert failed == []
+    assert len(ready) == 1
+    assert ready[0].kind == "file"
+    assert ready[0].name == "only.txt"
+    assert ready[0].path == sample
+    assert ready[0].note == ""
+
+
+def test_prepare_two_files_become_one_zip(tmp_path: Path) -> None:
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("甲", encoding="utf-8")
+    second.write_text("乙", encoding="utf-8")
+    ready, failed = prepare_upload_files([first, second], tmp_path / "work")
+    assert failed == []
+    assert len(ready) == 1
+    assert ready[0].kind == "zip"
+    assert ready[0].name == "one.txt_等2项.zip"
+    assert ready[0].note == "已打包 2 项"
+    assert _zip_names(ready[0].path) == {"one.txt", "two.txt"}
+
+
+def test_prepare_nested_folder_one_zip_skips_internal_artifacts(tmp_path: Path) -> None:
+    folder = tmp_path / "报表"
+    folder.mkdir()
+    (folder / "a.txt").write_text("甲", encoding="utf-8")
+    nested = folder / "子目录"
+    nested.mkdir()
+    (nested / "b.txt").write_text("乙", encoding="utf-8")
+    (folder / ".notes.pdf").write_bytes(b"dot-user")
+    (folder / ".file_versions.json").write_text("{}", encoding="utf-8")
+    (folder / ".file_versions.json.tmp").write_text("{}", encoding="utf-8")
+    (folder / "storage_state.json").write_text("{}", encoding="utf-8")
+    (folder / "extra.zip").write_bytes(b"PK")
+    versions = folder / "_versions"
+    versions.mkdir()
+    (versions / "old.pdf").write_bytes(b"old")
+    failures = folder / "_failures"
+    failures.mkdir()
+    (failures / "err.txt").write_text("x", encoding="utf-8")
+    stable = folder / "_stable_delivery"
+    stable.mkdir()
+    (stable / "pack.zip").write_bytes(b"PK")
+
+    ready, failed = prepare_upload_files([folder], tmp_path / "work")
+    assert failed == []
+    assert len(ready) == 1
+    assert ready[0].kind == "zip"
+    assert ready[0].name == "报表.zip"
+    assert ready[0].note == "已打包 1 项"
+    assert _zip_names(ready[0].path) == {"a.txt", "子目录/b.txt", ".notes.pdf"}
+
+
+def test_prepare_file_and_folder_become_one_zip(tmp_path: Path) -> None:
     folder = tmp_path / "报表"
     folder.mkdir()
     (folder / "a.txt").write_text("甲", encoding="utf-8")
@@ -153,17 +216,61 @@ def test_prepare_upload_files_zips_directory(tmp_path: Path) -> None:
     (nested / "b.txt").write_text("乙", encoding="utf-8")
     loose = tmp_path / "c.txt"
     loose.write_text("丙", encoding="utf-8")
-    ready, failed = prepare_upload_files([folder, loose, tmp_path / "missing.txt"], tmp_path / "work")
-    assert failed[0]["status"] == "failed"
-    zipped = next(item for item in ready if item.kind == "zip")
-    plain = next(item for item in ready if item.kind == "file")
-    assert plain.name == "c.txt"
-    import zipfile
+    manifest = tmp_path / ".file_versions.json"
+    manifest.write_text("{}", encoding="utf-8")
+    chosen_zip = tmp_path / "附件.zip"
+    chosen_zip.write_bytes(b"PK")
 
-    with zipfile.ZipFile(zipped.path) as handle:
-        names = set(handle.namelist())
-    assert "a.txt" in names
-    assert "子目录/b.txt" in names
+    ready, failed = prepare_upload_files(
+        [folder, loose, manifest, chosen_zip, folder / "a.txt"],
+        tmp_path / "work",
+    )
+    assert failed == []
+    assert len(ready) == 1
+    assert ready[0].kind == "zip"
+    assert ready[0].name == "报表_等3项.zip"
+    names = _zip_names(ready[0].path)
+    assert names == {"报表/a.txt", "报表/子目录/b.txt", "c.txt", "附件.zip"}
+    assert all(".file_versions.json" not in name for name in names)
+    assert all("_versions" not in Path(name).parts for name in names)
+
+
+def test_prepare_empty_and_missing_paths_fail(tmp_path: Path) -> None:
+    ready, failed = prepare_upload_files([], tmp_path / "work")
+    assert ready == []
+    assert failed == []
+
+    missing = tmp_path / "missing.txt"
+    ready, failed = prepare_upload_files([missing], tmp_path / "work")
+    assert ready == []
+    assert failed[0]["status"] == "failed"
+    assert "不存在" in failed[0]["message"]
+
+    sample = tmp_path / "only.txt"
+    sample.write_text("甲", encoding="utf-8")
+    ready, failed = prepare_upload_files([sample, missing], tmp_path / "work")
+    assert len(ready) == 1
+    assert ready[0].kind == "file"
+    assert ready[0].path == sample
+    assert len(failed) == 1
+    assert failed[0]["status"] == "failed"
+
+    empty = tmp_path / "空目录"
+    empty.mkdir()
+    ready, failed = prepare_upload_files([empty], tmp_path / "work")
+    assert ready == []
+    assert failed[0]["status"] == "failed"
+    assert "没有可上传的文件" in failed[0]["message"]
+
+    artifact_only = tmp_path / "只有清单"
+    artifact_only.mkdir()
+    (artifact_only / ".file_versions.json").write_text("{}", encoding="utf-8")
+    versions = artifact_only / "_versions"
+    versions.mkdir()
+    (versions / "old.pdf").write_bytes(b"old")
+    ready, failed = prepare_upload_files([artifact_only], tmp_path / "work")
+    assert ready == []
+    assert "没有可上传的文件" in failed[0]["message"]
 
 
 @pytest.mark.asyncio
@@ -324,16 +431,20 @@ async def test_multipart_accepts_multiple_files_and_retries(tmp_path: Path) -> N
 
     respx.post("https://example.test/upload").mock(side_effect=handler)
     profile = load_profiles_from(SecretBox(b"k" * 32), token="")
-    result = await upload_prepared_files(
+    result = await run_upload(
         profile,
-        [*_only(first), *_only(second)],
+        [first, second],
+        switch_wifi=False,
         retry_delay_sec=0,
+        work_dir=tmp_path / "work",
     )
     assert calls["count"] == DEFAULT_ATTEMPTS
     assert result.ok is True
-    assert {item["status"] for item in result.files} == {"success"}
+    assert [item["status"] for item in result.files] == ["success"]
+    assert result.files[0]["name"] == "one.txt_等2项.zip"
+    assert "已打包 2 项" in result.files[0]["message"]
     body = sent_body(respx.calls.last.request)
-    assert body.count(b'name="file"') == 2
+    assert body.count(b'name="file"') == 1
     assert b"one.txt" in body
     assert b"two.txt" in body
 
@@ -395,6 +506,7 @@ async def test_run_upload_zips_folder_and_skips_connected_wifi(tmp_path: Path) -
         wifi_password="wifi-secret",
     )
     port = FakeWifi("office")
+    events: list[dict] = []
     result = await run_upload(
         profile,
         [folder],
@@ -402,12 +514,20 @@ async def test_run_upload_zips_folder_and_skips_connected_wifi(tmp_path: Path) -
         retry_delay_sec=0,
         max_attempts=1,
         work_dir=tmp_path / "zip",
+        on_progress=events.append,
     )
     assert result.ok is True
     assert port.calls == []
     assert result.wifi_message == "已连接目标 WiFi"
+    assert len(result.files) == 1
     assert result.files[0]["name"] == "目录.zip"
+    assert "已打包 1 项" in result.files[0]["message"]
+    done = [item for item in events if item["phase"] == "done"][-1]
+    assert done["total"] == 1
+    assert done["done"] == 1
+    assert len(done["files"]) == 1
     body = sent_body(respx.calls.last.request)
+    assert body.count(b'name="file"') == 1
     assert b"inside.txt" in body
 
 
@@ -473,10 +593,75 @@ async def test_maybe_upload_after_run_manual_offer_and_auto_retry(tmp_path: Path
     )
     assert auto is not None and auto["ok"] is True
     assert calls["count"] == 2
+    body = sent_body(respx.calls.last.request)
+    assert b'filename="out.txt"' in body
+    assert b"new" in body
     detail = store.get_execution_log("exec-1")
     assert detail is not None
     assert "准备重试 1/3" in detail.detail_log
-    assert "上传成功" in detail.detail_log
+    assert "上传成功：out.txt" in detail.detail_log
+    store.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_maybe_upload_after_run_packs_changed_files_into_one_zip(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path / "spider.db")
+    save_profiles(store, [_profile_payload(wifiSsid="", wifiPassword="")])
+    download = tmp_path / "downloads"
+    download.mkdir()
+    (download / "one.txt").write_text("甲", encoding="utf-8")
+    (download / "two.txt").write_text("乙", encoding="utf-8")
+    (download / ".file_versions.json").write_text("{}", encoding="utf-8")
+    versions = download / "_versions"
+    versions.mkdir()
+    (versions / "old.txt").write_text("old", encoding="utf-8")
+    from spider_gd.interfaces.storage import ExecutionLogRecord
+
+    store.create_execution_log(
+        ExecutionLogRecord(
+            exec_id="exec-zip",
+            name="日报",
+            type="scheduled_manual",
+            target_id="task-1",
+            status="success",
+            created_at="2026-01-01 00:00:00",
+            updated_at="2026-01-01 00:00:00",
+        )
+    )
+    respx.post("https://example.test/upload").mock(
+        return_value=httpx.Response(200, json={"code": 200})
+    )
+    events: list[dict] = []
+    offer = await maybe_upload_after_run(
+        store,
+        profile_id="up_test",
+        auto_upload=True,
+        exec_id="exec-zip",
+        download_dir=str(download),
+        before={},
+        wifi=FakeWifi(""),
+        retry_delay_sec=0,
+        on_event=events.append,
+    )
+    assert offer is not None
+    assert offer["ok"] is True
+    body = sent_body(respx.calls.last.request)
+    assert body.count(b'name="file"') == 1
+    assert "one.txt_等2项.zip".encode() in body
+    assert b"one.txt" in body
+    assert b"two.txt" in body
+    assert b".file_versions.json" not in body
+    assert b"old.txt" not in body
+    done = [item for item in events if item.get("phase") == "done"][-1]
+    assert done["total"] == 1
+    assert done["done"] == 1
+    assert done["files"][0]["status"] == "success"
+    assert "已打包 2 项" in done["files"][0]["message"]
+    detail = store.get_execution_log("exec-zip")
+    assert detail is not None
+    assert "选中 2 项" in detail.detail_log
+    assert "one.txt_等2项.zip" in detail.detail_log
     store.close()
 
 
@@ -533,15 +718,19 @@ async def test_file_field_name_follows_profile(tmp_path: Path) -> None:
     respx.post("https://example.test/upload").mock(
         return_value=httpx.Response(200, json={"code": 200})
     )
-    result = await upload_prepared_files(
+    result = await run_upload(
         profile,
-        [*_only(first), *_only(second)],
+        [first, second],
+        switch_wifi=False,
         retry_delay_sec=0,
         max_attempts=1,
+        work_dir=tmp_path / "work",
     )
     assert result.ok is True
+    assert len(result.files) == 1
+    assert result.files[0]["name"].endswith(".zip")
     body = sent_body(respx.calls.last.request)
-    assert body.count(b'name="attachment"') == 2
+    assert body.count(b'name="attachment"') == 1
     assert b'name="file"' not in body
 
 

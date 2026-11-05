@@ -98,6 +98,7 @@ async def maybe_upload_after_run(
     开了自动上传就立刻传；失败自动重试，并把结果写进这条执行日志。上传失败不改采集状态。
     产物含新增或改动的文件，以及内容未变、但本轮重新确认过的文件。
     ``.file_versions.json`` 和 ``_versions`` 归档不会进入上传列表。
+    多个产物打成一个 zip 后上传；只有一个普通文件时原样上传。
 
     Args:
         store: 状态库。
@@ -195,6 +196,8 @@ async def upload_selected_paths(
     log_name: str = "数据上传",
 ) -> UploadJobResult:
     """文件中心或结果弹窗里的手动上传。
+
+    路径列表走同一套打包规则：至多上传一个文件或一个 zip。
 
     Args:
         store: 状态库。
@@ -393,7 +396,7 @@ async def _upload_profile_paths(
     active_id = exec_id
     if create_log:
         active_id = _create_upload_log(store, source_name, profile.id)
-    _log(store, active_id, f"☁️ 开始上传「{profile.name}」，共 {len(paths)} 项")
+    _log(store, active_id, f"☁️ 开始上传「{profile.name}」，选中 {len(paths)} 项")
     seen_retry: set[int] = set()
 
     def observe(event: dict[str, Any]) -> None:
@@ -425,7 +428,15 @@ async def _upload_profile_paths(
         on_progress=observe,
     )
     if result.ok:
-        _log(store, active_id, f"☁️ 上传成功（{result.attempts} 次请求）")
+        uploaded = [
+            str(item.get("name") or "")
+            for item in result.files
+            if item.get("status") == "success"
+        ]
+        shown = "、".join(name for name in uploaded if name) or "文件"
+        failed_count = sum(1 for item in result.files if item.get("status") == "failed")
+        extra = f"，另有 {failed_count} 项未上传" if failed_count else ""
+        _log(store, active_id, f"☁️ 上传成功：{shown}（{result.attempts} 次请求{extra}）")
         if create_log:
             _finish_upload_log(store, active_id, "success", "")
     else:

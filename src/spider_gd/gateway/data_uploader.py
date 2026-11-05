@@ -1,14 +1,16 @@
 """按上传配置把文件 POST 到客户接口。
 
-协议是 ``multipart/form-data``。每个文件的字段名来自配置，默认 ``file``，一次请求
-可以带多个文件。自定义请求头、查询参数和表单字段按配置原样带上。文件夹会先打成
-zip。失败后自动再试 3 次（连第一次一共 4 次）。配置了 WiFi 时先切过去，已经连着
-目标网络就不切；上传完再切回原来的网络。
+协议是 ``multipart/form-data``。一次请求只带一个文件，字段名来自配置，默认 ``file``。
+恰好一个普通文件时原样上传；多个文件、任意文件夹，或文件与文件夹混选时，先打成
+一个 zip 再上传。自定义请求头、查询参数和表单字段按配置原样带上。失败后自动再试
+3 次（连第一次一共 4 次）。配置了 WiFi 时先切过去，已经连着目标网络就不切；上传完
+再切回原来的网络。
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -68,21 +70,27 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 class PreparedFile:
     """一个即将放进 multipart 的文件。
 
+    一次上传只有这一份。多个来源打成 zip 时，``note`` 写明打包了几项。
+
     Args:
-        source: 用户选中的原始路径。
+        source: 用户选中的原始路径。多项打包时用换行拼在一起。
         name: 上传时使用的文件名。
         path: 实际读取的本地文件。
         kind: ``file`` 或 ``zip``。
+        note: 打包说明。单个普通文件为空。
 
     Examples:
         >>> PreparedFile("/a", "a.txt", Path("a.txt"), "file").kind
         'file'
+        >>> PreparedFile("/a", "a.zip", Path("a.zip"), "zip", "已打包 2 项").note
+        '已打包 2 项'
     """
 
     source: str
     name: str
     path: Path
     kind: str
+    note: str = ""
 
 
 @dataclass
@@ -138,15 +146,18 @@ class UploadJobResult:
 
 
 def prepare_upload_files(paths: list[str | Path], work_dir: Path) -> tuple[list[PreparedFile], list[dict[str, Any]]]:
-    """把选中的文件留下，把文件夹打成 zip。
+    """把选中路径收成至多一个待上传文件。
+
+    恰好一个普通文件、且没有文件夹时，原样上传。其余情况（多个文件、任意文件夹、
+    文件和文件夹混选）打成一个 zip。缺失路径记为失败，不中断其余项。
 
     Args:
         paths: 文件或文件夹路径。
         work_dir: 存放临时 zip 的目录，调用方负责清理。
 
     Returns:
-        tuple[list[PreparedFile], list[dict[str, Any]]]: 可上传的文件，以及无法处理的项
-        （状态已经是 ``failed``）。
+        tuple[list[PreparedFile], list[dict[str, Any]]]: 可上传的文件（0 或 1 个），
+        以及无法处理的项（状态已经是 ``failed``）。
 
     Examples:
         >>> prepared, failed = prepare_upload_files([], Path("."))
@@ -154,26 +165,62 @@ def prepare_upload_files(paths: list[str | Path], work_dir: Path) -> tuple[list[
         True
     """
     work_dir.mkdir(parents=True, exist_ok=True)
-    ready: list[PreparedFile] = []
     failed: list[dict[str, Any]] = []
-    used_names: set[str] = set()
+    valid: list[Path] = []
+    seen: set[Path] = set()
     for raw in paths:
         path = Path(raw)
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        if key in seen:
+            continue
+        seen.add(key)
         source = str(path)
+        label = path.name or source
         if not path.exists():
-            failed.append(_file_state(source, path.name or source, "failed", "文件不存在"))
+            failed.append(_file_state(source, label, "failed", "文件不存在"))
             continue
-        if path.is_dir():
-            archive_name = _unique_name(f"{path.name}.zip", used_names)
-            archive = work_dir / archive_name
-            _zip_directory(path, archive)
-            ready.append(PreparedFile(source, archive_name, archive, "zip"))
+        if not path.is_file() and not path.is_dir():
+            failed.append(_file_state(source, label, "failed", "不是文件或文件夹"))
             continue
-        if not path.is_file():
-            failed.append(_file_state(source, path.name, "failed", "不是文件或文件夹"))
-            continue
-        ready.append(PreparedFile(source, _unique_name(path.name, used_names), path, "file"))
-    return ready, failed
+        valid.append(path)
+    items = _top_level_entries(valid)
+    if not items:
+        return [], failed
+    if len(items) == 1 and items[0].is_file():
+        item = items[0]
+        return [PreparedFile(str(item), item.name or "upload", item, "file")], failed
+    # 多项里的版本清单、登录态不进包。滤掉之后若只剩一个普通文件，仍按单文件上传。
+    bundle = [
+        item
+        for item in items
+        if not (item.is_file() and _skip_packed_file(item.parent, item, explicit=True))
+    ]
+    if not bundle:
+        for item in items:
+            failed.append(
+                _file_state(str(item), item.name or str(item), "failed", "没有可上传的文件")
+            )
+        return [], failed
+    if len(bundle) == 1 and bundle[0].is_file():
+        item = bundle[0]
+        return [PreparedFile(str(item), item.name or "upload", item, "file")], failed
+
+    taken = {entry.name for entry in work_dir.iterdir()}
+    archive_name = _unique_name(_bundle_zip_name(bundle[0].name, len(bundle)), taken)
+    archive = work_dir / archive_name
+    written = _zip_selection(bundle, archive)
+    if written == 0:
+        for item in bundle:
+            failed.append(
+                _file_state(str(item), item.name or str(item), "failed", "没有可上传的文件")
+            )
+        return [], failed
+    note = f"已打包 {len(bundle)} 项"
+    source = str(bundle[0]) if len(bundle) == 1 else "\n".join(str(item) for item in bundle)
+    return [PreparedFile(source, archive_name, archive, "zip", note)], failed
 
 
 def build_request_parts(profile: UploadProfile) -> tuple[str, dict[str, str], dict[str, str], dict[str, str]]:
@@ -406,7 +453,10 @@ async def upload_prepared_files(
         True
     """
     attempts = max(1, int(max_attempts))
-    states = [_file_state(item.source, item.name, "ready", "等待上传") for item in files]
+    states = [
+        _file_state(item.source, item.name, "ready", _status_message("等待上传", item.note))
+        for item in files
+    ]
     if not files:
         return UploadJobResult(False, "没有可上传的文件", 0, states)
 
@@ -436,10 +486,10 @@ async def upload_prepared_files(
         for attempt in range(1, attempts + 1):
             status = "uploading" if attempt == 1 else "retrying"
             note = "正在上传" if attempt == 1 else f"第 {attempt - 1}/{AUTO_RETRY_TIMES} 次重试"
-            for item in states:
-                item["status"] = status
-                item["attempt"] = attempt
-                item["message"] = note
+            for item, state in zip(files, states, strict=True):
+                state["status"] = status
+                state["attempt"] = attempt
+                state["message"] = _status_message(note, item.note)
             emit("upload", note, None, attempt)
             try:
                 response_ok, message, _payload = await _post_once(
@@ -456,9 +506,9 @@ async def upload_prepared_files(
                 message = str(exc)
             result = UploadJobResult(response_ok, message, attempt, states)
             if response_ok:
-                for item in states:
-                    item["status"] = "success"
-                    item["message"] = "上传成功"
+                for item, state in zip(files, states, strict=True):
+                    state["status"] = "success"
+                    state["message"] = _status_message("上传成功", item.note)
                 emit("done", "上传成功", True, attempt)
                 return result
             if attempt < attempts:
@@ -491,7 +541,9 @@ async def run_upload(
     on_progress: ProgressCallback | None = None,
     work_dir: Path | None = None,
 ) -> UploadJobResult:
-    """压缩文件夹、按需切换 WiFi，再上传。
+    """按打包规则准备一个文件、按需切换 WiFi，再上传。
+
+    多个路径或含文件夹时只上传打好的那一个 zip。
 
     Args:
         profile: 上传配置。
@@ -522,14 +574,20 @@ async def run_upload(
         prepared, failed = prepare_upload_files(paths, folder)
         states = [
             *failed,
-            *[_file_state(item.source, item.name, "ready", "已准备") for item in prepared],
+            *[
+                _file_state(item.source, item.name, "ready", item.note or "已准备")
+                for item in prepared
+            ],
         ]
+        prepare_message = "正在准备文件"
+        if len(prepared) == 1 and prepared[0].note:
+            prepare_message = prepared[0].note
         if on_progress is not None:
             on_progress(
                 {
                     "event": "upload_progress",
                     "phase": "prepare",
-                    "message": "正在准备文件",
+                    "message": prepare_message,
                     "ok": None,
                     "attempt": 0,
                     "done": 0,
@@ -728,31 +786,277 @@ def _with_params(url: str, params: dict[str, str]) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(existing), parts.fragment))
 
 
-def _zip_directory(folder: Path, archive: Path) -> None:
-    """把文件夹压成 zip，条目名相对该文件夹。
+_INVALID_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_PACK_SKIP_DIRS = frozenset({"_versions", "_failures", "_stable_delivery"})
+
+
+def _safe_upload_label(name: str, *, limit: int = 80) -> str:
+    """把名字收成可用的文件名片段。
 
     Args:
+        name: 原始文件名或文件夹名。
+        limit: 最长字符数。小于等于 0 时不截断。
+
+    Returns:
+        str: 去掉非法字符后的名字。空结果用 ``upload``。
+
+    Examples:
+        >>> _safe_upload_label("a.txt")
+        'a.txt'
+        >>> _safe_upload_label("..")
+        'upload'
+        >>> _safe_upload_label("a:b")
+        'a_b'
+        >>> _safe_upload_label(".notes.pdf")
+        '.notes.pdf'
+        >>> _safe_upload_label("报表")
+        '报表'
+    """
+    cleaned = _INVALID_NAME.sub("_", name).strip(" ").rstrip(".")
+    if not cleaned or cleaned in {".", ".."}:
+        return "upload"
+    if limit > 0 and len(cleaned) > limit:
+        suffix = Path(cleaned).suffix
+        if suffix and len(suffix) < limit:
+            return cleaned[: limit - len(suffix)] + suffix
+        return cleaned[:limit]
+    return cleaned
+
+
+def _bundle_zip_name(first_name: str, count: int) -> str:
+    """生成打包后的 zip 文件名。
+
+    只有一项时用「名字.zip」。多项时用「第一项_等N项.zip」。
+
+    Args:
+        first_name: 选中顺序里第一项的文件名或文件夹名。
+        count: 打进同一个 zip 的顶层项数。
+
+    Returns:
+        str: zip 文件名，不含目录。
+
+    Examples:
+        >>> _bundle_zip_name("报表", 1)
+        '报表.zip'
+        >>> _bundle_zip_name("a.txt", 2)
+        'a.txt_等2项.zip'
+        >>> _bundle_zip_name("..", 3)
+        'upload_等3项.zip'
+    """
+    label = _safe_upload_label(first_name)
+    if count <= 1:
+        return f"{label}.zip"
+    return f"{label}_等{count}项.zip"
+
+
+def _status_message(base: str, note: str) -> str:
+    """给进度文案附上打包说明。
+
+    Args:
+        base: 状态原文，例如「上传成功」。
+        note: 打包说明。空字符串时不追加。
+
+    Returns:
+        str: 界面上显示的一句话。
+
+    Examples:
+        >>> _status_message("上传成功", "")
+        '上传成功'
+        >>> _status_message("上传成功", "已打包 2 项")
+        '上传成功（已打包 2 项）'
+    """
+    if not note:
+        return base
+    return f"{base}（{note}）"
+
+
+def _top_level_entries(paths: list[Path]) -> list[Path]:
+    """去掉重复路径，以及已经被选中文件夹包含的子路径。
+
+    Args:
+        paths: 已经确认存在的文件或文件夹，按用户选择顺序。
+
+    Returns:
+        list[Path]: 需要各自放进压缩包根上的项。
+
+    Examples:
+        >>> _top_level_entries([])
+        []
+    """
+    directories = [path.resolve() for path in paths if path.is_dir()]
+    kept: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen:
+            continue
+        nested = any(
+            resolved != directory and resolved.is_relative_to(directory)
+            for directory in directories
+        )
+        if nested:
+            continue
+        seen.add(resolved)
+        kept.append(path)
+    return kept
+
+
+def _skip_packed_file(root: Path, path: Path, *, explicit: bool) -> bool:
+    """判断打包时要不要跳过这个文件。
+
+    目录遍历沿用下载产物过滤，版本清单、登录态、``_versions`` 和历史 zip 都不进包。
+    用户直接选中的 zip 仍会写入。落在 ``_versions``、``_failures``、``_stable_delivery``
+    里的文件，无论是扫出来的还是点名选中的，都不进入压缩包。
+
+    Args:
+        root: 过滤时的根目录。文件必须位于其下，否则视为内部文件。
+        path: 候选文件。
+        explicit: 为 True 时表示用户直接选中了这个文件，而不是从文件夹扫出来的。
+
+    Returns:
+        bool: 应跳过时为 True。
+
+    Examples:
+        >>> root = Path("/downloads")
+        >>> _skip_packed_file(root, root / ".file_versions.json", explicit=False)
+        True
+        >>> _skip_packed_file(root, root / "_versions" / "old.pdf", explicit=False)
+        True
+        >>> _skip_packed_file(root / "_versions", root / "_versions" / "old.pdf", explicit=False)
+        True
+        >>> _skip_packed_file(root, root / "报表.pdf", explicit=False)
+        False
+        >>> _skip_packed_file(root, root / "报表.zip", explicit=True)
+        False
+        >>> _skip_packed_file(root, root / "报表.zip", explicit=False)
+        True
+        >>> _skip_packed_file(root, root / ".notes.pdf", explicit=False)
+        False
+    """
+    if _PACK_SKIP_DIRS.intersection(path.parts[:-1]):
+        return True
+    from spider_gd.app import _is_internal_download_artifact
+
+    if not _is_internal_download_artifact(root, path):
+        return False
+    if explicit and path.suffix.lower() == ".zip":
+        renamed = path.with_suffix(".bin")
+        if not _is_internal_download_artifact(root, renamed):
+            return False
+    return True
+
+
+def _relative_arc(path: Path, folder: Path, prefix: str) -> str:
+    """生成文件在 zip 里的相对路径。
+
+    Args:
+        path: 源文件。
+        folder: 该文件所属的选中文件夹。
+        prefix: 压缩包内的目录前缀。单个文件夹打包时为空。
+
+    Returns:
+        str: 使用 ``/`` 的 zip 条目名。
+
+    Examples:
+        >>> _relative_arc(Path("/data/报表/子目录/b.txt"), Path("/data/报表"), "")
+        '子目录/b.txt'
+        >>> _relative_arc(Path("/data/报表/a.txt"), Path("/data/报表"), "报表")
+        '报表/a.txt'
+    """
+    parts = [_safe_upload_label(part, limit=200) for part in path.relative_to(folder).parts]
+    relative = "/".join(parts)
+    if prefix:
+        return f"{prefix}/{relative}"
+    return relative
+
+
+def _write_tree(handle: zipfile.ZipFile, folder: Path, prefix: str, archive: Path) -> int:
+    """把文件夹里的可上传文件写进 zip。
+
+    Args:
+        handle: 已打开的 zip。
         folder: 源目录。
+        prefix: 压缩包内的目录前缀。单个文件夹打包时为空，多项时为文件夹名。
+        archive: 正在写入的 zip 路径，避免把包自己再扫进去。
+
+    Returns:
+        int: 写入的文件数。
+
+    Examples:
+        >>> import shutil, tempfile, zipfile as zf
+        >>> folder = Path(tempfile.mkdtemp())
+        >>> _ = (folder / "a.txt").write_text("甲", encoding="utf-8")
+        >>> archive = Path(tempfile.mkdtemp()) / "out.zip"
+        >>> with zf.ZipFile(archive, "w") as handle:
+        ...     count = _write_tree(handle, folder, "报表", archive)
+        >>> count
+        1
+        >>> with zf.ZipFile(archive) as handle:
+        ...     handle.namelist()
+        ['报表/a.txt']
+        >>> shutil.rmtree(folder)
+        >>> shutil.rmtree(archive.parent)
+    """
+    written = 0
+    try:
+        archive_resolved = archive.resolve()
+    except OSError:
+        archive_resolved = archive
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            if path.resolve() == archive_resolved:
+                continue
+        except OSError:
+            continue
+        if _skip_packed_file(folder, path, explicit=False):
+            continue
+        handle.write(path, _relative_arc(path, folder, prefix))
+        written += 1
+    return written
+
+
+def _zip_selection(items: list[Path], archive: Path) -> int:
+    """把多项打进一个 zip。
+
+    单个文件夹时，条目相对该文件夹。多项时，每一项用自己的名字放在 zip 根上。
+    内部下载产物不会写入。
+
+    Args:
+        items: 顶层文件或文件夹。
         archive: 目标 zip 路径。
 
     Returns:
-        None: 写完即返回。
+        int: 写入的文件条目数。没有任何可上传文件时删除空包并返回 0。
 
     Examples:
-        >>> callable(_zip_directory)
-        True
+        >>> _zip_selection([], Path("unused.zip"))
+        0
     """
+    if not items:
+        return 0
+    single_dir = len(items) == 1 and items[0].is_dir()
+    written = 0
+    used: set[str] = set()
+    archive.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as handle:
-        has_entry = False
-        for path in sorted(folder.rglob("*")):
-            if not path.is_file():
+        for item in items:
+            if item.is_dir():
+                prefix = "" if single_dir else _unique_name(_safe_upload_label(item.name), used)
+                written += _write_tree(handle, item, prefix, archive)
                 continue
-            handle.write(path, path.relative_to(folder).as_posix())
-            has_entry = True
-        if not has_entry:
-            # 空目录也给一个占位，避免发出 0 字节又没有条目的包被当成失败。
-            info = zipfile.ZipInfo(f"{folder.name}/")
-            handle.writestr(info, b"")
+            if not item.is_file() or _skip_packed_file(item.parent, item, explicit=True):
+                continue
+            arc = _unique_name(_safe_upload_label(item.name, limit=200), used)
+            handle.write(item, arc)
+            written += 1
+    if written == 0:
+        archive.unlink(missing_ok=True)
+    return written
 
 
 def _unique_name(name: str, used: set[str]) -> str:

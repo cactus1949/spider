@@ -150,6 +150,32 @@ async function readUploadStream(
   }
 }
 
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() || path
+}
+
+/** 进度列表在服务端事件到达前只显示即将上传的那一份，避免把多项来源画成多次上传。 */
+function placeholderFiles(paths: string[]): UploadFileState[] {
+  if (paths.length <= 1) {
+    const path = paths[0] || ''
+    return [{
+      name: basename(path) || '文件',
+      source: path,
+      status: 'pending',
+      message: '等待上传',
+      attempt: 0
+    }]
+  }
+  const first = basename(paths[0]) || '文件'
+  return [{
+    name: `${first}_等${paths.length}项.zip`,
+    source: paths.join('\n'),
+    status: 'zipping',
+    message: `正在打包 ${paths.length} 项`,
+    attempt: 0
+  }]
+}
+
 function snapshotFrom(event: Record<string, unknown>): UploadSnapshot {
   const files = Array.isArray(event.files) ? event.files as UploadFileState[] : []
   return {
@@ -179,19 +205,14 @@ export function UploadProgressHost(): JSX.Element {
     if (!job || runId === 0) return
     const controller = new AbortController()
     setRunning(true)
+    const files = placeholderFiles(job.paths)
     setSnapshot({
       phase: 'prepare',
-      files: job.paths.map((path) => ({
-        name: path.split(/[\\/]/).pop() || path,
-        source: path,
-        status: 'pending',
-        message: '等待上传',
-        attempt: 0
-      })),
+      files,
       done: 0,
-      total: job.paths.length,
+      total: files.length,
       percent: 0,
-      message: '正在准备上传',
+      message: job.paths.length > 1 ? `正在打包 ${job.paths.length} 项` : '正在准备上传',
       ok: null
     })
     void readUploadStream(job, (event) => {
@@ -206,13 +227,18 @@ export function UploadProgressHost(): JSX.Element {
       }
     }, controller.signal).catch((error: unknown) => {
       if (controller.signal.aborted) return
+      const detail = error instanceof Error ? error.message : String(error)
       setSnapshot((prev) => ({
         phase: 'done',
-        files: (prev?.files || []).map((file) => ({ ...file, status: 'failed', message: file.message || '上传失败' })),
+        files: (prev?.files || []).map((file) => ({
+          ...file,
+          status: 'failed',
+          message: detail || file.message || '上传失败'
+        })),
         done: prev?.done || 0,
-        total: prev?.total || job.paths.length,
+        total: prev?.total || 1,
         percent: 100,
-        message: error instanceof Error ? error.message : String(error),
+        message: detail,
         ok: false
       }))
     }).finally(() => {
