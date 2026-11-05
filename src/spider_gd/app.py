@@ -1696,54 +1696,301 @@ def _safe_artifact_name(value: str) -> str:
     return re.sub(r"[^\w\-.]+", "_", value).strip("._") or "task"
 
 
-def _snapshot_download_files(download_dir: str | Path) -> dict[str, tuple[int, int]]:
+_VERSION_MANIFEST_NAME = ".file_versions.json"
+_VERSION_DIR_NAME = "_versions"
+
+
+class DownloadFileSnapshot(dict[str, tuple[int, int]]):
+    """采集前的下载文件快照。
+
+    键是相对下载根目录的路径，值是 ``(文件大小字节, mtime_ns)``。
+    ``manifests`` 另记每个 ``.file_versions.json`` 里各产物的确认时间与内容哈希。
+    内容哈希未变时文件本身不会改 mtime，但清单的 ``updated_at`` 会刷新；
+    哈希变了而大小和 mtime 碰巧没变时，也能从清单看出来。
+
+    Examples:
+        >>> snap = DownloadFileSnapshot()
+        >>> snap.manifests
+        {}
+        >>> snap == {}
+        True
+    """
+
+    manifests: dict[str, dict[str, str]]
+
+    def __init__(
+        self,
+        files: dict[str, tuple[int, int]] | None = None,
+        manifests: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        """建立快照，并复制清单确认时间，避免调用方事后改到原字典。
+
+        Args:
+            files: 产物文件的大小和 mtime。空表示还没有产物。
+            manifests: 清单相对路径到 ``{文件名: 确认时间与哈希}`` 的映射。
+
+        Returns:
+            None: 初始化即完成。
+
+        Examples:
+            >>> DownloadFileSnapshot({"a.pdf": (1, 2)})["a.pdf"]
+            (1, 2)
+        """
+        super().__init__(files or {})
+        self.manifests = {key: dict(value) for key, value in (manifests or {}).items()}
+
+
+def _snapshot_download_files(download_dir: str | Path) -> DownloadFileSnapshot:
+    """记录采集前已有的产物，以及版本清单里各文件的确认时间。
+
+    内部文件（压缩包、登录态、版本清单、``_versions`` 归档）不进入大小/mtime 表，
+    清单内容单独放在返回值的 ``manifests`` 上。
+
+    Args:
+        download_dir: 本次下载根目录。目录不存在时返回空快照。
+
+    Returns:
+        DownloadFileSnapshot: 采集前快照。
+
+    Examples:
+        >>> snap = _snapshot_download_files("/no/such/spider-gd-downloads-snapshot")
+        >>> snap == {}
+        True
+        >>> snap.manifests
+        {}
+    """
     root = Path(download_dir)
     if not root.exists():
-        return {}
+        return DownloadFileSnapshot()
     snapshot: dict[str, tuple[int, int]] = {}
     for path in root.rglob("*"):
         if not path.is_file() or _is_internal_download_artifact(root, path):
             continue
         try:
             stat = path.stat()
-        except OSError:
+            rel = str(path.relative_to(root))
+        except (OSError, ValueError):
             continue
-        snapshot[str(path.relative_to(root))] = (stat.st_size, stat.st_mtime_ns)
-    return snapshot
+        snapshot[rel] = (stat.st_size, stat.st_mtime_ns)
+    return DownloadFileSnapshot(snapshot, _version_manifest_index(root))
 
 
 def _is_internal_download_artifact(root: Path, path: Path) -> bool:
+    """判断路径是不是下载目录里的内部文件，不应当作采集产物上传。
+
+    版本清单 ``.file_versions.json``（含原子写入的 ``.tmp``）和 ``_versions``
+    目录下的历史副本只留在本地。以点开头的真实文件（例如 ``.notes.pdf``）仍保留。
+
+    Args:
+        root: 本次下载根目录。
+        path: 待判断的文件。落在根目录外时视为内部文件。
+
+    Returns:
+        bool: 内部文件时为 True。
+
+    Examples:
+        >>> root = Path("/downloads")
+        >>> _is_internal_download_artifact(root, root / ".file_versions.json")
+        True
+        >>> _is_internal_download_artifact(root, root / "_versions" / "old.pdf")
+        True
+        >>> _is_internal_download_artifact(root, root / ".notes.pdf")
+        False
+    """
     try:
         rel = path.relative_to(root)
     except ValueError:
         return True
-    parts = set(rel.parts)
+    name = path.name.lower()
+    dir_parts = rel.parts[:-1]
     return (
         path.suffix.lower() == ".zip"
         or path.name == "storage_state.json"
-        or "_stable_delivery" in parts
-        or "_failures" in parts
+        or name == _VERSION_MANIFEST_NAME
+        or name == f"{_VERSION_MANIFEST_NAME}.tmp"
+        or "_stable_delivery" in rel.parts
+        or "_failures" in rel.parts
+        or _VERSION_DIR_NAME in dir_parts
     )
+
+
+def _manifest_product_name(name: object) -> str:
+    """取出清单里可以安全拼回同目录的产物文件名。
+
+    Args:
+        name: 清单 ``files`` 的键。
+
+    Returns:
+        str: 合法文件名。含路径分隔符或为空时返回空字符串。
+
+    Examples:
+        >>> _manifest_product_name("日报.pdf")
+        '日报.pdf'
+        >>> _manifest_product_name("../x.pdf")
+        ''
+    """
+    if not isinstance(name, str):
+        return ""
+    cleaned = name.strip()
+    if not cleaned or cleaned in {".", ".."}:
+        return ""
+    if "/" in cleaned or "\\" in cleaned or cleaned != Path(cleaned).name:
+        return ""
+    return cleaned
+
+
+def _manifest_file_stamps(path: Path) -> dict[str, str]:
+    """读取一份版本清单里各产物的确认时间与内容哈希。
+
+    两者拼成一个标记。重跑未改内容时只有时间变；同秒内换成同大小的新内容时
+    只有哈希变。任一变化都表示这个文件是本轮产物。
+
+    Args:
+        path: ``.file_versions.json`` 的路径。
+
+    Returns:
+        dict[str, str]: 文件名到标记的映射。读失败或结构不对时为空。
+
+    Examples:
+        >>> _manifest_file_stamps(Path("/no/such/spider-gd-manifest.json"))
+        {}
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    stamps: dict[str, str] = {}
+    for raw_name, item in files.items():
+        name = _manifest_product_name(raw_name)
+        if not name:
+            continue
+        updated = ""
+        digest = ""
+        if isinstance(item, dict):
+            updated = str(item.get("updated_at") or "")
+            digest = str(item.get("current_sha256") or "")
+        stamps[name] = f"{updated}\n{digest}"
+    return stamps
+
+
+def _version_manifest_index(root: Path) -> dict[str, dict[str, str]]:
+    """收集下载根目录下每一份版本清单的确认时间。
+
+    Args:
+        root: 下载根目录。
+
+    Returns:
+        dict[str, dict[str, str]]: 清单相对路径到 ``{文件名: 确认时间与哈希}``。
+
+    Examples:
+        >>> _version_manifest_index(Path("/no/such/spider-gd-manifests"))
+        {}
+    """
+    if not root.exists():
+        return {}
+    index: dict[str, dict[str, str]] = {}
+    for path in root.rglob(_VERSION_MANIFEST_NAME):
+        if not path.is_file() or path.name.lower() != _VERSION_MANIFEST_NAME:
+            continue
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            continue
+        index[rel] = _manifest_file_stamps(path)
+    return index
+
+
+def _reconfirmed_download_files(
+    root: Path,
+    before: dict[str, tuple[int, int]],
+) -> list[Path]:
+    """找出本轮重新写入版本清单、但文件字节可能没变的产物。
+
+    只认确认时间或内容哈希相对采集前快照有变化（或新出现）的文件名，
+    同目录里更早的其他产物不会被一起带上。快照不是
+    :class:`DownloadFileSnapshot` 时无法比较清单，返回空列表。
+
+    Args:
+        root: 下载根目录。
+        before: 采集前快照。带 ``manifests`` 时才比较清单。
+
+    Returns:
+        list[Path]: 本轮确认过、且仍然存在的产物路径。
+
+    Examples:
+        >>> _reconfirmed_download_files(Path("/no/such/spider-gd-reconfirmed"), {})
+        []
+    """
+    previous = getattr(before, "manifests", None)
+    if not isinstance(previous, dict):
+        return []
+    found: list[Path] = []
+    for rel_manifest, stamps in _version_manifest_index(root).items():
+        old = previous.get(rel_manifest)
+        if not isinstance(old, dict):
+            old = {}
+        parent = (root / rel_manifest).parent
+        for name, updated in stamps.items():
+            if old.get(name) == updated:
+                continue
+            candidate = parent / name
+            try:
+                if not candidate.is_file() or _is_internal_download_artifact(root, candidate):
+                    continue
+            except OSError:
+                continue
+            found.append(candidate)
+    return found
 
 
 def _changed_download_files(
     download_dir: str | Path,
     before: dict[str, tuple[int, int]],
 ) -> list[Path]:
+    """列出这次要打包或上传的产物。
+
+    包含相对快照有大小或 mtime 变化的文件，以及内容未变、但版本清单在本轮
+    被重新确认的文件。``.file_versions.json`` 和 ``_versions`` 归档一律排除。
+
+    Args:
+        download_dir: 下载根目录。
+        before: :func:`_snapshot_download_files` 的返回值。普通 dict 只做 mtime 对比。
+
+    Returns:
+        list[Path]: 按路径排序的产物。目录不存在时为空。
+
+    Examples:
+        >>> _changed_download_files("/no/such/spider-gd-downloads-changed", {})
+        []
+    """
     root = Path(download_dir)
     if not root.exists():
         return []
     files: list[Path] = []
+    seen: set[str] = set()
     for path in root.rglob("*"):
         if not path.is_file() or _is_internal_download_artifact(root, path):
             continue
         try:
             stat = path.stat()
             rel = str(path.relative_to(root))
-        except OSError:
+        except (OSError, ValueError):
             continue
         if before.get(rel) != (stat.st_size, stat.st_mtime_ns):
             files.append(path)
+            seen.add(rel)
+    for path in _reconfirmed_download_files(root, before):
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            continue
+        if rel in seen:
+            continue
+        files.append(path)
+        seen.add(rel)
     return sorted(files)
 
 
@@ -1754,17 +2001,42 @@ def _zip_download_files(
     task_name: str,
     exec_id: str,
 ) -> str | None:
+    """把本次产物打成稳定发送用的 zip。
+
+    版本清单、``_versions`` 归档和其他内部文件即使出现在候选列表里也不会写入。
+
+    Args:
+        download_dir: 下载根目录。zip 放在其中的 ``_stable_delivery``。
+        files: 候选文件。
+        task_name: 任务名，只用于 zip 文件名。
+        exec_id: 执行 id，只用于 zip 文件名。
+
+    Returns:
+        str | None: zip 绝对路径。没有可打包的产物时为 None。
+
+    Examples:
+        >>> _zip_download_files("/tmp", [], task_name="t", exec_id="e") is None
+        True
+    """
     if not files:
         return None
     root = Path(download_dir)
     export_dir = root / "_stable_delivery"
     export_dir.mkdir(parents=True, exist_ok=True)
     zip_path = export_dir / f"{_safe_artifact_name(task_name)}_{exec_id}.zip"
+    written = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in files:
-            if not path.exists() or not path.is_file():
+            try:
+                if not path.is_file() or _is_internal_download_artifact(root, path):
+                    continue
+                zf.write(path, path.relative_to(root))
+            except (OSError, ValueError):
                 continue
-            zf.write(path, path.relative_to(root))
+            written += 1
+    if written == 0:
+        zip_path.unlink(missing_ok=True)
+        return None
     return str(zip_path) if zip_path.exists() and zip_path.stat().st_size > 0 else None
 
 

@@ -92,10 +92,12 @@ async def maybe_upload_after_run(
     client: object | None = None,
     retry_delay_sec: float = 0.5,
 ) -> dict[str, Any] | None:
-    """采集跑完后，按任务上的上传配置处理本次新文件。
+    """采集跑完后，按任务上的上传配置处理本次产物。
 
     没选配置时什么都不做。选了但没开自动上传，只把文件路径交给界面上的「上传」按钮。
     开了自动上传就立刻传；失败自动重试，并把结果写进这条执行日志。上传失败不改采集状态。
+    产物含新增或改动的文件，以及内容未变、但本轮重新确认过的文件。
+    ``.file_versions.json`` 和 ``_versions`` 归档不会进入上传列表。
 
     Args:
         store: 状态库。
@@ -436,11 +438,14 @@ async def _upload_profile_paths(
 
 
 def _changed_files(download_dir: str, before: dict[str, tuple[int, int]]) -> list[Any]:
-    """找出这次采集新增或改动的文件。
+    """找出这次采集要上传的文件。
+
+    含新增或改动的文件，以及内容未变、但版本清单在本轮被重新确认的产物。
+    ``.file_versions.json`` 和 ``_versions`` 归档不在其中。
 
     Args:
         download_dir: 下载根目录。
-        before: 采集前快照。
+        before: 采集前快照，来自 ``_snapshot_download_files``。
 
     Returns:
         list[Any]: 文件路径。
