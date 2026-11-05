@@ -142,19 +142,49 @@ export default function AppLayout(): JSX.Element {
         }
         .app-header-left {
           gap: 12px;
+          flex: 0 0 auto;
         }
         .app-header-tools {
+          flex: 1 1 auto;
+          justify-content: flex-end;
           gap: 8px;
+          overflow: hidden;
         }
         .app-header-wifi {
           min-width: 0;
+          max-width: 220px;
           display: flex;
-          flex-shrink: 1;
+          flex: 0 1 auto;
+          overflow: hidden;
+        }
+        .app-header-wifi > * {
+          min-width: 0;
+          max-width: 100%;
+          overflow: hidden;
+        }
+        .app-header-wifi-tag {
+          display: inline-flex !important;
+          align-items: center;
+          max-width: 100%;
+          min-width: 0;
+          overflow: hidden;
+        }
+        .app-header-wifi-tag .anticon {
+          flex-shrink: 0;
         }
         .app-header-wifi-name {
+          min-width: 0;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+        .health-indicators {
+          flex: 0 0 auto;
+        }
+        /* Dropdown.Button 自带 width:100%，会把整行撑满并把前面的标签挤扁。 */
+        .app-header-tools > .app-header-diagnostics {
+          flex: 0 0 auto;
+          width: auto;
         }
         .app-content {
           padding: 24px;
@@ -250,6 +280,10 @@ export default function AppLayout(): JSX.Element {
             width: 28px;
             padding-inline: 0;
           }
+          .app-header-tools > .app-header-diagnostics {
+            width: auto;
+            padding-inline: 0;
+          }
           .app-content {
             padding: 14px 12px;
           }
@@ -293,6 +327,9 @@ export default function AppLayout(): JSX.Element {
           .app-header-left .ant-btn,
           .app-header-tools > .ant-btn {
             width: 24px;
+          }
+          .app-header-tools > .app-header-diagnostics {
+            width: auto;
           }
           .app-header-tools {
             gap: 3px;
@@ -401,7 +438,7 @@ export default function AppLayout(): JSX.Element {
               <Tooltip title={currentWifi ? `当前连接的 Wi-Fi：${currentWifi}` : (wifiError || (wifiChecked ? '当前没有连接 Wi-Fi' : '正在读取 Wi-Fi'))}>
                 <Tag
                   icon={<WifiOutlined />}
-                  className="health-tag"
+                  className="app-header-wifi-tag"
                   style={{
                     borderRadius: 6,
                     padding: '1px 10px',
@@ -409,9 +446,6 @@ export default function AppLayout(): JSX.Element {
                     fontSize: 12,
                     lineHeight: '22px',
                     fontWeight: 500,
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    maxWidth: 200,
                     color: currentWifi ? '#fff' : '#8b98a8',
                     background: currentWifi ? '#10b981' : '#2d333b',
                     borderColor: currentWifi ? '#10b981' : '#444c56'
@@ -425,6 +459,7 @@ export default function AppLayout(): JSX.Element {
             </div>
             <HealthIndicators />
             <Dropdown.Button
+              className="app-header-diagnostics"
               size="small"
               loading={diagnosticsLoading}
               menu={{
