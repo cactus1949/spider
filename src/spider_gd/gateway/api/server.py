@@ -3449,14 +3449,14 @@ def create_app(
 
     @app.get("/api/upload-profiles")
     async def list_upload_profiles() -> dict[str, Any]:
-        """返回上传配置。token 和 WiFi 密码不会出现在响应里。"""
+        """返回上传配置。敏感字段和 WiFi 密码不会出现在响应里。"""
         from spider_gd.gateway.data_upload_flow import list_public_profiles
 
         return {"profiles": list_public_profiles(service._ctx.state_store)}
 
     @app.put("/api/upload-profiles")
     async def put_upload_profiles(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        """整包保存上传配置。秘密留空时沿用已加密的旧值。"""
+        """整包保存上传配置。敏感字段留空时沿用已加密的旧值。"""
         from spider_gd.gateway.data_upload_flow import replace_profiles
 
         incoming = payload.get("profiles", [])

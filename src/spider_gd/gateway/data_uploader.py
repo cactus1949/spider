@@ -1,8 +1,9 @@
 """按上传配置把文件 POST 到客户接口。
 
-协议是 ``multipart/form-data``，每个文件的字段名都是 ``file``，一次请求可以带多个
-文件。文件夹会先打成 zip。失败后自动再试 3 次（连第一次一共 4 次）。配置了 WiFi
-时先切过去，已经连着目标网络就不切；上传完再切回原来的网络。
+协议是 ``multipart/form-data``。每个文件的字段名来自配置，默认 ``file``，一次请求
+可以带多个文件。自定义请求头、查询参数和表单字段按配置原样带上。文件夹会先打成
+zip。失败后自动再试 3 次（连第一次一共 4 次）。配置了 WiFi 时先切过去，已经连着
+目标网络就不切；上传完再切回原来的网络。
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from spider_gd.gateway.upload_profiles import UploadProfile, apply_token_prefix
+from spider_gd.gateway.upload_profiles import (
+    UploadHeader,  # noqa: F401  doctest 里要拼请求头
+    UploadProfile,
+    validate_profile,
+)
 from spider_gd.gateway.workshop_uploader import _failure_message, _upload_response_ok
 from spider_gd.infrastructure.network.wifi_connector import (
     WifiConnectOptions,
@@ -172,39 +177,42 @@ def prepare_upload_files(paths: list[str | Path], work_dir: Path) -> tuple[list[
 
 
 def build_request_parts(profile: UploadProfile) -> tuple[str, dict[str, str], dict[str, str], dict[str, str]]:
-    """按 token 传递方式拼出 URL、请求头、查询参数和表单字段。
+    """按配置拼出 URL、请求头、查询参数和表单字段。
 
-    头模式把 ``前缀 + token`` 放进可配置的头，默认 ``Authorization: Bearer <token>``，
-    和录制工坊现有上传一致。参数模式把 token 放进 query 或 form，不加前缀。
+    查询参数会合并进 URL 里已有的 query，同名时以配置为准。表单字段留在 data 里，
+    和 multipart 文件一起发出。值是静态字符串，不做占位符替换。
 
     Args:
         profile: 上传配置。
 
     Returns:
-        tuple[str, dict[str, str], dict[str, str], dict[str, str]]: URL、headers、params、data。
+        tuple[str, dict[str, str], dict[str, str], dict[str, str]]:
+        合并后的 URL、headers、params、data。
+
+    Raises:
+        ValueError: 请求头或参数重名，或和文件字段冲突。
 
     Examples:
-        >>> profile = UploadProfile("up_1", "甲", "https://a/up", token="s")
-        >>> _url, headers, params, data = build_request_parts(profile)
-        >>> headers["Authorization"] == "Bearer s" and params == {} and data == {}
+        >>> profile = UploadProfile(
+        ...     "up_1", "甲", "https://a/up",
+        ...     headers=[UploadHeader("Authorization", "Bearer s")],
+        ... )
+        >>> url, headers, params, data = build_request_parts(profile)
+        >>> url == "https://a/up" and headers["Authorization"] == "Bearer s"
+        True
+        >>> params == {} and data == {}
         True
     """
-    url = profile.url.strip()
-    headers: dict[str, str] = {}
+    validate_profile(profile)
+    headers = {item.name: item.value for item in profile.headers}
     params: dict[str, str] = {}
     data: dict[str, str] = {}
-    token = (profile.token or "").strip()
-    if not token:
-        return url, headers, params, data
-    if profile.token_mode == "param":
-        name = profile.token_param_name.strip()
-        if profile.token_param_in == "form":
-            data[name] = token
+    for item in profile.params:
+        if item.location == "form":
+            data[item.name] = item.value
         else:
-            params[name] = token
-        return url, headers, params, data
-    headers[profile.token_header_name.strip()] = apply_token_prefix(profile.token_value_prefix, token)
-    return url, headers, params, data
+            params[item.name] = item.value
+    return _with_params(profile.url.strip(), params), headers, params, data
 
 
 def switch_to_upload_wifi(profile: UploadProfile, port: WifiPort, interface_name: str = "") -> WifiHop:
@@ -434,7 +442,15 @@ async def upload_prepared_files(
                 item["message"] = note
             emit("upload", note, None, attempt)
             try:
-                response_ok, message, _payload = await _post_once(client, url, headers, params, data, files)
+                response_ok, message, _payload = await _post_once(
+                    client,
+                    url,
+                    headers,
+                    params,
+                    data,
+                    files,
+                    profile.file_field_name,
+                )
             except Exception as exc:
                 response_ok = False
                 message = str(exc)
@@ -494,8 +510,8 @@ async def run_upload(
 
     Examples:
         >>> profile = UploadProfile("up_1", "甲", "https://a")
-        >>> profile.token_mode
-        'header'
+        >>> profile.file_field_name
+        'file'
     """
     import tempfile
 
@@ -647,16 +663,18 @@ async def _post_once(
     params: dict[str, str],
     data: dict[str, str],
     files: list[PreparedFile],
+    file_field_name: str = "file",
 ) -> tuple[bool, str, dict[str, Any]]:
     """发一次 multipart 请求。
 
     Args:
         client: HTTP 客户端。
-        url: 上传地址。
-        headers: 含 token 的请求头。
-        params: 查询参数。
-        data: 额外表单字段，参数模式的 token 在这里。
+        url: 上传地址。查询参数应已经合并进去。
+        headers: 自定义请求头。
+        params: 查询参数，会再合并一次，同名时以这里为准。
+        data: 额外表单字段。
         files: 要上传的文件。
+        file_field_name: multipart 里每个文件使用的字段名。
 
     Returns:
         tuple[bool, str, dict[str, Any]]: 是否成功、说明、响应 JSON。
@@ -668,9 +686,13 @@ async def _post_once(
         >>> callable(_post_once)
         True
     """
+    field_name = (file_field_name or "").strip() or "file"
     handles = [item.path.open("rb") for item in files]
     try:
-        payload = [("file", (item.name, handle, "application/octet-stream")) for item, handle in zip(files, handles, strict=True)]
+        payload = [
+            (field_name, (item.name, handle, "application/octet-stream"))
+            for item, handle in zip(files, handles, strict=True)
+        ]
         response = await client.post(_with_params(url, params), headers=headers, data=data, files=payload)
     finally:
         for handle in handles:
@@ -685,11 +707,11 @@ async def _post_once(
 
 
 def _with_params(url: str, params: dict[str, str]) -> str:
-    """把查询参数合并进已有 URL。
+    """把查询参数合并进已有 URL。同名参数以 ``params`` 为准。
 
     Args:
         url: 原始地址。
-        params: 要追加的参数。
+        params: 要合并的参数。
 
     Returns:
         str: 合并后的地址。没有参数时原样返回。

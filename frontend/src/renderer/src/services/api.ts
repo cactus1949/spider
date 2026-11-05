@@ -99,17 +99,30 @@ export interface WorkflowGroup {
   parent_id: string | null
 }
 
+export interface UploadHeader {
+  id: string
+  name: string
+  value: string
+  secret: boolean
+  saved: boolean
+}
+
+export interface UploadParam {
+  id: string
+  name: string
+  value: string
+  in: 'query' | 'form'
+  secret: boolean
+  saved: boolean
+}
+
 export interface UploadProfile {
   id: string
   name: string
   url: string
-  token: string
-  tokenSaved: boolean
-  tokenMode: 'header' | 'param'
-  tokenHeaderName: string
-  tokenValuePrefix: string
-  tokenParamName: string
-  tokenParamIn: 'query' | 'form'
+  fileFieldName: string
+  headers: UploadHeader[]
+  params: UploadParam[]
   wifiSsid: string
   wifiPassword: string
   wifiPasswordSaved: boolean

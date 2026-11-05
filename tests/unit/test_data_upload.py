@@ -1,7 +1,8 @@
-"""数据上传：配置加密、token 传递、文件夹压缩、重试和 WiFi 跳过。"""
+"""数据上传：配置加密、旧 token 迁移、自定义请求头和参数、重试和 WiFi。"""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -20,6 +21,9 @@ from spider_gd.gateway.data_uploader import (
 from spider_gd.gateway.secret_box import SecretBox
 from spider_gd.gateway.upload_profiles import (
     SETTINGS_KEY,
+    UploadHeader,
+    UploadParam,
+    UploadProfile,
     load_profiles,
     public_profiles,
     save_profiles,
@@ -69,10 +73,16 @@ def _profile_payload(**overrides: object) -> dict[str, object]:
         "id": "up_test",
         "name": "生产",
         "url": "https://example.test/upload",
-        "token": "secret-token",
-        "tokenMode": "header",
-        "tokenHeaderName": "Authorization",
-        "tokenValuePrefix": "Bearer ",
+        "fileFieldName": "file",
+        "headers": [
+            {
+                "id": "uh_auth",
+                "name": "Authorization",
+                "value": "Bearer secret-token",
+                "secret": True,
+            }
+        ],
+        "params": [],
         "wifiSsid": "office",
         "wifiPassword": "wifi-secret",
     }
@@ -85,20 +95,27 @@ def test_profiles_roundtrip_encrypts_secrets(tmp_path: Path) -> None:
     save_profiles(store, [_profile_payload()])
     raw = store.get_setting(SETTINGS_KEY) or ""
     assert "secret-token" not in raw
+    assert "Bearer secret-token" not in raw
     assert "wifi-secret" not in raw
+    assert "tokenMode" not in raw
     loaded = load_profiles(store)
-    assert loaded[0].token == "secret-token"
+    assert loaded[0].headers[0].value == "Bearer secret-token"
+    assert loaded[0].headers[0].secret is True
     assert loaded[0].wifi_password == "wifi-secret"
     public = public_profiles(loaded)[0]
-    assert public["token"] == ""
-    assert public["tokenSaved"] is True
+    assert public["headers"][0]["value"] == ""
+    assert public["headers"][0]["saved"] is True
+    assert public["headers"][0]["secret"] is True
+    assert "valueEnc" not in public["headers"][0]
     assert public["wifiPassword"] == ""
     assert public["wifiPasswordSaved"] is True
+    assert "secret-token" not in json.dumps(public)
 
-    save_profiles(store, [_profile_payload(token="", wifiPassword="", name="生产二")])
+    public["name"] = "生产二"
+    save_profiles(store, [public])
     again = load_profiles(store)[0]
     assert again.name == "生产二"
-    assert again.token == "secret-token"
+    assert again.headers[0].value == "Bearer secret-token"
     assert again.wifi_password == "wifi-secret"
     assert "secret-token" not in (store.get_setting(SETTINGS_KEY) or "")
     store.close()
@@ -151,33 +168,143 @@ def test_prepare_upload_files_zips_directory(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_token_header_and_param_modes(tmp_path: Path) -> None:
+async def test_legacy_header_token_migrates_to_same_request(tmp_path: Path) -> None:
     sample = tmp_path / "a.txt"
     sample.write_text("data", encoding="utf-8")
     box = SecretBox(b"k" * 32)
-    header_profile = load_profiles_from(box, tokenMode="header", tokenHeaderName="X-Token", tokenValuePrefix="Bearer ")
-    route = respx.post("https://example.test/upload").mock(return_value=httpx.Response(200, json={"code": 200}))
-    result = await upload_prepared_files(header_profile, _only(sample), retry_delay_sec=0, max_attempts=1)
+    store = MemorySettings()
+    store.values[SETTINGS_KEY] = json.dumps(
+        [_legacy_row(box, tokenHeaderName="X-Token", tokenValuePrefix="Bearer ")]
+    )
+    loaded = load_profiles(store, box)[0]
+    assert loaded.headers[0].name == "X-Token"
+    assert loaded.headers[0].value == "Bearer secret-token"
+    assert loaded.headers[0].secret is True
+    assert loaded.params == []
+    assert loaded.file_field_name == "file"
+    assert loaded.wifi_password == "wifi-secret"
+
+    route = respx.post("https://example.test/upload").mock(
+        return_value=httpx.Response(200, json={"code": 200})
+    )
+    result = await upload_prepared_files(loaded, _only(sample), retry_delay_sec=0, max_attempts=1)
     assert result.ok is True
     assert route.calls.last.request.headers["X-Token"] == "Bearer secret-token"
 
-    query_profile = load_profiles_from(box, tokenMode="param", tokenParamName="access_token", tokenParamIn="query")
-    respx.post(url__startswith="https://example.test/upload").mock(return_value=httpx.Response(200, json={"ok": True}))
-    result = await upload_prepared_files(query_profile, _only(sample), retry_delay_sec=0, max_attempts=1)
-    assert result.ok is True
-    assert result.attempts == 1
-    sent = respx.calls.last.request
-    assert sent.url.params["access_token"] == "secret-token"
-    assert "X-Token" not in sent.headers
+    save_profiles(store, public_profiles([loaded]), box)
+    raw = store.values[SETTINGS_KEY]
+    assert "tokenMode" not in raw
+    assert "tokenEnc" not in raw
+    assert "tokenHeaderName" not in raw
+    assert "secret-token" not in raw
+    assert "Bearer secret-token" not in raw
+    assert "wifi-secret" not in raw
+    again = load_profiles(store, box)[0]
+    assert again.headers[0].value == "Bearer secret-token"
+    assert again.wifi_password == "wifi-secret"
+    public = public_profiles([again])[0]
+    assert public["headers"][0]["value"] == ""
+    assert public["headers"][0]["saved"] is True
+    assert "secret-token" not in json.dumps(public)
+    assert "valueEnc" not in json.dumps(public)
 
-    form_profile = load_profiles_from(box, tokenMode="param", tokenParamName="token", tokenParamIn="form")
-    respx.post("https://example.test/upload").mock(return_value=httpx.Response(200, json={"ok": True}))
-    result = await upload_prepared_files(form_profile, _only(sample), retry_delay_sec=0, max_attempts=1)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("param_in", ["query", "form"])
+@respx.mock
+async def test_legacy_param_token_migrates_to_same_request(tmp_path: Path, param_in: str) -> None:
+    sample = tmp_path / "a.txt"
+    sample.write_text("data", encoding="utf-8")
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    store.values[SETTINGS_KEY] = json.dumps(
+        [
+            _legacy_row(
+                box,
+                tokenMode="param",
+                tokenParamName="access_token",
+                tokenParamIn=param_in,
+                wifiPasswordEnc="",
+            )
+        ]
+    )
+    loaded = load_profiles(store, box)[0]
+    assert loaded.headers == []
+    assert loaded.params[0].name == "access_token"
+    assert loaded.params[0].value == "secret-token"
+    assert loaded.params[0].location == param_in
+    assert loaded.params[0].secret is True
+
+    respx.post(url__startswith="https://example.test/upload").mock(
+        return_value=httpx.Response(200, json={"ok": True})
+    )
+    result = await upload_prepared_files(loaded, _only(sample), retry_delay_sec=0, max_attempts=1)
     assert result.ok is True
-    body = sent_body(respx.calls.last.request)
-    assert b'name="token"' in body
-    assert b"secret-token" in body
-    assert b'name="file"' in body
+    sent = respx.calls.last.request
+    if param_in == "query":
+        assert sent.url.params["access_token"] == "secret-token"
+        assert b"secret-token" not in sent_body(sent)
+    else:
+        body = sent_body(sent)
+        assert b'name="access_token"' in body
+        assert b"secret-token" in body
+        assert "access_token" not in sent.url.params
+    assert b'name="file"' in sent_body(sent)
+
+    save_profiles(store, public_profiles([loaded]), box)
+    raw = store.values[SETTINGS_KEY]
+    assert "tokenMode" not in raw
+    assert "secret-token" not in raw
+    again = load_profiles(store, box)[0]
+    assert again.params[0].value == "secret-token"
+    assert again.params[0].location == param_in
+
+
+def test_legacy_bearer_prefix_is_not_doubled() -> None:
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    legacy = _legacy_row(box, tokenEnc=box.encrypt("Bearer secret-token"))
+    store.values[SETTINGS_KEY] = json.dumps([legacy])
+    loaded = load_profiles(store, box)[0]
+    assert loaded.headers[0].value == "Bearer secret-token"
+
+
+def test_legacy_empty_token_adds_no_row() -> None:
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    store.values[SETTINGS_KEY] = json.dumps([_legacy_row(box, tokenEnc="")])
+    loaded = load_profiles(store, box)[0]
+    assert loaded.headers == []
+    assert loaded.params == []
+    assert loaded.wifi_password == "wifi-secret"
+
+
+def test_save_legacy_payload_writes_new_schema() -> None:
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    save_profiles(
+        store,
+        [
+            {
+                "name": "旧",
+                "url": "https://example.test/upload",
+                "token": "secret-token",
+                "tokenMode": "header",
+                "tokenHeaderName": "Authorization",
+                "tokenValuePrefix": "Bearer ",
+            }
+        ],
+        box,
+    )
+    raw = store.values[SETTINGS_KEY]
+    assert "tokenMode" not in raw
+    assert "tokenEnc" not in raw
+    assert "secret-token" not in raw
+    loaded = load_profiles(store, box)[0]
+    assert loaded.headers[0].name == "Authorization"
+    assert loaded.headers[0].value == "Bearer secret-token"
+    assert loaded.headers[0].secret is True
+    assert loaded.file_field_name == "file"
 
 
 @pytest.mark.asyncio
@@ -228,8 +355,6 @@ async def test_retry_stops_after_three_extra_attempts(tmp_path: Path) -> None:
 
 
 def test_wifi_skips_when_already_connected() -> None:
-    from spider_gd.gateway.upload_profiles import UploadProfile
-
     port = FakeWifi("office")
     profile = UploadProfile("up_1", "甲", "https://example.test/upload", wifi_ssid="office", wifi_password="secret")
     hop = switch_to_upload_wifi(profile, port)
@@ -243,8 +368,6 @@ def test_wifi_skips_when_already_connected() -> None:
 
 
 def test_wifi_switches_and_restores() -> None:
-    from spider_gd.gateway.upload_profiles import UploadProfile
-
     port = FakeWifi("home")
     profile = UploadProfile("up_1", "甲", "https://example.test/upload", wifi_ssid="office", wifi_password="secret")
     report = probe_wifi_switch(profile, port)
@@ -263,13 +386,11 @@ async def test_run_upload_zips_folder_and_skips_connected_wifi(tmp_path: Path) -
     folder.mkdir()
     (folder / "inside.txt").write_text("内容", encoding="utf-8")
     respx.post("https://example.test/upload").mock(return_value=httpx.Response(200, json={"code": 0}))
-    from spider_gd.gateway.upload_profiles import UploadProfile
-
     profile = UploadProfile(
         "up_1",
         "甲",
         "https://example.test/upload",
-        token="secret-token",
+        headers=[UploadHeader("Authorization", "Bearer secret-token", True, "uh_1")],
         wifi_ssid="office",
         wifi_password="wifi-secret",
     )
@@ -357,6 +478,237 @@ async def test_maybe_upload_after_run_manual_offer_and_auto_retry(tmp_path: Path
     assert "准备重试 1/3" in detail.detail_log
     assert "上传成功" in detail.detail_log
     store.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mixed_headers_and_params_build_one_request(tmp_path: Path) -> None:
+    sample = tmp_path / "a.txt"
+    sample.write_text("data", encoding="utf-8")
+    profile = UploadProfile(
+        "up_1",
+        "甲",
+        "https://example.test/upload?keep=1&access_token=old",
+        headers=[
+            UploadHeader("X-Trace", "trace-1", False, "uh_trace"),
+            UploadHeader("X-Token", "secret-token", True, "uh_token"),
+        ],
+        params=[
+            UploadParam("access_token", "new-token", "query", True, "upm_q"),
+            UploadParam("kind", "daily", "form", False, "upm_f"),
+            UploadParam("access_token", "form-token", "form", False, "upm_same"),
+        ],
+    )
+    respx.post(url__startswith="https://example.test/upload").mock(
+        return_value=httpx.Response(200, json={"code": 200})
+    )
+    result = await upload_prepared_files(profile, _only(sample), retry_delay_sec=0, max_attempts=1)
+    assert result.ok is True
+    sent = respx.calls.last.request
+    assert sent.headers["X-Trace"] == "trace-1"
+    assert sent.headers["X-Token"] == "secret-token"
+    assert sent.url.params["keep"] == "1"
+    assert sent.url.params["access_token"] == "new-token"
+    body = sent_body(sent)
+    assert b'name="kind"' in body
+    assert b"daily" in body
+    assert b'name="access_token"' in body
+    assert b"form-token" in body
+    assert b'name="file"' in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_file_field_name_follows_profile(tmp_path: Path) -> None:
+    first = tmp_path / "one.txt"
+    second = tmp_path / "two.txt"
+    first.write_text("1", encoding="utf-8")
+    second.write_text("2", encoding="utf-8")
+    profile = UploadProfile(
+        "up_1",
+        "甲",
+        "https://example.test/upload",
+        file_field_name="attachment",
+    )
+    respx.post("https://example.test/upload").mock(
+        return_value=httpx.Response(200, json={"code": 200})
+    )
+    result = await upload_prepared_files(
+        profile,
+        [*_only(first), *_only(second)],
+        retry_delay_sec=0,
+        max_attempts=1,
+    )
+    assert result.ok is True
+    body = sent_body(respx.calls.last.request)
+    assert body.count(b'name="attachment"') == 2
+    assert b'name="file"' not in body
+
+
+def test_duplicate_names_and_file_field_conflict_are_rejected() -> None:
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    with pytest.raises(ValueError, match="请求头名称重复"):
+        save_profiles(
+            store,
+            [
+                _profile_payload(
+                    headers=[
+                        {"name": "X-Token", "value": "a", "secret": False},
+                        {"name": "x-token", "value": "b", "secret": False},
+                    ]
+                )
+            ],
+            box,
+        )
+    with pytest.raises(ValueError, match="表单参数名称重复"):
+        save_profiles(
+            store,
+            [
+                _profile_payload(
+                    headers=[],
+                    params=[
+                        {"name": "kind", "value": "a", "in": "form", "secret": False},
+                        {"name": "kind", "value": "b", "in": "form", "secret": False},
+                    ],
+                )
+            ],
+            box,
+        )
+    with pytest.raises(ValueError, match="文件字段名冲突"):
+        save_profiles(
+            store,
+            [
+                _profile_payload(
+                    headers=[],
+                    fileFieldName="file",
+                    params=[{"name": "file", "value": "x", "in": "form", "secret": False}],
+                )
+            ],
+            box,
+        )
+    with pytest.raises(ValueError, match="由上传请求自动生成"):
+        save_profiles(
+            store,
+            [
+                _profile_payload(
+                    headers=[{"name": "Content-Type", "value": "text/plain", "secret": False}]
+                )
+            ],
+            box,
+        )
+
+
+def test_public_api_hides_secrets_and_keeps_plaintext(tmp_path: Path) -> None:
+    store = TaskStateStore(tmp_path / "spider.db")
+    save_profiles(
+        store,
+        [
+            _profile_payload(
+                wifiSsid="",
+                wifiPassword="",
+                headers=[
+                    {
+                        "id": "uh_auth",
+                        "name": "Authorization",
+                        "value": "Bearer secret-token",
+                        "secret": True,
+                    },
+                    {
+                        "id": "uh_trace",
+                        "name": "X-Trace",
+                        "value": "visible-trace",
+                        "secret": False,
+                    },
+                ],
+                params=[
+                    {
+                        "id": "upm_q",
+                        "name": "access_token",
+                        "value": "query-secret",
+                        "in": "query",
+                        "secret": True,
+                    },
+                    {
+                        "id": "upm_f",
+                        "name": "kind",
+                        "value": "daily",
+                        "in": "form",
+                        "secret": False,
+                    },
+                ],
+            )
+        ],
+    )
+    raw = store.get_setting(SETTINGS_KEY) or ""
+    assert "secret-token" not in raw
+    assert "query-secret" not in raw
+    assert "visible-trace" in raw
+    assert "daily" in raw
+    loaded = load_profiles(store)[0]
+    public = public_profiles([loaded])[0]
+    by_name = {item["name"]: item for item in public["headers"]}
+    assert by_name["Authorization"]["value"] == ""
+    assert by_name["Authorization"]["saved"] is True
+    assert by_name["X-Trace"]["value"] == "visible-trace"
+    assert by_name["X-Trace"]["secret"] is False
+    params = {item["name"]: item for item in public["params"]}
+    assert params["access_token"]["value"] == ""
+    assert params["access_token"]["saved"] is True
+    assert params["kind"]["value"] == "daily"
+    dumped = json.dumps(public)
+    assert "query-secret" not in dumped
+    assert "secret-token" not in dumped
+    assert "valueEnc" not in dumped
+
+    save_profiles(store, [public])
+    again = load_profiles(store)[0]
+    assert again.headers[0].value == "Bearer secret-token"
+    assert again.params[0].value == "query-secret"
+    assert "query-secret" not in (store.get_setting(SETTINGS_KEY) or "")
+    store.close()
+
+
+def test_blank_secret_survives_rename_and_clearing_secret_drops_it() -> None:
+    box = SecretBox(b"k" * 32)
+    store = MemorySettings()
+    save_profiles(store, [_profile_payload(wifiSsid="", wifiPassword="")], box)
+    public = public_profiles(load_profiles(store, box))[0]
+    public["headers"][0]["name"] = "X-Token"
+    save_profiles(store, [public], box)
+    renamed = load_profiles(store, box)[0]
+    assert renamed.headers[0].name == "X-Token"
+    assert renamed.headers[0].value == "Bearer secret-token"
+
+    public = public_profiles([renamed])[0]
+    public["headers"][0]["secret"] = False
+    public["headers"][0]["value"] = ""
+    save_profiles(store, [public], box)
+    cleared = load_profiles(store, box)[0]
+    assert cleared.headers[0].secret is False
+    assert cleared.headers[0].value == ""
+    raw = store.values[SETTINGS_KEY]
+    assert "secret-token" not in raw
+    assert "valueEnc" not in raw
+
+
+def _legacy_row(box: SecretBox, **overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "up_legacy",
+        "name": "旧配置",
+        "url": "https://example.test/upload",
+        "tokenEnc": box.encrypt("secret-token"),
+        "tokenMode": "header",
+        "tokenHeaderName": "Authorization",
+        "tokenValuePrefix": "Bearer ",
+        "tokenParamName": "token",
+        "tokenParamIn": "query",
+        "wifiSsid": "office",
+        "wifiPasswordEnc": box.encrypt("wifi-secret"),
+        "wifiInterface": "",
+    }
+    row.update(overrides)
+    return row
 
 
 def load_profiles_from(box: SecretBox, **overrides: object):
