@@ -1,7 +1,7 @@
 import BrowserSessionPanel from '../components/BrowserSessionPanel'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
-import { Layout, Menu, Button, Tooltip, Tag, Modal, Input, Dropdown } from 'antd'
+import { Layout, Menu, Button, Tooltip, Tag, Dropdown } from 'antd'
 import {
   FolderOutlined,
   ScheduleOutlined,
@@ -25,33 +25,15 @@ interface NavItem {
   key: string
   icon: JSX.Element
   label: string
-  /** 为 true 时默认不出现在侧边栏，解锁后才显示。 */
-  hidden?: boolean
 }
 
 const NAV_ITEMS: NavItem[] = [
   { key: '/', icon: <ScheduleOutlined />, label: '任务配置' },
   { key: '/files', icon: <FolderOutlined />, label: '文件中心' },
   { key: '/execution-logs', icon: <FileTextOutlined />, label: '执行日志' },
-  { key: '/indicators', icon: <CodeOutlined />, label: '指标配置', hidden: true },
+  { key: '/indicators', icon: <CodeOutlined />, label: '指标配置' },
   { key: '/record-workshop', icon: <VideoCameraOutlined />, label: '录制工坊' },
 ]
-
-/** 连续点击版本号达到该次数后才弹出口令框。 */
-const INDICATORS_UNLOCK_CLICKS = 5
-/** 两次点击间隔超过该毫秒数则重新计数。 */
-const INDICATORS_UNLOCK_GAP_MS = 3000
-/** 维护口令。通过后仅本次窗口显示「指标配置」，退出程序后恢复隐藏。 */
-const INDICATORS_UNLOCK_CODE = 'Welcome@2025!'
-const INDICATORS_UNLOCK_STORAGE_KEY = 'spider-gd.indicators-unlocked'
-
-function readIndicatorsUnlocked(): boolean {
-  try {
-    return sessionStorage.getItem(INDICATORS_UNLOCK_STORAGE_KEY) === '1'
-  } catch {
-    return false
-  }
-}
 
 export default function AppLayout(): JSX.Element {
   const navigate = useNavigate()
@@ -62,37 +44,8 @@ export default function AppLayout(): JSX.Element {
   const [currentWifi, setCurrentWifi] = useState('')
   const [wifiError, setWifiError] = useState('')
   const [wifiChecked, setWifiChecked] = useState(false)
-  const [indicatorsUnlocked, setIndicatorsUnlocked] = useState(readIndicatorsUnlocked)
-  const [gateOpen, setGateOpen] = useState(false)
-  const [gateCode, setGateCode] = useState('')
-  const [gateError, setGateError] = useState('')
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false)
-  const versionClicks = useRef({ count: 0, at: 0 })
   const { message } = App.useApp()
-  const indicatorsLocked = location.pathname === '/indicators' && !indicatorsUnlocked
-
-  useEffect(() => {
-    if (indicatorsLocked) navigate('/', { replace: true })
-  }, [indicatorsLocked, navigate])
-
-  const closeGate = (): void => {
-    setGateOpen(false)
-    setGateCode('')
-    setGateError('')
-  }
-
-  const submitGate = (): void => {
-    if (gateCode !== INDICATORS_UNLOCK_CODE) {
-      setGateError(gateCode ? '口令不正确' : '请输入口令')
-      return
-    }
-    try {
-      sessionStorage.setItem(INDICATORS_UNLOCK_STORAGE_KEY, '1')
-    } catch { /* 隐私模式写不进时，本次内存状态仍然有效 */ }
-    setIndicatorsUnlocked(true)
-    closeGate()
-    message.success('指标配置已显示')
-  }
 
   useEffect(() => {
     window.api.getVersion().then(setVersion)
@@ -396,9 +349,7 @@ export default function AppLayout(): JSX.Element {
             mode="inline"
             selectedKeys={[location.pathname]}
             onClick={({ key }) => navigate(String(key))}
-            items={NAV_ITEMS
-              .filter((item) => !item.hidden || indicatorsUnlocked)
-              .map(({ key, icon, label }) => ({ key, icon, label }))}
+            items={NAV_ITEMS.map(({ key, icon, label }) => ({ key, icon, label }))}
             style={{ flex: 1, minHeight: 0, borderInlineEnd: 'none' }}
           />
 
@@ -493,53 +444,13 @@ export default function AppLayout(): JSX.Element {
         </Header>
         <BrowserSessionPanel />
         <Content className={`app-content${location.pathname === '/execution-logs' ? ' execution-logs-content' : ''}`}>
-          {indicatorsLocked ? null : <Outlet />}
+          <Outlet />
         </Content>
       </Layout>
 
-      {/* 版本号：右下角固定。连点后输入维护口令，才显示指标配置。 */}
-      <div
-        className="app-version"
-        onClick={() => {
-          if (indicatorsUnlocked) return
-          const now = Date.now()
-          const prev = versionClicks.current
-          const count = now - prev.at > INDICATORS_UNLOCK_GAP_MS ? 1 : prev.count + 1
-          versionClicks.current = { count, at: now }
-          if (count >= INDICATORS_UNLOCK_CLICKS) {
-            versionClicks.current = { count: 0, at: 0 }
-            setGateCode('')
-            setGateError('')
-            setGateOpen(true)
-          }
-        }}
-      >
+      <div className="app-version">
         v{version || '...'}
       </div>
-      <Modal
-        title="请输入口令"
-        open={gateOpen}
-        okText="确定"
-        cancelText="取消"
-        destroyOnClose
-        onCancel={closeGate}
-        onOk={submitGate}
-      >
-        <Input.Password
-          autoFocus
-          value={gateCode}
-          placeholder="口令"
-          status={gateError ? 'error' : undefined}
-          onChange={(event) => {
-            setGateCode(event.target.value)
-            if (gateError) setGateError('')
-          }}
-          onPressEnter={submitGate}
-        />
-        {gateError && (
-          <div style={{ color: '#EF4444', fontSize: 12, marginTop: 8 }}>{gateError}</div>
-        )}
-      </Modal>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </Layout>
