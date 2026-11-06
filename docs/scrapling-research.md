@@ -1,6 +1,6 @@
-# Scrapling 调研：和 spider 的关系
+# Scrapling 调研：可借鉴的手法
 
-**不能用 Scrapling 单独替换本项目。** 它覆盖请求与浏览器抓取，也覆盖解析、并发爬取与导出。spider 的主体是专网登录与 U-Key，加上双网卡与录制式工作流，以及本机落盘与客户上传。两边重叠的是 HTTP 客户端、Playwright/CDP 和「会话」这个词，重叠的实现假设并不相同。
+这篇只记值得看的做法。它覆盖请求与浏览器抓取，也覆盖解析、并发爬取与导出。spider 的主体是专网登录与 U-Key，加上双网卡与录制式工作流，以及本机落盘与客户上传。两边重叠的是 HTTP 客户端、Playwright/CDP 和「会话」这个词，重叠的实现假设并不相同。
 
 材料来自官方 README 与文档站，不是二手评测。性能和覆盖率数字是项目自述，这里没有复跑。
 
@@ -45,34 +45,30 @@
 
 README 自述解析器在其基准里快于常见 Python 解析库，并写有约 92% 测试覆盖和完整类型标注。这些数字未在本仓库验证。
 
-## 对照 spider 现在要做什么
+## 和现场路径并排放
 
-spider 的验收标准是下面这些已经在代码里的行为。「把公开页面抓成 JSON」不在这份标准里。
+下面是 spider 已经在做的事。第三列只摘文档里对不上的事实，方便对着学。
 
-| spider 的要求 | 代码落点 | Scrapling 单独能否满足 |
+| spider 已经在做的事 | 代码落点 | 文档里对不上的事实 |
 |---------------|----------|------------------------|
-| U-Key 随身 WiFi 进专网，证书控件连 `127.0.0.1:10443` | `shared_browser._build_launch_args` 关闭 `LocalNetworkAccessChecks`；`ukey_manager.py` | **否。** 没有 USB、证书控件、本机网络访问检查这层 |
-| 中文 Windows 上 netsh 的 SSID 十六进制、cp936 控制台 | `wifi_connector.decode_ssid_name`、`infrastructure/proc.py` | **否。** 框架不管理主机网络 |
-| 双网卡路由，公网失败仍继续本地采集 | `app.ensure_dual_nic_ready`、`infrastructure/network/supervisor.py`、`deploy/setup_routes.ps1` | **否** |
-| 复用真实 Chrome Profile 的登录态（Cookie + 页面内存），而不是隐蔽 headless | `BROWSER_SESSION.md`、`shared_browser.py`；控制接口禁止把客户运行收成真 headless | **部分。** 它有 `cdp_url`，但默认价值在 StealthyFetcher 自己拉浏览器。换掉现有 CDP 会丢掉 UKey 与瑞数定时器的启动参数（非零调试端口、禁止后台节流） |
-| 录制的多步 RPA：日期控件、交易日历周、导出、弹窗暂停、验证码刷新 | `workflow_runner.py` 的 `action` 列表；`captcha_solver.py` | **否。** Spider 的 `parse` 是「响应进、item 出」，没有这些步骤，也没有 ddddocr 与「弹窗即暂停整单」 |
-| 指标 YAML、任务窗口、路径模板、SQLite 配置 | `task_runner.py`、`core/dates.py`、`workflow_configs` | **否** |
-| 桌面壳、本机 8800 控制面、托盘、安装包用户目录 | `frontend/`、`gateway/api/server.py`、`user_home.py` | **否。** 它的 CLI/MCP 是抓取工具，不是现场操作台 |
-| 文件版本、台账、多文件打成一个 zip、自定义头上传、切 WiFi 再传 | `file_versions.py`、`data_uploader.py` | **否。** 导出是 JSON/CSV/XML，不是客户 multipart 协议 |
-| 企微 / Server酱 / PushPlus / outbox | `app.py` delivery、`gateway/alert/` | **否** |
-| 已知 API 的 412 重登与 item 续跑 | `session_keeper.py`、`crawl_orchestrator.py` | **部分。** 有会话和 `crawldir` 续爬，没有电力平台 Token / `HdKGccbL`，也没有 `task_items` 这套状态 |
-| 只读查询给外部 Agent | `gateway/mcp/server.py` 的三个 tool | **不相关。** Scrapling MCP 是去浏览别人的网站；spider MCP 是查询自己的任务，且明确不触发采集 |
-| TLS 指纹 | `api_fetcher.py` 可选 `curl_cffi` impersonate | **部分，且已有。** 再套一层 Fetcher 不会解决登录和落盘 |
+| U-Key 随身 WiFi 进专网，证书控件连 `127.0.0.1:10443` | `shared_browser._build_launch_args` 关闭 `LocalNetworkAccessChecks`；`ukey_manager.py` | 没有 USB、证书控件、本机网络访问检查这层 |
+| 中文 Windows 上 netsh 的 SSID 十六进制、cp936 控制台 | `wifi_connector.decode_ssid_name`、`infrastructure/proc.py` | 框架不管理主机网络 |
+| 双网卡路由，公网失败仍继续本地采集 | `app.ensure_dual_nic_ready`、`infrastructure/network/supervisor.py`、`deploy/setup_routes.ps1` | 文档不涉及路由和降级 |
+| 复用真实 Chrome Profile 的登录态（Cookie + 页面内存） | `BROWSER_SESSION.md`、`shared_browser.py`；控制接口不把客户运行收成真 headless | 它有 `cdp_url`。StealthyFetcher 默认自己拉浏览器。现有启动参数用非零调试端口，并禁止后台节流，保住 UKey 与瑞数定时器 |
+| 录制的多步 RPA：日期控件、交易日历周、导出、弹窗暂停、验证码刷新 | `workflow_runner.py` 的 `action` 列表；`captcha_solver.py` | Spider 的 `parse` 是「响应进、item 出」，没有这些步骤，也没有 ddddocr 与「弹窗即暂停整单」 |
+| 指标 YAML、任务窗口、路径模板、SQLite 配置 | `task_runner.py`、`core/dates.py`、`workflow_configs` | 文档没有这套任务配置 |
+| 桌面壳、本机 8800 控制面、托盘、安装包用户目录 | `frontend/`、`gateway/api/server.py`、`user_home.py` | 它的 CLI/MCP 是抓取工具。spider 这边是现场操作台 |
+| 文件版本、台账、多文件打成一个 zip、自定义头上传、切 WiFi 再传 | `file_versions.py`、`data_uploader.py` | 导出是 JSON/CSV/XML。客户上传是 multipart |
+| 企微 / Server酱 / PushPlus / outbox | `app.py` delivery、`gateway/alert/` | 文档没有这些发送通道 |
+| 已知 API 的 412 重登与 item 续跑 | `session_keeper.py`、`crawl_orchestrator.py` | 有会话和 `crawldir` 续爬。没有电力平台 Token / `HdKGccbL`，也没有 `task_items` |
+| 只读查询给外部 Agent | `gateway/mcp/server.py` 的三个 tool | Scrapling MCP 用来浏览外部网站。spider MCP 只查询自己的任务，且不触发采集 |
+| TLS 指纹 | `api_fetcher.py` 可选 `curl_cffi` impersonate | `ApiFetcher` 已经能 impersonate。Fetcher 再套一层，仍不处理登录和落盘 |
 
-所以如下。
+公开站点上的链接跟随和反 Cloudflare，不在本仓库当前范围里。`BROWSER_SESSION.md` 写明当前实现没有关沙箱，也没有做指纹伪装。可借鉴的手法在下一节。
 
-- **公开站点、链接跟随、反 Cloudflare、把 HTML 收成表** → Scrapling 可以单独做。这不是本仓库的当前范围。
-- **本仓库的桌面采集闭环** → **否。**
-- **只把「发 HTTP / 开浏览器」那一层换成 Scrapling** → **部分，而且不划算。** `ApiFetcher` 已经能 impersonate；工作流必须附着在带证书的 Chrome 上。Stealth 补丁针对的是「被当成自动化的无头浏览器」，和「故意连接用户真实 Profile」是相反的策略。`BROWSER_SESSION.md` 写明当前实现没有关沙箱、没有做指纹伪装。
+## 值得学的手法
 
-## 值得学、不值得换
-
-可以借鉴的是局部手法。接入时保持 `WorkflowRunner` 和 `shared_browser` 为执行内核。
+可以借鉴的是局部手法。现场执行仍是 `WorkflowRunner` 和 `shared_browser`。
 
 1. **选择器失效后的相似度回退。** 录出来的 CSS 在门户改 class 后整步失败。Adaptive 的做法（域名 + 标识存元素特征，失败时按结构/文本相似度找）适合放进点击和导出前的一次查找，作为显式降级，并在 `error_pause` 之前把「匹配到的新选择器」写进日志。不要默认自动改 YAML。存储用现有 SQLite 即可，不必引入整库 Scrapling。文档：[Adaptive scraping](https://scrapling.readthedocs.io/en/latest/parsing/adaptive.html)。
 2. **录制时生成更稳的选择器。** README 写了从元素反推 CSS/XPath。工坊（`tools/build_workflow.py`）若只记绝对路径，门户一改就断。反推时优先角色、文本和稳定属性，和上一条的特征一起存。
@@ -80,23 +76,21 @@ spider 的验收标准是下面这些已经在代码里的行为。「把公开�
 4. **开发时回放 HTTP 响应。** Spider 的开发模式把第一次响应落盘再回放。spider 已有 `mock_site/` 和 HAR 侦察（`tools/recon_tool`），对整页 RPA 更合适。对纯 `api_call` 步骤，磁盘回放能减少打到专网的次数，和 mock 站点互补，不替代它。
 5. **流式统计的形状。** `spider.stream()` 在爬取中途给出计数。本项目 SSE 已按步骤推事件。缺的是操作员一眼能看的「第几个指标、已落几个文件」，不是再引入一个爬虫循环。
 
-明确不要搬的：
+下面这些和现场步骤对不上，笔记里只作边界：
 
-- **用 StealthyFetcher 换专用 Chrome。** 会丢掉非零 CDP 端口、UKey 的本地网络例外、后台节流开关和用户 Profile。Cloudflare 求解对本专网不是当前矛盾。
-- **用 Spider/`crawldir` 换 `TaskRunner`。** 续的是 URL 队列，续不了「日历周已经点过、导出尚未确认」。跨重启续跑的风险见产品文档。
-- **用它的 MCP 换 `gateway/mcp/server.py`。** 权限模型相反：spider 的 tool 只读且不点击；Scrapling 的 MCP 就是为了点击。
-- **代理池、robots.txt、Sitemap/Shopify 模板、Markdown RAG。** 目标是一个需证书的业务系统，不是公开整站。
-- **为了 README 里的解析速度换成它的 Selector。** 瓶颈在登录、专网和导出文件，不在从 5000 个节点里取文本。
+- StealthyFetcher 默认自己拉浏览器。非零 CDP 端口、UKey 本地网络例外，以及后台节流和用户 Profile，都在现有专用 Chrome 的启动参数里。Cloudflare 求解对本专网不是当前矛盾。
+- `crawldir` 续的是 URL 队列。它续不了「日历周已经点过、导出尚未确认」。跨重启续跑的风险见产品文档。
+- 两个 MCP 的权限相反。spider 的 tool 只读且不点击。Scrapling 的 MCP 用来点击。
+- 代理池和 robots.txt，以及 Sitemap/Shopify 模板和 Markdown RAG，面向公开整站。本仓库的目标是要证书的业务系统。
+- README 里的解析速度解决不了登录、专网和导出文件。
 
-## 若以后做小范围试验
-
-只在离线单测里试，不进客户包：
+## 样本上核对 Adaptive
 
 - 拿一份已保存的门户 HTML（失败诊断里 `WorkflowRunner` 会落页面），用 Adaptive 看旧选择器能否指到同一按钮。
 - 对比结果用人工看截图，不自动写回 `workflow_configs`。
-- 依赖加在开发 extra，不放进 `mode_d_offline` 的运行时。
+- 这类核对留在开发样本上，不放进 `mode_d_offline` 的运行配置。
 
-试验失败或选择器飘到相邻按钮，就停。现场路径继续用现有暂停和人工继续。
+选择器飘到相邻按钮时就停。现场仍用现有暂停和人工继续。
 
 ## 来源
 

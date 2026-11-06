@@ -9,6 +9,7 @@
 |------|------|
 | [architecture.md](architecture.md) | 当前系统架构：模块、两条采集链路、运行形态、不变量 |
 | [product-and-ux-optimization.md](product-and-ux-optimization.md) | 从现有界面和代码看出的产品 / 体验 / 工程优化，按影响和改动面排序 |
-| [scrapling-research.md](scrapling-research.md) | [Scrapling](https://github.com/D4Vinci/Scrapling) 能做什么，以及能不能单独扛起本项目 |
+| [scrapling-research.md](scrapling-research.md) | Scrapling 的能力，以及值得借鉴的手法 |
+| [prototype/README.md](prototype/README.md) | 优化方向的可点击界面草案 |
 
 仓库根目录还有 [`README.md`](../README.md) 和 [`AGENTS.md`](../AGENTS.md)，以及 [`BROWSER_SESSION.md`](../BROWSER_SESSION.md)。

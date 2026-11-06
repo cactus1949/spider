@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280" />
+<title>电力采集 · 界面草案</title>
+<style>
+  :root {
+    --primary: #1F5FFF;
+    --ok: #10B981;
+    --warn: #F59E0B;
+    --err: #EF4444;
+    --bg: #F5F6F4;
+    --line: #E7E8E3;
+    --ink: #1C2128;
+    --muted: #667085;
+    --sider: #0E1116;
+    --card: #fff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: "WenQuanYi Micro Hei", "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    overflow: hidden;
+  }
+  button, input, select { font-family: inherit; }
+  button { cursor: pointer; }
+  .app { display: flex; height: 100vh; min-height: 800px; }
+  .sider {
+    width: 200px; flex: 0 0 200px; background: var(--sider); color: #fff;
+    display: flex; flex-direction: column;
+  }
+  .brand {
+    height: 56px; display: flex; align-items: center; gap: 10px; padding: 0 18px; font-weight: 700;
+  }
+  .brand i {
+    width: 22px; height: 22px; border-radius: 6px; background: var(--primary);
+    display: inline-block; position: relative;
+  }
+  .brand i::after {
+    content: ""; position: absolute; left: 8px; top: 4px; border-left: 6px solid transparent;
+    border-right: 0 solid transparent; border-bottom: 14px solid #fff; transform: rotate(20deg);
+  }
+  nav { flex: 1; padding: 8px; }
+  nav button {
+    width: 100%; text-align: left; border: 0; background: transparent; color: rgba(255,255,255,.78);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 4px; font-size: 14px;
+  }
+  nav button.active { background: var(--primary); color: #fff; }
+  .sider-foot { padding: 10px; border-top: 1px solid rgba(255,255,255,.08); }
+  .sider-foot button {
+    width: 100%; border: 0; background: transparent; color: rgba(255,255,255,.7); padding: 8px; border-radius: 8px;
+  }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  header.top {
+    height: 48px; background: #fff; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 16px;
+  }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px;
+    border-radius: 6px; color: #fff; font-size: 12px; font-weight: 600; border: 0;
+  }
+    .tag.wifi { height: auto; align-items: flex-start; padding-top: 2px; padding-bottom: 2px; }
+    .tag.ok { background: var(--ok); }
+  .tag.err { background: var(--err); }
+  .tag.warn { background: var(--warn); color: #1C2128; }
+  .tag.ghost { background: #2d333b; color: #c9d1d9; }
+  .wifi { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.15; padding: 2px 8px; }
+  .wifi small { font-weight: 500; opacity: .9; letter-spacing: 0; }
+  .icon-btn, .text-btn {
+    border: 1px solid var(--line); background: #fff; border-radius: 8px; height: 28px; padding: 0 10px; font-size: 12px;
+  }
+  .text-btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .text-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .text-btn.danger { background: #fff; color: var(--err); border-color: #fecaca; }
+  .session {
+    background: #fff; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; padding: 6px 16px; font-size: 12px; min-height: 36px;
+  }
+  .session .grow { flex: 1; color: var(--muted); }
+  .pause-bar {
+    background: #FFF7ED; color: #9A3412; border-bottom: 1px solid #FED7AA;
+    display: flex; align-items: center; gap: 10px; padding: 8px 16px; font-size: 13px;
+  }
+  .pause-bar strong { font-weight: 700; }
+  .content { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px 28px; position: relative; }
+  .screen { display: none; }
+  .screen.on { display: block; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 700; }
+  .search {
+    height: 32px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; width: 280px; background: #fff;
+  }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 14px 12px;
+    position: relative;
+  }
+  .card h2 { margin: 0 0 6px; font-size: 15px; }
+  .meta { color: var(--muted); font-size: 12px; line-height: 1.55; }
+  .path {
+    margin-top: 8px; font-size: 12px; background: #F8F9F7; border-radius: 8px; padding: 8px;
+    font-family: "WenQuanYi Micro Hei Mono", ui-monospace, monospace; word-break: break-all;
+  }
+  .card-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .pill { font-size: 12px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+  .pill.pause { background: #FFEDD5; color: #C2410C; }
+  .pill.ok { background: #D1FAE5; color: #047857; }
+  .pill.err { background: #FEE2E2; color: #B91C1C; }
+  .pill.muted { background: #F3F4F6; color: #4B5563; }
+  .mark {
+    display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--primary); color: #fff; font-size: 11px; font-weight: 700; margin-right: 4px;
+    box-shadow: 0 0 0 3px rgba(31,95,255,.18); vertical-align: -3px;
+  }
+  .modal-back {
+    background: rgba(14,17,22,.45); border-radius: 12px; padding: 28px 18px;
+  }
+  .modal {
+    width: 720px; max-width: 100%; margin: 0 auto; background: #fff; border-radius: 14px;
+    box-shadow: 0 16px 40px rgba(0,0,0,.16); overflow: hidden;
+  }
+  .modal head, .modal .mh {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 14px 16px; border-bottom: 1px solid var(--line);
+  }
+  .steps { padding: 8px 16px 16px; }
+  .step { display: grid; grid-template-columns: 22px 1fr; gap: 8px; padding: 8px 0; font-size: 13px; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; color: #fff; }
+  .dot.ok { background: var(--ok); }
+  .dot.pause { background: var(--warn); color: #1C2128; }
+  .dot.wait { background: #E5E7EB; color: #6B7280; }
+  .step small { display: block; color: var(--muted); }
+  .banner-pause {
+    margin: 0 16px; background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 10px; padding: 10px 12px; color: #9A3412;
+  }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pane { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px; min-height: 520px; }
+  .pane h2 { margin: 0 0 8px; font-size: 14px; }
+  .fake-old, .fake-new { border: 1px dashed var(--line); border-radius: 10px; padding: 10px; background: #FAFAF8; }
+  .toast {
+    margin-top: 12px; background: #ECFDF5; color: #047857; border-radius: 10px; padding: 10px 12px; font-size: 13px;
+  }
+  .toast.bad { background: #FFF7ED; color: #9A3412; }
+  form.editor { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  label.f { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 6px; }
+  .field, select.field {
+    width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; background: #fff;
+  }
+  .help { font-size: 13px; background: #F8FAFC; border-radius: 8px; padding: 8px 10px; margin-top: 6px; }
+  .checks { display: flex; flex-direction: column; gap: 8px; }
+  .check {
+    display: flex; justify-content: space-between; align-items: center;
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: #fff;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs button { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 6px 12px; font-size: 13px; }
+  .tabs button.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { background: #F8F9F7; color: var(--muted); font-weight: 600; }
+  .filters { display: flex; gap: 6px; }
+  .filters button { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+  .filters button.on { background: #111827; color: #fff; border-color: #111827; }
+  .notes {
+    position: fixed; top: 0; right: 0; width: 320px; height: 100vh; background: #fff;
+    border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.06);
+    padding: 16px; overflow: auto; z-index: 20; display: none;
+  }
+  .notes.on { display: block; }
+  .notes h3 { margin: 0 0 8px; font-size: 15px; }
+  .notes li { margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
+  .draft {
+    position: fixed; left: 208px; bottom: 8px; font-size: 11px; color: #98A2B3; z-index: 5;
+  }
+  .switch { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 8px; }
+  input[type="range"] { width: 100%; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .badline { color: var(--err); font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sider">
+    <div class="brand"><i></i>电力采集</div>
+    <nav id="nav"></nav>
+    <div class="sider-foot">
+      <button type="button" id="open-settings">设置</button>
+    </div>
+  </aside>
+  <section class="main">
+    <header class="top">
+      <span class="tag ok wifi" id="wifi-tag">
+        <span><span class="mark">2</span>Wi-Fi 示例热点甲</span>
+        <small>netsh E7A4BA…E794B2</small>
+      </span>
+      <span class="tag ok">U-Key</span>
+      <span class="tag ok">专网</span>
+      <span class="tag warn">外网</span>
+      <span class="tag ok">采集服务</span>
+      <button class="text-btn" type="button">下载诊断包</button>
+      <button class="text-btn" type="button" id="toggle-notes">说明</button>
+    </header>
+    <div class="session">
+      <span class="tag ok">专用 Chrome</span>
+      <span>pm.gd.csg.cn · 当前标签</span>
+      <span class="grow">示例场站甲 · 登录方式：仅复用已有登录</span>
+      <button class="text-btn" type="button">检查登录</button>
+      <button class="text-btn" type="button">打开专用 Chrome</button>
+    </div>
+    <div class="pause-bar" id="pause-bar">
+      <span class="mark">1</span>
+      <span>定时任务「日清算采集」<strong>仍暂停</strong>。数字证书连接失败。会话仍被这次运行占用。</span>
+      <button class="text-btn" type="button" data-go="run">去处理</button>
+    </div>
+    <div class="content" id="content"></div>
+  </section>
+</div>
+<aside class="notes" id="notes">
+  <h3 id="notes-title">说明</h3>
+  <p class="meta" id="notes-map"></p>
+  <ol id="notes-list"></ol>
+</aside>
+<div class="draft">界面草案 · 示例数据 · 未连接后端</div>
+<script>
+const SSID = "示例热点甲";
+const HEX = "E7A4BAE4BE8BE783ADE782B9E794B2";
+const NAV = [
+  ["tasks", "任务配置"],
+  ["run", "运行与暂停"],
+  ["compare", "前后对照"],
+  ["editor", "任务编辑"],
+  ["preflight", "运行前检查"],
+  ["settings", "设置"],
+  ["logs", "执行日志"],
+  ["indicators", "指标与工坊"]
+];
+const NOTES = {
+  tasks: {
+    title: "任务配置",
+    map: "优化 1、优化 2。对照现在的任务卡片首页。",
+    items: [
+      "顶栏固定「仍暂停」。现在定时任务只在结束后用 ExecutionResultModal 通知。",
+      "Wi-Fi 同时给出解码名和 netsh 原文。路径里的 {SSID} 用解码名。",
+      "任务卡片上的目录预览用同一次解码结果。"
+    ]
+  },
+  run: {
+    title: "运行与暂停",
+    map: "优化 1。事件名沿用 error_pause。",
+    items: [
+      "证书失败停在这一步，步骤不标完成。",
+      "恢复动作来自现有浏览器会话：重新检查后继续，检查登录，打开专用 Chrome。",
+      "终态写成仍暂停。成功的绿色留给真正结束的任务。"
+    ]
+  },
+  compare: {
+    title: "前后对照",
+    map: "优化 1。左栏按现在的 App.tsx，右栏是这份草案。",
+    items: [
+      "现在轮询 scheduled_auto，跑完才通知。暂停容易和成功看混。",
+      "草案在暂停期间一直留着顶栏。结果分成成功和失败，另有仍暂停。"
+    ]
+  },
+  editor: {
+    title: "任务编辑",
+    map: "优化 3 和优化 4，以及优化 6。",
+    items: [
+      "开关写成「窗口移出屏幕，仍保持渲染」。客户设置里不出现 headless。",
+      "日期窗口用一句话写清起止，并注明按自然日。",
+      "结束时分开只落盘、发送和上传。上传前列出文件名，版本清单不进包。"
+    ]
+  },
+  preflight: {
+    title: "运行前检查",
+    map: "优化 7。状态来自 /api/browser/status 和 /api/health。",
+    items: [
+      "缺检查登录就停在这一项，不必等到 SSE 里的 site_unreachable。"
+    ]
+  },
+  settings: {
+    title: "设置",
+    map: "优化 2、优化 4。modules 今天在 yaml，不在 SettingsModal。",
+    items: [
+      "设置拆成登录与场站和专网，以及发送和上传。每块只留自己的测试按钮。",
+      "解码失败的 SSID 标红，不能写入新的路径模板。",
+      "运行模块对应 configs 里的 ModuleToggle。这里只是把同一组开关摆出来对照。"
+    ]
+  },
+  logs: {
+    title: "执行日志",
+    map: "优化 10。跨重启精确续跑仍不做。",
+    items: [
+      "筛选项把仍暂停和失败分开，已中断单独一项。后端重启后的运行标已中断，不自动重放步骤。"
+    ]
+  },
+  indicators: {
+    title: "指标与工坊",
+    map: "优化 5。运行时以 SQLite workflow_configs 为准。",
+    items: [
+      "已导入的步骤只在指标配置里改。录制工坊只负责录新的并导入。",
+      "来源行写出工坊 export id。元数据在 workshop_zip.read_workshop_zip_meta。"
+    ]
+  }
+};
+
+const content = document.getElementById("content");
+const nav = document.getElementById("nav");
+NAV.forEach(([id, label]) => {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = label;
+  b.dataset.go = id;
+  nav.appendChild(b);
+});
+
+function fmt(offset) {
+  const d = new Date(2026, 10, 6);
+  d.setDate(d.getDate() + offset);
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return d.getFullYear() + "-" + m + "-" + day;
+}
+
+function render(id) {
+  document.querySelectorAll("#nav button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.go === id);
+  });
+  document.getElementById("pause-bar").style.display = (id === "tasks" || id === "run") ? "flex" : "none";
+  const html = {
+    tasks: tasksHTML(),
+    run: runHTML(),
+    compare: compareHTML(),
+    editor: editorHTML(),
+    preflight: preflightHTML(),
+    settings: settingsHTML(),
+    logs: logsHTML(),
+    indicators: indicatorsHTML()
+  }[id];
+  content.innerHTML = html;
+  const note = NOTES[id];
+  document.getElementById("notes-title").textContent = note.title;
+  document.getElementById("notes-map").textContent = note.map;
+  document.getElementById("notes-list").innerHTML = note.items.map((t) => "<li>" + t + "</li>").join("");
+  bind(id);
+}
+
+function tasksHTML() {
+  return `
+    <div class="row">
+      <h1>任务配置</h1>
+      <input class="search" placeholder="搜索任务名称、指标或备注" />
+    </div>
+    <div class="row">
+      <span class="meta">示例数据。今天按 2026-11-06 计。</span>
+      <span>
+        <button class="text-btn" type="button" data-go="preflight">补数据</button>
+        <button class="text-btn primary" type="button" data-go="editor">新增任务</button>
+      </span>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <div class="row"><h2>日清算采集</h2><span class="pill pause">仍暂停</span></div>
+        <div class="meta">每日 07:30 · 指标：日清算概览、现货出清电量<br/>定时自动 · 证书弹窗未处理</div>
+        <div class="path"><span class="mark">3</span>${SSID}/2026-11/2026-11-05/日清算采集_0730/</div>
+        <div class="card-actions">
+          <button class="text-btn primary" type="button" data-go="run">去处理</button>
+          <button class="text-btn" type="button" data-go="editor">编辑</button>
+        </div>
+      </article>
+      <article class="card">
+        <div class="row"><h2>现货出清</h2><span class="pill ok">成功</span></div>
+        <div class="meta">每日 18:00 · 向前 1 天 · 向后 0 天<br/>只落盘 · 未开上传</div>
+        <div class="path">${SSID}/2026-11/2026-11-05/现货出清_1800/出清电量.xlsx</div>
+        <div class="card-actions"><button class="text-btn" type="button" data-go="logs">看日志</button></div>
+      </article>
+      <article class="card">
+        <div class="row"><h2>披露周报</h2><span class="pill err">失败</span></div>
+        <div class="meta">每周一 09:00 · 站点不可达<br/>随身 WiFi 中断，文件未生成</div>
+        <div class="card-actions"><button class="text-btn" type="button" data-go="logs">看日志</button></div>
+      </article>
+      <article class="card">
+        <div class="row"><h2>市场用电需求</h2><span class="pill muted">未启用</span></div>
+        <div class="meta">每周五 16:00 · 窗口移出屏幕，仍保持渲染</div>
+        <div class="card-actions">
+          <button class="text-btn" type="button" data-go="preflight">运行</button>
+          <button class="text-btn" type="button" data-go="editor">编辑</button>
+        </div>
+      </article>
+    </div>`;
+}
+
+function runHTML() {
+  return `
+    <div class="modal-back">
+      <div class="modal">
+        <div class="mh"><strong>日清算采集 · 定时自动</strong><span class="pill pause">仍暂停</span></div>
+        <div class="steps">
+          <div class="step"><span class="dot ok">✓</span><div>连接专用 Chrome<small>CDP 端口非 0 · 示例</small></div></div>
+          <div class="step"><span class="dot ok">✓</span><div>检查登录<small>复用已有登录态</small></div></div>
+          <div class="step"><span class="dot pause">!</span><div><span class="mark">1</span>日清算概览 · 证书弹窗<small>error_pause · 数字证书连接失败 · 这一步未完成</small></div></div>
+          <div class="step"><span class="dot wait">·</span><div>现货出清电量<small>等待上一步</small></div></div>
+        </div>
+        <div class="banner-pause"><span class="mark">3</span>这次运行没有成功结束。处理证书之后才能继续后面的指标。</div>
+        <div class="mh">
+          <span class="meta"><span class="mark">2</span>恢复</span>
+          <span>
+            <button class="text-btn" type="button">打开专用 Chrome</button>
+            <button class="text-btn" type="button">检查登录</button>
+            <button class="text-btn danger" type="button">取消本次</button>
+            <button class="text-btn primary" type="button" id="resume">重新检查后继续</button>
+          </span>
+        </div>
+      </div>
+    </div>`;
+}
+
+function compareHTML() {
+  return `
+    <div class="split">
+      <section class="pane">
+        <h2><span class="mark">1</span>现在</h2>
+        <div class="fake-old">
+          <div class="meta">侧栏：任务配置。顶栏只有 Wi-Fi 名，没有暂停状态。</div>
+          <div class="meta" style="margin-top:8px">定时任务在后台跑。窗口上没有进度。</div>
+          <div class="toast">采集完成 · 日清算采集<br/>文件 1 个 · 看起来像成功</div>
+          <p class="meta">通知来自跑完后的 ExecutionResultModal。证书若还停着，操作员要自己去日志里翻。</p>
+        </div>
+      </section>
+      <section class="pane">
+        <h2><span class="mark">2</span>草案</h2>
+        <div class="fake-new">
+          <div class="pause-bar" style="border-radius:8px;margin-bottom:8px">仍暂停 · 数字证书连接失败 · 去处理</div>
+          <div class="check"><span>日清算采集</span><span class="pill pause">仍暂停</span></div>
+          <div class="check"><span>现货出清</span><span class="pill ok">成功</span></div>
+          <div class="check"><span>披露周报</span><span class="pill err">失败</span></div>
+          <p class="meta">三种终态分开。仍暂停不用绿色。</p>
+        </div>
+      </section>
+    </div>`;
+}
+
+function editorHTML() {
+  return `
+    <div class="row"><h1>编辑任务 · 日清算采集</h1><button class="text-btn" type="button" data-go="tasks">返回</button></div>
+    <form class="editor" onsubmit="return false">
+      <label class="f">任务名称</label>
+      <input class="field" value="日清算采集" />
+      <label class="f"><span class="mark">1</span>运行时窗口</label>
+      <label class="switch"><input type="checkbox" checked /> 窗口移出屏幕，仍保持渲染</label>
+      <p class="help">离屏窗口仍会渲染，用来保住 UKey 和页面定时器。这里不写 headless。</p>
+      <label class="f"><span class="mark">2</span>采集日期 · 按自然日</label>
+      <div class="pair">
+        <div>向前 <output id="back-out">1</output> 天<input id="back" type="range" min="0" max="7" value="1" /></div>
+        <div>向后 <output id="cover-out">0</output> 天<input id="cover" type="range" min="0" max="3" value="0" /></div>
+      </div>
+      <p class="help" id="date-help"></p>
+      <label class="f"><span class="mark">3</span>结束后</label>
+      <label class="switch"><input type="checkbox" id="send" /> 发送到企微 / Server酱 / PushPlus</label>
+      <label class="switch"><input type="checkbox" id="upload" checked /> 自动上传 · 配置「示例接口」</label>
+      <p class="help" id="end-help"></p>
+      <div class="path" id="upload-list"></div>
+      <div class="card-actions"><button class="text-btn primary" type="button" data-go="tasks">保存示例</button></div>
+    </form>`;
+}
+
+function preflightHTML() {
+  return `
+    <div class="modal-back">
+      <div class="modal">
+        <div class="mh"><strong><span class="mark">1</span>运行前检查 · 市场用电需求</strong></div>
+        <div class="steps" id="checks">
+          <div class="check"><span>专用 Chrome 已连接</span><span class="pill ok">通过</span></div>
+          <div class="check"><span>检查登录</span><span class="pill err" id="login-pill">未做</span></div>
+          <div class="check"><span>专网</span><span class="pill ok">通过</span></div>
+          <div class="check"><span>自动上传未勾选，跳过上传配置</span><span class="pill muted">跳过</span></div>
+        </div>
+        <div class="mh">
+          <span class="meta" id="pre-msg">停在「检查登录」。补上之后才能运行。</span>
+          <span>
+            <button class="text-btn" type="button" id="do-login">检查登录</button>
+            <button class="text-btn primary" type="button" id="do-run" disabled>运行</button>
+          </span>
+        </div>
+      </div>
+    </div>`;
+}
+
+function settingsHTML() {
+  return `
+    <div class="row"><h1>设置</h1><span class="meta">示例场站，没有真实证书密码</span></div>
+    <div class="tabs" id="stabs">
+      <span class="mark">1</span>
+      <button type="button" data-tab="login">登录与场站</button>
+      <button type="button" data-tab="net" class="on">专网</button>
+      <button type="button" data-tab="send">发送</button>
+      <button type="button" data-tab="up">上传</button>
+    </div>
+    <div id="stab"></div>
+    <div id="mod-slot" style="margin-top:12px"></div>`;
+}
+
+const TABS = {
+  login: `
+    <div class="grid2">
+      <div class="card"><h2>U-Key / 证书</h2>
+        <p class="meta">示例 UKey 已插入<br/>颁发给：示例单位甲<br/>截止日期：2027-03-01<br/>登录方式：证书登录</p>
+        <button class="text-btn" type="button">读取本机证书列</button>
+      </div>
+      <div class="card"><h2>场站</h2>
+        <p class="meta">示例场站甲<br/>Wi-Fi：${SSID}<br/>单位匹配字：示例单位</p>
+        <p class="help">多个场站时，运行前再选。这一页不放路由和上传。</p>
+      </div>
+    </div>`,
+  net: `
+    <div class="grid2">
+      <div class="card"><h2>双网卡</h2>
+        <label class="f">专网网卡 · 有线</label>
+        <select class="field"><option>以太网 2 · 示例</option></select>
+        <label class="f">公网网卡 · 无线</label>
+        <select class="field"><option>WLAN · 示例</option></select>
+        <p class="help">外网现在不可达。采集仍可落在本机。对应公网失败时的降级。</p>
+        <button class="text-btn" type="button">应用路由</button>
+      </div>
+      <div class="card"><h2><span class="mark">2</span>Wi-Fi 名称</h2>
+        <p class="meta">解码后：${SSID}<br/>netsh 原文：${HEX}</p>
+        <p class="help">路径模板用解码后的名字。两者一致。</p>
+        <p class="badline"><span class="mark">2</span>另一条读数「AABBCCDDEE」解不出中文，已标红，不能写入新模板。</p>
+        <button class="text-btn" type="button">测试 Wi-Fi</button>
+      </div>
+    </div>`,
+  send: `
+    <div class="card"><h2>任务产物发送</h2>
+      <label class="switch"><input type="checkbox" /> 启用发送</label>
+      <label class="f">通道</label>
+      <select class="field"><option>企业微信群机器人</option><option>Server酱</option><option>PushPlus</option><option>本机微信</option></select>
+      <p class="help">这是发到群或本机微信。和下面的 HTTP 上传不是同一条。失败进 outbox，调度器约每 5 分钟补发。</p>
+      <button class="text-btn" type="button">测试发送</button>
+    </div>`,
+  up: `
+    <div class="card"><h2>上传配置 · 示例接口</h2>
+      <label class="f">地址</label>
+      <input class="field" value="https://upload.example.test/publicData" />
+      <label class="f">自定义请求头</label>
+      <input class="field" value="X-Example-Token: ••••••" />
+      <p class="help">单个文件原样 POST。多个文件或文件夹先打成一个 zip。不含 .file_versions.json 和 _versions。</p>
+      <button class="text-btn" type="button">测试上传</button>
+      <button class="text-btn" type="button">测试 Wi-Fi</button>
+    </div>`,
+  mod: `
+    <div class="card"><h2><span class="mark">3</span>运行模块</h2>
+      <p class="help">这些开关今天写在 configs/mode_*.yaml 的 modules。当前设置弹窗里没有这一组。草案放在这里，避免和客户的上传开关混在一页。</p>
+      ${["采集 crawler","网络 network","调度 scheduler","本地落地 local_landing","告警 alert_gateway","Agent agent","Web web_ui"].map((name, i) => {
+        const on = i < 4 || i === 6;
+        return `<label class="switch"><input type="checkbox" ${on ? "checked" : ""} disabled /> ${name}${on ? "" : " · 关"}</label>`;
+      }).join("")}
+      <p class="meta">示例对齐 mode_dev：告警和 Agent 关，Web 开。业务代码仍不按模式名分支。</p>
+    </div>`
+};
+
+function logsHTML() {
+  return `
+    <div class="row">
+      <h1>执行日志</h1>
+      <div class="filters" id="filters">
+        <button type="button" class="on" data-f="all">全部</button>
+        <button type="button" data-f="pause">仍暂停</button>
+        <button type="button" data-f="fail">失败</button>
+        <button type="button" data-f="stop">已中断</button>
+        <button type="button" data-f="ok">成功</button>
+      </div>
+    </div>
+    <p class="meta"><span class="mark">1</span>触发方式仍区分定时自动和手动。结果状态是草案补上的筛选项。</p>
+    <table>
+      <thead><tr><th>时间</th><th>任务</th><th>触发</th><th>结果</th><th>说明</th></tr></thead>
+      <tbody id="log-body"></tbody>
+    </table>`;
+}
+
+const LOGS = [
+  ["11-06 07:31", "日清算采集", "定时自动", "pause", "仍暂停", "数字证书连接失败"],
+  ["11-06 06:02", "披露周报", "定时自动", "fail", "失败", "站点不可达"],
+  ["11-05 18:04", "现货出清", "定时自动", "ok", "成功", "1 个文件，未上传"],
+  ["11-05 11:20", "日清算采集", "手动", "stop", "已中断", "后端重启，未重放步骤"]
+];
+
+function indicatorsHTML() {
+  return `
+    <div class="grid2">
+      <div class="card">
+        <h2><span class="mark">1</span>指标配置</h2>
+        <p class="meta">已导入的 YAML 只在这里改。</p>
+        <div class="check"><div><strong>日清算概览</strong><div class="meta"><span class="mark">2</span>来源：录制工坊 · export id demo-exp-001 · 导入 2026-10-02</div></div></div>
+        <div class="check"><div><strong>现货出清电量</strong><div class="meta">来源：指标页手改 · 无工坊包</div></div></div>
+        <button class="text-btn" type="button">编辑步骤</button>
+      </div>
+      <div class="card">
+        <h2>录制工坊</h2>
+        <p class="help">录新的操作，导出 zip，再导入到指标配置。这里不改已经导入的步骤。</p>
+        <button class="text-btn primary" type="button">开始录制</button>
+        <button class="text-btn" type="button">导入到指标</button>
+      </div>
+    </div>`;
+}
+
+function bind(id) {
+  content.querySelectorAll("[data-go]").forEach((el) => {
+    el.addEventListener("click", () => go(el.dataset.go));
+  });
+  if (id === "editor") {
+    const back = content.querySelector("#back");
+    const cover = content.querySelector("#cover");
+    const paint = () => {
+      const b = Number(back.value), c = Number(cover.value);
+      content.querySelector("#back-out").textContent = String(b);
+      content.querySelector("#cover-out").textContent = String(c);
+      const from = fmt(-b), to = fmt(c === 0 ? -1 : c - 1);
+      const end = c === 0 ? from : to;
+      content.querySelector("#date-help").textContent =
+        "按自然日，从 " + from + " 跑到 " + (b === 0 && c === 0 ? from : end) + "。不按交易日跳过节假日。extract_calendar 只负责抽出日历，不改这个窗口。";
+      const upload = content.querySelector("#upload").checked;
+      const send = content.querySelector("#send").checked;
+      let endText = "两条都关。结束后只落盘。";
+      if (upload && send) endText = "会发送，也会按上传配置 POST。";
+      else if (upload) endText = "只走上传配置。不发群。";
+      else if (send) endText = "只走发送。不 POST 客户接口。";
+      content.querySelector("#end-help").textContent = endText;
+      content.querySelector("#upload-list").textContent = upload
+        ? "将上传：出清电量.xlsx（单个文件，原样 POST）\n不包含 .file_versions.json 和 _versions"
+        : "本次不上传。";
+    };
+    back.addEventListener("input", paint);
+    cover.addEventListener("input", paint);
+    content.querySelector("#upload").addEventListener("change", paint);
+    content.querySelector("#send").addEventListener("change", paint);
+    paint();
+  }
+  if (id === "preflight") {
+    content.querySelector("#do-login").addEventListener("click", () => {
+      content.querySelector("#login-pill").className = "pill ok";
+      content.querySelector("#login-pill").textContent = "通过";
+      content.querySelector("#do-run").disabled = false;
+      content.querySelector("#pre-msg").textContent = "四项都过了，可以运行。";
+    });
+  }
+  if (id === "settings") {
+    const box = content.querySelector("#stab");
+    content.querySelector("#mod-slot").innerHTML = TABS.mod;
+    const show = (tab) => {
+      content.querySelectorAll("#stabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
+      box.innerHTML = TABS[tab];
+    };
+    content.querySelectorAll("#stabs button").forEach((b) => b.addEventListener("click", () => show(b.dataset.tab)));
+    show("net");
+  }
+  if (id === "logs") {
+    const body = content.querySelector("#log-body");
+    const paint = (f) => {
+      body.innerHTML = LOGS.filter((row) => f === "all" || row[3] === f).map((row) => {
+        const cls = row[3] === "ok" ? "ok" : row[3] === "fail" ? "err" : row[3] === "pause" ? "pause" : "muted";
+        return `<tr><td>${row[0]}</td><td>${row[1]}</td><td>${row[2]}</td><td><span class="pill ${cls}">${row[4]}</span></td><td>${row[5]}</td></tr>`;
+      }).join("");
+    };
+    content.querySelectorAll("#filters button").forEach((b) => b.addEventListener("click", () => {
+      content.querySelectorAll("#filters button").forEach((x) => x.classList.toggle("on", x === b));
+      paint(b.dataset.f);
+    }));
+    paint("all");
+  }
+  if (id === "run") {
+    content.querySelector("#resume").addEventListener("click", () => {
+      content.querySelector(".banner-pause").textContent = "已请求重新检查。示例里不连接真实浏览器。";
+    });
+  }
+}
+
+function go(id) {
+  if (!NOTES[id]) return;
+  location.hash = id;
+}
+
+document.body.addEventListener("click", (ev) => {
+  const t = ev.target.closest("[data-go]");
+  if (t && t.dataset.go) go(t.dataset.go);
+});
+document.getElementById("open-settings").addEventListener("click", () => go("settings"));
+document.getElementById("toggle-notes").addEventListener("click", () => {
+  document.getElementById("notes").classList.toggle("on");
+});
+window.addEventListener("hashchange", () => render((location.hash || "#tasks").slice(1)));
+render((location.hash || "#tasks").slice(1));
+</script>
+</body>
+</html>
