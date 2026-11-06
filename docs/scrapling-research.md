@@ -1,14 +1,14 @@
 # Scrapling 调研：和 spider 的关系
 
-结论先说：**不能用 Scrapling 单独替换本项目。** 它覆盖「请求、浏览器抓取、解析、并发爬取、导出」。spider 的主体是专网登录、U-Key、双网卡、录制式工作流、本机落盘和客户上传。两边重叠的是 HTTP 客户端、Playwright/CDP 和「会话」这个词，重叠的实现假设并不相同。
+**不能用 Scrapling 单独替换本项目。** 它覆盖请求与浏览器抓取，也覆盖解析、并发爬取与导出。spider 的主体是专网登录与 U-Key，加上双网卡与录制式工作流，以及本机落盘与客户上传。两边重叠的是 HTTP 客户端、Playwright/CDP 和「会话」这个词，重叠的实现假设并不相同。
 
 材料来自官方 README 与文档站，不是二手评测。性能和覆盖率数字是项目自述，这里没有复跑。
 
 ## Scrapling 是什么
 
-[Scrapling](https://github.com/D4Vinci/Scrapling)（作者 Karim Shoair，BSD-3-Clause，Python 3.10+）是一个 Python 抓取框架。官方 README 的定位是：一次请求到整站爬取，包含快速 HTTP、隐蔽浏览器、解析和并发爬虫，也可从终端或 AI Agent 使用（[README](https://github.com/D4Vinci/Scrapling/blob/main/README.md)，[文档首页](https://scrapling.readthedocs.io/en/latest/)）。
+[Scrapling](https://github.com/D4Vinci/Scrapling)（作者 Karim Shoair，BSD-3-Clause，Python 3.10+）是一个 Python 抓取框架。官方 README 的定位是：一次请求到整站爬取，包含快速 HTTP 和隐蔽浏览器，也包含解析和并发爬虫，也可从终端或 AI Agent 使用（[README](https://github.com/D4Vinci/Scrapling/blob/main/README.md)，[文档首页](https://scrapling.readthedocs.io/en/latest/)）。
 
-基础安装只有解析器。要用 Fetcher / Spider 得装 `scrapling[fetchers]` 并执行 `scrapling install` 下载浏览器；MCP、RAG、交互 shell 是另外的 extra（[README 安装节](https://github.com/D4Vinci/Scrapling/blob/main/README.md)）。
+基础安装只有解析器。要用 Fetcher / Spider 得装 `scrapling[fetchers]` 并执行 `scrapling install` 下载浏览器；MCP 和 RAG，以及交互 shell 是另外的 extra（[README 安装节](https://github.com/D4Vinci/Scrapling/blob/main/README.md)）。
 
 ### 主要能力
 
@@ -47,7 +47,7 @@ README 自述解析器在其基准里快于常见 Python 解析库，并写有�
 
 ## 对照 spider 现在要做什么
 
-spider 的验收标准不是「把公开页面抓成 JSON」，而是下面这些已经在代码里的行为。
+spider 的验收标准是下面这些已经在代码里的行为。「把公开页面抓成 JSON」不在这份标准里。
 
 | spider 的要求 | 代码落点 | Scrapling 单独能否满足 |
 |---------------|----------|------------------------|
@@ -64,7 +64,7 @@ spider 的验收标准不是「把公开页面抓成 JSON」，而是下面这�
 | 只读查询给外部 Agent | `gateway/mcp/server.py` 的三个 tool | **不相关。** Scrapling MCP 是去浏览别人的网站；spider MCP 是查询自己的任务，且明确不触发采集 |
 | TLS 指纹 | `api_fetcher.py` 可选 `curl_cffi` impersonate | **部分，且已有。** 再套一层 Fetcher 不会解决登录和落盘 |
 
-所以：
+所以如下。
 
 - **公开站点、链接跟随、反 Cloudflare、把 HTML 收成表** → Scrapling 可以单独做。这不是本仓库的当前范围。
 - **本仓库的桌面采集闭环** → **否。**

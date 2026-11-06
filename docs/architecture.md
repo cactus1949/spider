@@ -2,9 +2,9 @@
 
 对照仓库当前代码整理。产品是跑在现场 Windows 上的广东电力交易数据采集客户端：用 U-Key 随身 WiFi 进入专网 `pm.gd.csg.cn`，在已登录的真实 Chrome 里按指标工作流取数，落到本机，再按配置上传或推送。
 
-离线能采、能落盘是底座。告警、远程 Agent、Web 控制台是可关的附加能力。`src/spider_gd/config/deploy_mode.py` 写明：业务代码不写 `if mode == ...`，由 `ModuleToggle` 决定装配什么。
+离线能采、能落盘是底座。告警和远程 Agent，以及 Web 控制台是可关的附加能力。`src/spider_gd/config/deploy_mode.py` 写明：业务代码不写 `if mode == ...`，由 `ModuleToggle` 决定装配什么。
 
-编号文档 `docs/05_模块化架构设计.md`、`docs/00_项目地图.md` 仍描述模式 C、`cleaner.py`、以及「FastAPI 只有 4 个端点」。那些文件不在当前树里，控制接口也已经远多于 4 个。下文以源码为准。
+编号文档 `docs/05_模块化架构设计.md`、`docs/00_项目地图.md` 仍描述模式 C 和 `cleaner.py`，以及「FastAPI 只有 4 个端点」。那些文件不在当前树里，控制接口也已经远多于 4 个。下文以源码为准。
 
 ## 1. 运行形态
 
@@ -43,7 +43,7 @@ flowchart TB
   ORCH --> DB
 ```
 
-桌面壳是 `frontend/`（Electron 44、electron-vite、React 18、Ant Design 5）。业务数据不走 IPC。Preload（`frontend/src/preload/index.ts`）只暴露版本、数据目录、文件对话框、更新。页面通过 `frontend/src/renderer/src/services/api.ts` 调本机 HTTP。
+桌面壳是 `frontend/`（Electron 44 和 electron-vite，以及 React 18 和 Ant Design 5）。业务数据不走 IPC。Preload（`frontend/src/preload/index.ts`）只暴露版本和数据目录，以及文件对话框和更新。页面通过 `frontend/src/renderer/src/services/api.ts` 调本机 HTTP。
 
 `backend.ts` 的就绪条件是 `http://127.0.0.1:8800/openapi.json` 且 `info.title === "spider-gd 控制接口"`。开发环境用仓库 `.venv` 执行 `main.py --config configs/mode_dev.yaml run`。打包后跑 `resources/backend/spider-gd-service.exe`，并把 `SPIDER_GD_HOME` 设为 Electron `userData`，避免升级清掉安装目录里的库和日志（`src/spider_gd/config/user_home.py`）。
 
@@ -80,7 +80,7 @@ Python 入口是 `main.py` → `spider_gd.__main__`。`run` 走 `run_app()`：�
 - `ApiFetcher` 在装了 `curl_cffi`（extra `tls` / `online`）时伪装 Chrome TLS；否则退回 httpx。
 - CLI：`python main.py crawl`。调度：`configs` 里的 `crawl_cron` 会对**全部**已加载端点跑「昨天」（`app._default_crawl_job`）。`backfill_cron` 用 `core/scheduler/backfill.py` 的限额、冷却和低优先级，避免补漏打满。
 
-`configs/endpoints.yaml` 当前注册的是 `http://localhost:8000` 的 mock 端点，注释写明真实平台 URL 要等样本后再换。因此桌面联调配置 `mode_dev.yaml` 若同时开着调度，需要确认没有把 mock 端点的 cron 指到现场。
+`configs/endpoints.yaml` 当前注册的是 `http://localhost:8000` 的 mock 端点，注释写明真实平台 URL 要等样本后再换。桌面联调配置 `mode_dev.yaml` 因此若同时开着调度，需要确认没有把 mock 端点的 cron 指到现场。
 
 ## 3. 模块职责
 
@@ -115,7 +115,7 @@ Python 入口是 `main.py` → `spider_gd.__main__`。`run` 走 `run_app()`：�
 | `gateway/data_uploader.py`、`upload_profiles.py` | 客户接口上传配置与打包 |
 | `tools/build_workflow.py`、`tools/recon_tool/` | 录制生成 YAML；现场 HAR / 网络侦察 |
 
-`pyproject.toml` 把 FastAPI、uvicorn、`dingtalk-stream`、`mcp`、`curl_cffi` 放在 extra `online`。离线核心不依赖它们。验证码和 WMI/pywin32 也是可选 extra。
+`pyproject.toml` 把 FastAPI 和 uvicorn 放在 extra `online`，`dingtalk-stream`、`mcp` 和 `curl_cffi` 也在这组。离线核心不依赖它们。验证码和 WMI/pywin32 也是可选 extra。
 
 ## 4. 部署与配置
 
@@ -126,9 +126,9 @@ Python 入口是 `main.py` → `spider_gd.__main__`。`run` 走 `run_app()`：�
 | `configs/mode_b_wireless.yaml` | `standalone_wireless` | 与 A 相同。yaml 不写网卡差异 |
 | `configs/mode_dev.yaml` | `offline` | 只开 Web，给 Electron 联调。告警关 |
 
-有线/无线的路由、SSID、双网卡不在模式 yaml 里区分，而在 SQLite 设置和 `/api/network/*`。现场路由脚本是 `deploy/setup_routes.ps1`，服务安装见 `deploy/nssm_service.bat`、`deploy/install.bat`。
+有线/无线的路由、SSID 和双网卡在 SQLite 设置和 `/api/network/*` 里区分，模式 yaml 不写这项。现场路由脚本是 `deploy/setup_routes.ps1`，服务安装见 `deploy/nssm_service.bat`、`deploy/install.bat`。
 
-`common.yaml` 里的平台域名、下载目录、调度、delivery 默认值会被模式文件 `inherits` 合并。模式 C（双机）已在 `deploy_mode.py` 删除。
+`common.yaml` 里的平台域名和下载目录，以及调度和 delivery 默认值会被模式文件 `inherits` 合并。模式 C（双机）已在 `deploy_mode.py` 删除。
 
 公网不可用时，`infrastructure/network/supervisor.py` 可以把联网附加降到离线，不停本地采集。这是运行时降级，和 yaml 里的 `deploy_mode` 不是同一个开关。
 
@@ -144,11 +144,11 @@ Python 入口是 `main.py` → `spider_gd.__main__`。`run` 走 `run_app()`：�
 | `/indicators` | `pages/Indicators.tsx` | 指标 YAML、分组、单步/整段回放 |
 | `/record-workshop` | `pages/RecordWorkshop.tsx` | 录制、导出 zip、提交录制包 |
 
-`layouts/AppLayout.tsx` 顶栏：`HealthIndicators`（UKey / 专网 / 公网，可应用路由）、`BrowserSessionPanel`（打开专用 Chrome、检查登录、暂停/继续）、当前 WiFi、诊断包、设置。侧栏默认折叠。
+`layouts/AppLayout.tsx` 顶栏：`HealthIndicators`（UKey / 专网 / 公网，可应用路由）和 `BrowserSessionPanel`（打开专用 Chrome、检查登录和暂停/继续），以及当前 WiFi、诊断包和设置。侧栏默认折叠。
 
-设置集中在 `components/SettingsModal.tsx`：站点与账号、WiFi 与双网卡、路由、delivery、场站、导入导出。上传配置档在 `UploadProfilesPanel.tsx`。
+设置集中在 `components/SettingsModal.tsx`：站点与账号，WiFi 与双网卡，路由和 delivery，还有场站和导入导出。上传配置档在 `UploadProfilesPanel.tsx`。
 
-进度是 SSE。`ProgressModal.tsx` 把 `error_pause`、`captcha_failed`、`site_unreachable`、`gateway_rejected` 显示成暂停或失败，而不是成功结束。定时任务没有这份弹窗时，`App.tsx` 轮询 `scheduled_auto` 执行日志，再弹出 `ExecutionResultModal`。
+进度是 SSE。`ProgressModal.tsx` 把 `error_pause` 和 `captcha_failed`，以及 `site_unreachable` 和 `gateway_rejected` 显示成暂停或失败，而不是成功结束。定时任务没有这份弹窗时，`App.tsx` 轮询 `scheduled_auto` 执行日志，再弹出 `ExecutionResultModal`。
 
 ## 6. 不变量
 
