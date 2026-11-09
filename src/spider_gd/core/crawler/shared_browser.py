@@ -1003,16 +1003,32 @@ class SharedBrowser:
     async def check_auth(
         self, page: Any = None, *, require_storage_keys: list[str] | None = None,
     ) -> dict[str, Any]:
-        """业务探测器：站点、成功元素、可选身份必须同时匹配。
+        """判断当前页是否已经登录业务站。
 
-        require_storage_keys 仅为兼容旧调用保留，不再读取 localStorage。
+        浏览器错误页记成未登录，并带上证书客户端说明。浏览器没连上、绑定页已关闭
+        仍记成未知，避免被当成可以自动登录。
+
+        Args:
+            page: 要检查的页面。空则用当前绑定页。
+            require_storage_keys: 兼容旧调用，不再读取 localStorage。
+
+        Returns:
+            dict[str, Any]: ``state`` 为 authenticated、unauthenticated、challenge、
+            wrong_account 或 unknown。``reason`` 是给界面的说明。
+
+        Examples:
+            >>> SharedBrowser.check_auth.__name__
+            'check_auth'
         """
         from urllib.parse import urlsplit
         try:
             try:
                 page = page or self.page
             except RuntimeError as exc:
-                return {"state": "unauthenticated", "reason": str(exc)}
+                reason = str(exc)
+                if reason == PAGE_LOAD_FAILED_MESSAGE:
+                    return {"state": "unauthenticated", "reason": reason}
+                raise
             if is_browser_error_page(str(getattr(page, "url", "") or "")):
                 return {"state": "unauthenticated", "reason": PAGE_LOAD_FAILED_MESSAGE}
             if urlsplit(page.url).netloc != urlsplit(self._config["target_origin"]).netloc:

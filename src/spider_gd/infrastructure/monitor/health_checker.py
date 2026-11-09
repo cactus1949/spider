@@ -42,8 +42,8 @@ _UKEY_VIDS = {
     "24DC",  # ARDS
 }
 _PS_CIM_SCRIPT = (
-    "Get-CimInstance -ClassName Win32_PnPEntity | "
-    "Where-Object { $_.DeviceID -match 'VID_' } | "
+    "Get-CimInstance -ClassName Win32_PnPEntity "
+    "-Filter \"DeviceID LIKE '%VID_%'\" | "
     "Select-Object Name, Description, DeviceID, PNPClass, ConfigManagerErrorCode | "
     "ConvertTo-Json -Compress -Depth 3"
 )
@@ -410,7 +410,7 @@ def _run_powershell_pnp(script: str) -> list[dict[str, object]]:
 
     try:
         result = run_capture(
-            ["powershell", "-NoProfile", "-Command", script],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             timeout=_UKEY_POWERSHELL_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
@@ -425,10 +425,10 @@ def _run_powershell_pnp(script: str) -> list[dict[str, object]]:
 
 
 def _query_powershell_devices() -> list[dict[str, object]]:
-    """WMI 模块缺失时，用 PowerShell 枚举代替。
+    """WMI 导入或查询失败时，用 PowerShell 枚举代替。
 
-    先试 ``Get-CimInstance Win32_PnPEntity``（带驱动错误码），
-    失败再试 ``Get-PnpDevice``。两条都不逐台查父设备。
+    先试带 WQL 过滤的 ``Get-CimInstance Win32_PnPEntity``（含驱动错误码），
+    失败再试 ``Get-PnpDevice``。两条都不逐台查父设备，也不先拉全表再过滤。
 
     Returns:
         list[dict[str, object]]: 规范化设备。
@@ -463,14 +463,13 @@ class _UkeyUnavailableError(RuntimeError):
 
 
 def _load_ukey_devices() -> list[dict[str, object]]:
-    """优先 WMI；模块缺失时在 Windows 上改走 PowerShell。
+    """优先 WMI；导入或查询失败时，在 Windows 上改走 PowerShell。
 
     Returns:
         list[dict[str, object]]: 规范化设备。
 
     Raises:
         _UkeyUnavailableError: 非 Windows，或 PowerShell 也失败。
-        Exception: WMI 已安装但查询本身失败。
 
     Examples:
         >>> callable(_load_ukey_devices)
@@ -478,12 +477,15 @@ def _load_ukey_devices() -> list[dict[str, object]]:
     """
     try:
         return _query_wmi_devices()
-    except ImportError as exc:
-        logger.warning(
-            "U-Key 无法导入 WMI：{}（解释器 {}）",
-            exc,
-            sys.executable,
-        )
+    except Exception as exc:
+        if isinstance(exc, ImportError):
+            logger.warning(
+                "U-Key 无法导入 WMI：{}（解释器 {}）",
+                exc,
+                sys.executable,
+            )
+        else:
+            logger.warning("U-Key WMI 查询失败，改试 PowerShell：{}", exc)
         if sys.platform != "win32":
             raise _UkeyUnavailableError(f"{_UKEY_UNAVAILABLE}（{exc}）") from exc
         try:

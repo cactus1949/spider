@@ -203,6 +203,41 @@ async def test_ukey_check_timeout_does_not_report_success():
 
 
 @pytest.mark.unit
+def test_wmi_query_error_falls_back_to_powershell(monkeypatch):
+    monkeypatch.setattr(
+        "spider_gd.infrastructure.monitor.health_checker._query_wmi_devices",
+        lambda: (_ for _ in ()).throw(RuntimeError("COM 失败")),
+    )
+    monkeypatch.setattr(
+        "spider_gd.infrastructure.monitor.health_checker._query_powershell_devices",
+        lambda: [_ukey("096E:0317")],
+    )
+    monkeypatch.setattr("spider_gd.infrastructure.monitor.health_checker.sys.platform", "win32")
+    devices = _load_ukey_devices()
+    assert devices[0]["vid_pid"] == "096E:0317"
+
+
+@pytest.mark.unit
+def test_powershell_fallback_filters_in_wql_and_stays_noninteractive(monkeypatch):
+    import subprocess
+
+    captured: list[list[str]] = []
+
+    def fake(cmd, timeout=20, **_kwargs):
+        captured.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "[]", "")
+
+    monkeypatch.setattr("spider_gd.infrastructure.proc.run_capture", fake)
+    from spider_gd.infrastructure.monitor.health_checker import _query_powershell_devices
+
+    assert _query_powershell_devices() == []
+    command = captured[0]
+    assert command[1:4] == ["-NoProfile", "-NonInteractive", "-Command"]
+    assert "-Filter" in command[-1]
+    assert "Where-Object" not in command[-1]
+
+
+@pytest.mark.unit
 async def test_ukey_check_uses_injected_devices():
     report = await ukey_check(query=lambda: [_ukey("096E:0317", 28)])()
     assert "code 28" in report.message

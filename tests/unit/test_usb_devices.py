@@ -155,6 +155,47 @@ def test_gather_still_builds_zip_when_probes_time_out(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+def test_partial_probe_timeout_does_not_warn_when_another_section_succeeded():
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    text = (
+        "===== Get-CimInstance =====\n"
+        '[{"DeviceID":"USB\\\\VID_096E&PID_0317\\\\A","Name":"钥匙"}]\n\n'
+        "===== pnputil =====\n"
+        "超时（6 秒）：pnputil"
+    )
+    assert usb._text_has_probe_failure(text) is False
+    warning = usb.ukey_download_warning({"error": ""}, {"usb": text, "certificates": "[]"})
+    assert warning == ""
+    both_failed = (
+        "===== Get-CimInstance =====\n超时（6 秒）：Get-CimInstance\n\n"
+        "===== pnputil =====\n失败：pnputil：退出码 1"
+    )
+    assert usb._text_has_probe_failure(both_failed) is True
+    warning = usb.ukey_download_warning(
+        {"error": ""}, {"usb": both_failed, "certificates": ""},
+    )
+    assert "超时" in warning
+
+
+@pytest.mark.unit
+def test_named_probes_return_at_budget_without_waiting_for_the_slow_one():
+    import time
+
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    def slow() -> tuple[bool, str]:
+        time.sleep(1.2)
+        return True, "late"
+
+    started = time.monotonic()
+    rows = usb.run_named_probes([("slow", slow)], budget=0.15)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.8
+    assert rows == [("slow", False, "超时（超过总时限 0 秒）：slow")]
+
+
+@pytest.mark.unit
 def test_probe_exception_is_a_report_not_a_crash(monkeypatch):
     import spider_gd.infrastructure.network.usb_devices as usb
 

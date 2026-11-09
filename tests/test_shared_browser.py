@@ -635,6 +635,23 @@ async def test_check_auth_surfaces_chrome_error():
     assert "chrome-error" in result["reason"]
 
 
+async def test_check_auth_disconnect_stays_unknown():
+    browser = SharedBrowser()
+    result = await browser.check_auth()
+    assert result["state"] == "unknown"
+    assert "尚未选择业务页面" in result["reason"]
+
+
+async def test_check_auth_closed_page_stays_unknown():
+    browser = _running_browser()
+    page = _open_page("https://pm.gd.csg.cn/portal/#/home")
+    page.is_closed.return_value = True
+    browser._pages = [page]
+    result = await browser.check_auth()
+    assert result["state"] == "unknown"
+    assert "被关闭" in result["reason"]
+
+
 class TestGetSharedBrowser:
     def test_returns_singleton(self):
         # Reset module singleton for test isolation

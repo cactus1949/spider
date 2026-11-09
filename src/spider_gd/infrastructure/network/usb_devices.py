@@ -11,13 +11,12 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from spider_gd.infrastructure.proc import run_capture
 
 _UKEY_VIDS = {"096E"}
-_PROBE_FAILURE_TOKENS = ("超时", "失败：", "超过总时限")
 _FAST_PROBE_TIMEOUT = 6.0
 _FALLBACK_PROBE_TIMEOUT = 6.0
 _USB_PROBE_BUDGET = 8.0
@@ -269,18 +268,40 @@ def _pnputil_command() -> list[str]:
     return ["pnputil", "/enum-devices", "/connected"]
 
 
+def _discard_probe_future(future: Future) -> None:
+    """读掉后台探测的异常，避免解释器提示异常没人取。
+
+    Args:
+        future: 已经结束或被取消的探测任务。
+
+    Returns:
+        None: 只消费结果，不向外抛。
+
+    Examples:
+        >>> done = Future()
+        >>> done.set_exception(RuntimeError("x"))
+        >>> _discard_probe_future(done)
+    """
+    try:
+        future.exception()
+    except BaseException:
+        return
+
+
 def run_named_probes(
     probes: list[tuple[str, Callable[[], tuple[bool, str]]]],
     *,
     budget: float,
 ) -> list[tuple[str, bool, str]]:
-    """并行跑几条探测，到总时限就不再等。
+    """并行跑几条探测，到总时限就返回。
 
-    没跑完的探测记成超时说明。调用方给的函数自己也要有超时，避免线程一直占着。
+    没跑完的记成超时说明，并且不再等它的线程结束。下载接口因此可以先把
+    已经拿到的结果和超时说明写进诊断包。调用方自己的函数仍应带超时，
+    避免线程一直占着。
 
     Args:
         probes: ``(名称, 函数)``。函数返回 ``(是否成功, 原文)``。
-        budget: 整批最多等待的秒数。
+        budget: 整批最多等待的秒数。到点后函数返回，不等待未完成的线程。
 
     Returns:
         list[tuple[str, bool, str]]: 按输入顺序排列的名称、是否成功、原文或失败说明。
@@ -292,9 +313,10 @@ def run_named_probes(
     """
     if not probes:
         return []
-    with ThreadPoolExecutor(max_workers=len(probes), thread_name_prefix="ukey-probe") as pool:
-        futures = {pool.submit(func): name for name, func in probes}
-        done, pending = wait(set(futures), timeout=budget)
+    pool = ThreadPoolExecutor(max_workers=len(probes), thread_name_prefix="ukey-probe")
+    futures = {pool.submit(func): name for name, func in probes}
+    try:
+        done, pending = wait(set(futures), timeout=max(0.0, budget))
         by_name: dict[str, tuple[bool, str]] = {}
         for future in done:
             name = futures[future]
@@ -304,9 +326,12 @@ def run_named_probes(
                 by_name[name] = (False, f"失败：{name}：{exc}")
         for future in pending:
             name = futures[future]
+            future.add_done_callback(_discard_probe_future)
             future.cancel()
             by_name[name] = (False, f"超时（超过总时限 {budget:.0f} 秒）：{name}")
-    return [(name, *by_name[name]) for name, _func in probes]
+        return [(name, *by_name[name]) for name, _func in probes]
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _format_probe_sections(rows: list[tuple[str, bool, str]]) -> str:
@@ -1080,22 +1105,96 @@ def _decode_raw_outcome(text: str) -> dict[str, str]:
     }
 
 
+_SECTION_HEADER = re.compile(r"(?m)^===== .+ =====\s*")
+
+
+def _probe_sections(text: str) -> list[str]:
+    """按诊断分段标题切开原文。
+
+    Args:
+        text: 一条或几条探测拼起来的原文。
+
+    Returns:
+        list[str]: 去掉标题后的各段。没有标题时整段作为一块。
+
+    Examples:
+        >>> _probe_sections("===== CIM =====\\nVID_096E")
+        ['VID_096E']
+    """
+    raw = text or ""
+    if not _SECTION_HEADER.search(raw):
+        return [raw] if raw else []
+    return [part.strip() for part in _SECTION_HEADER.split(raw) if part.strip()]
+
+
+def _section_failed(text: str) -> bool:
+    """判断这一段是不是枚举超时或失败说明。
+
+    只看第一行。设备名或证书主题里偶然出现「超时」不算失败。
+
+    Args:
+        text: 一段探测原文。
+
+    Returns:
+        bool: 第一行是超时或失败说明时为 True。
+
+    Examples:
+        >>> _section_failed("超时（6 秒）：pnputil")
+        True
+        >>> _section_failed('[{"Name":"操作超时"}]')
+        False
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    head = stripped.splitlines()[0].strip()
+    return head.startswith(("超时", "失败")) or "超过总时限" in head
+
+
+def _failure_excerpt(text: str) -> str:
+    """取出第一段失败说明，跳过诊断分段标题。
+
+    Args:
+        text: 探测原文。
+
+    Returns:
+        str: 失败段的第一行，最长 180 字。没有失败段时为空串。
+
+    Examples:
+        >>> _failure_excerpt("===== CIM =====\\n超时（6 秒）：CIM")
+        '超时（6 秒）：CIM'
+    """
+    for section in _probe_sections(text):
+        if _section_failed(section):
+            return section.strip().splitlines()[0][:180]
+    return ""
+
+
 def _text_has_probe_failure(text: str) -> bool:
-    """判断原文里有没有枚举超时或失败。
+    """判断这次枚举是不是整段都失败了。
+
+    多段探测里只要有一段成功，就不把另外一段的超时当成整次失败。
+    否则 CIM 已经列出设备、pnputil 超时，界面仍会报采集不完整。
 
     Args:
         text: 探测输出。
 
     Returns:
-        bool: 含超时或失败说明时为 True。
+        bool: 没有成功段时为 True。空文本为 False。
 
     Examples:
         >>> _text_has_probe_failure("超时（6 秒）：Get-CimInstance")
         True
         >>> _text_has_probe_failure("VID_096E")
         False
+        >>> mixed = "===== CIM =====\\nVID_096E\\n\\n===== pnputil =====\\n超时（6 秒）：pnputil"
+        >>> _text_has_probe_failure(mixed)
+        False
     """
-    return any(token in (text or "") for token in _PROBE_FAILURE_TOKENS)
+    sections = _probe_sections(text)
+    if not sections:
+        return False
+    return all(_section_failed(part) for part in sections)
 
 
 def ukey_download_warning(report: dict[str, object], raw: dict[str, str]) -> str:
@@ -1123,7 +1222,7 @@ def ukey_download_warning(report: dict[str, object], raw: dict[str, str]) -> str
     certificates = str(raw.get("certificates") or "")
     if _text_has_probe_failure(usb) or _text_has_probe_failure(certificates):
         source = usb if _text_has_probe_failure(usb) else certificates
-        first = source.strip().splitlines()[0][:180]
+        first = _failure_excerpt(source)
         parts.append(first or "部分设备或证书枚举没有完成，失败说明已经写进诊断包。")
     return "；".join(dict.fromkeys(parts))[:400]
 
