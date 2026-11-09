@@ -117,6 +117,33 @@ def test_apply_catchup_storage_request_overrides_task_even_when_cleared():
     ).as_posix() == "/settings"
 
 
+def test_apply_catchup_storage_download_dir_overrides_task_without_touching_structure():
+    tasks = [_task(download_dir="/data/task", download_dir_custom=True)]
+    stored = apply_catchup_storage(
+        {"indicators": ["日前"]},
+        tasks,
+        download_dir="/data/once",
+    )
+
+    assert stored["path_structure"] == "- [日前]"
+    assert stored["download_dir"] == "/data/once"
+    assert stored["download_dir_custom"] is True
+    assert catchup_download_dir(stored) == "/data/once"
+
+
+def test_apply_catchup_storage_download_dir_applies_when_no_task_matches():
+    stored = apply_catchup_storage(
+        {"indicators": ["其他"]},
+        [_task(indicators=["实时"])],
+        download_dir="/data/once",
+    )
+
+    assert stored["download_dir"] == "/data/once"
+    assert stored["download_dir_custom"] is True
+    assert "path_structure" not in stored
+    assert catchup_download_dir(stored) == "/data/once"
+
+
 def test_apply_catchup_storage_without_matching_task_keeps_config():
     cfg = {"indicators": ["日前"], "name": "补数据"}
     stored = apply_catchup_storage(cfg, [_task(indicators=["实时"])])

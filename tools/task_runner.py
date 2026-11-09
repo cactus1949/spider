@@ -397,8 +397,9 @@ def apply_catchup_storage(
 
     请求明确带了存储（``storage_overridden``，或任一 path_* 不是 None）时，用请求里的值。
     空的存储结构表示文件直接放在下载根目录，不再回退到任务。
-    请求没带时，沿用 :func:`match_task_storage` 选中的任务：存储结构、旧模板、文件夹，
-    以及任务单独指定的下载目录。不修改入参，也不写回定时任务。
+    请求没带存储结构时，沿用 :func:`match_task_storage` 选中的任务：存储结构、旧模板、文件夹，
+    以及任务单独指定的下载目录。非空的 ``download_dir`` 始终作为这次的下载根目录，
+    覆盖任务目录；没有匹配任务时也同样生效。不修改入参，也不写回定时任务。
 
     Args:
         config (dict): :func:`build_catchup_config` 的结果，至少含 indicators。
@@ -406,7 +407,7 @@ def apply_catchup_storage(
         path_template (str | None): 旧版路径模板。None 表示请求没带。
         path_folders (list | None): 旧版文件夹映射。None 表示请求没带。
         path_structure (str | None): 存储结构文本。None 表示请求没带。
-        download_dir (str | None): 本次下载根目录。空表示不单独指定。
+        download_dir (str | None): 本次下载根目录。非空时覆盖任务目录；空表示不单独指定。
         storage_overridden (bool): 为 True 时，即使路径字段为空也不回退到任务。
 
     Returns:
@@ -423,6 +424,8 @@ def apply_catchup_storage(
         '- [日前]'
         >>> apply_catchup_storage(cfg, tasks)["download_dir"]
         '/data/task'
+        >>> apply_catchup_storage(cfg, tasks, download_dir="/data/once")["download_dir"]
+        '/data/once'
         >>> apply_catchup_storage(
         ...     cfg, tasks, path_structure="", storage_overridden=True,
         ... )["path_structure"]
@@ -445,15 +448,18 @@ def apply_catchup_storage(
         return chosen
 
     matched = match_task_storage(list(chosen.get("indicators") or []), tasks)
-    if matched is None:
-        return chosen
-    chosen["path_structure"] = str(matched.get("path_structure") or "")
-    chosen["path_template"] = str(matched.get("path_template") or "")
-    folders = matched.get("path_folders") or []
-    chosen["path_folders"] = list(folders) if isinstance(folders, list) else []
-    task_dir = str(matched.get("download_dir") or "").strip()
-    if matched.get("download_dir_custom") and task_dir:
-        chosen["download_dir"] = task_dir
+    if matched is not None:
+        chosen["path_structure"] = str(matched.get("path_structure") or "")
+        chosen["path_template"] = str(matched.get("path_template") or "")
+        folders = matched.get("path_folders") or []
+        chosen["path_folders"] = list(folders) if isinstance(folders, list) else []
+        task_dir = str(matched.get("download_dir") or "").strip()
+        if matched.get("download_dir_custom") and task_dir:
+            chosen["download_dir"] = task_dir
+            chosen["download_dir_custom"] = True
+    # 只传 download_dir 的旧调用也要落到这次指定的目录，不能被任务目录盖掉。
+    if explicit_dir:
+        chosen["download_dir"] = explicit_dir
         chosen["download_dir_custom"] = True
     return chosen
 
