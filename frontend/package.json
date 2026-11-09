@@ -1,6 +1,6 @@
 {
   "name": "spider-gd-desktop",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "广东电力数据采集系统 · 桌面管理端",
   "main": "./out/main/index.js",
   "author": "spider-gd",

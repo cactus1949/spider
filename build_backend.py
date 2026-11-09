@@ -384,6 +384,25 @@ def _pywin32_search_roots() -> list[Path]:
     return roots
 
 
+def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """保留打包时源路径仍然存在的数据目录。
+
+    工作流放在用户目录，仓库里可以没有 ``workflows/``。
+    把不存在的路径交给 PyInstaller 会让整次打包失败。
+
+    Args:
+        pairs: ``(源绝对路径, 包内相对路径)``。
+
+    Returns:
+        list[tuple[str, str]]: 源路径存在的那些项，顺序不变。
+
+    Examples:
+        >>> existing_data_files([("/no/such/workflows", "workflows")])
+        []
+    """
+    return [(src, dst) for src, dst in pairs if Path(src).exists()]
+
+
 def clean_build() -> None:
     """清理上次构建产物，避免 PyInstaller 缓存问题。"""
     if BUILD.exists():
@@ -412,7 +431,11 @@ def run_pyinstaller() -> None:
         "--paths", str(ROOT),   # 让 PyInstaller 找到 tools/
     ]
 
-    for src_abs, dst in DATA_FILES:
+    present = existing_data_files(DATA_FILES)
+    missing = [src for src, _dst in DATA_FILES if not Path(src).exists()]
+    for src_abs in missing:
+        print(f"[warn] 跳过不存在的数据目录: {src_abs}")
+    for src_abs, dst in present:
         cmd += ["--add-data", f"{src_abs}{os.pathsep}{dst}"]
 
     for mod in HIDDEN_IMPORTS:

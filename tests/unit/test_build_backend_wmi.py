@@ -62,6 +62,16 @@ def test_arm64_build_is_rejected_in_the_hint():
 
 
 @pytest.mark.unit
+def test_missing_data_directory_is_not_packed(tmp_path: Path):
+    present = tmp_path / "configs"
+    present.mkdir()
+    kept = build_backend.existing_data_files(
+        [(str(present), "configs"), (str(tmp_path / "workflows"), "workflows")]
+    )
+    assert kept == [(str(present), "configs")]
+
+
+@pytest.mark.unit
 def test_non_windows_build_does_not_require_wmi():
     args = build_backend.windows_wmi_pyinstaller_args(
         is_win=False,
