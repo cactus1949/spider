@@ -94,6 +94,8 @@ interface StoragePathModalProps {
   indicatorWindows: Record<string, [number, number]>
   /** 嵌在任务编辑步骤里：不套弹窗，改动实时回传，保存由外层负责。 */
   embedded?: boolean
+  /** 根目录那一行右侧的说明。任务编辑指向设置；补数据说明只影响这一次。 */
+  rootHint?: string
   onChange?: (structure: string, blocked: boolean) => void
   onCancel?: () => void
   onSave?: (structure: string) => void
@@ -556,6 +558,7 @@ export default function StoragePathModal({
   workflows,
   indicatorWindows,
   embedded = false,
+  rootHint = '在设置里修改',
   onChange,
   onCancel,
   onSave
@@ -1198,7 +1201,7 @@ export default function StoragePathModal({
           <FolderOpenOutlined />
           <span>根目录</span>
           <span className="sp-root-path" title={root}>{root || '系统默认下载目录'}</span>
-          <span className="sp-root-hint">在设置里修改</span>
+          <span className="sp-root-hint">{rootHint}</span>
         </div>
 
         <div className="sp-layout">

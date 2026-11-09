@@ -178,7 +178,18 @@ def _parse_profile_yaml(text: str) -> dict:
 
 
 class CatchupRunRequest(BaseModel):
-    """一次补数：指定指标和日期，不写入定时任务。"""
+    """一次补数的请求体。不写入定时任务。
+
+    存储字段不传时，沿用能覆盖这些指标的定时任务的下载路径和存储结构。
+    ``storage_overridden`` 为真时用本次请求里的路径；空结构表示直接放在下载根目录。
+
+    Examples:
+        >>> req = CatchupRunRequest(indicators=["日前"], storage_overridden=True, path_structure="")
+        >>> req.path_structure
+        ''
+        >>> req.download_dir
+        ''
+    """
     login: str = ""
     indicators: list[str] = []
     target_dates: list[str] = []
@@ -190,6 +201,11 @@ class CatchupRunRequest(BaseModel):
     account: str = ""
     account_password: str = ""
     download_dir: str = ""
+    path_template: str | None = None
+    path_folders: list[dict[str, Any]] | None = None
+    path_structure: str | None = None
+    # 为真时即使路径为空，也不再回退到定时任务的存储配置
+    storage_overridden: bool = False
     headless: str = "false"
     minimized: str = "true"
     upload_profile_id: str = ""
@@ -2451,8 +2467,8 @@ def create_app(
         from spider_gd.gateway.execution_bundle import (
             build_execution_zip,
             parse_local_timestamp,
-            read_log_window,
-            select_runtime_artifacts,
+            safe_read_log_window,
+            safe_select_runtime_artifacts,
         )
 
         log = service._ctx.state_store.get_execution_log(exec_id)
@@ -2468,22 +2484,26 @@ def create_app(
         started = parse_local_timestamp(log.created_at)
         finished = parse_local_timestamp(log.updated_at)
         task = None if log.type == "workflow" else _lookup_task_config(log)
-        runtime_files, notes = select_runtime_artifacts(dl_dir, started, finished)
+        runtime_files, notes = safe_select_runtime_artifacts(dl_dir, started, finished)
         runtime_payload: list[tuple[str, Path]] = []
         for path in runtime_files:
             try:
                 arc = "runtime/" + path.resolve().relative_to(dl_dir.resolve()).as_posix()
             except ValueError:
                 arc = "runtime/" + path.name
+            except Exception as exc:
+                notes.append(f"跳过现场文件 {path.name}：{exc}")
+                continue
             runtime_payload.append((arc, path))
+        app_log_text = safe_read_log_window(
+            Path(service._ctx.settings.log.file_dir) / "app.log",
+            started,
+            finished,
+        )
         build_execution_zip(
             zip_path,
             execution_text=_execution_log_text(log),
-            app_log_text=read_log_window(
-                Path(service._ctx.settings.log.file_dir) / "app.log",
-                started,
-                finished,
-            ),
+            app_log_text=app_log_text,
             summary={
                 "exec_id": log.exec_id,
                 "name": log.name,
@@ -2505,7 +2525,18 @@ def create_app(
     @app.post("/api/execution-logs/{exec_id}/download")
     async def download_execution_log(exec_id: str, req: DownloadLogRequest) -> dict[str, Any]:
         """把这次执行的日志、诊断和失败现场打成一个 zip。"""
-        _log, filepath, filename = await _write_execution_bundle(exec_id, req.download_dir)
+        try:
+            _log, filepath, filename = await _write_execution_bundle(exec_id, req.download_dir)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("执行诊断包写入失败")
+            return {
+                "status": "error",
+                "message": f"诊断包没有生成：{exc}",
+                "path": "",
+                "filename": "",
+            }
         logger.info("执行诊断包已下载: {} ({} bytes)", filepath, filepath.stat().st_size)
         return {"status": "ok", "path": str(filepath), "filename": filename}
 
@@ -2575,44 +2606,94 @@ def create_app(
         """检测外部 USB 和证书，判断多把 UKey 能不能分开。"""
         from spider_gd.infrastructure.network.usb_devices import probe_ukeys
 
-        return await asyncio.to_thread(probe_ukeys)
+        try:
+            report = await asyncio.wait_for(asyncio.to_thread(probe_ukeys), timeout=16)
+        except Exception as exc:
+            logger.warning("UKey 检测失败: {}", exc)
+            return {
+                "devices": [],
+                "ukeys": [],
+                "certificates": [],
+                "distinguishable": False,
+                "summary": f"读取 USB 设备失败：{exc}",
+                "error": str(exc),
+            }
+        return report if isinstance(report, dict) else {
+            "summary": str(report),
+            "error": "检测结果不是对象",
+            "devices": [],
+            "ukeys": [],
+            "certificates": [],
+            "distinguishable": False,
+        }
 
     @app.post("/api/stations/ukey-report/download")
     async def download_ukey_report(req: DownloadLogRequest) -> dict[str, Any]:
         """重新检测 UKey，只把钥匙、证书和绑定关系打成一个 zip。
 
+        设备枚举超时或失败时，把说明写进压缩包并继续。这个接口不因枚举失败返回 500。
+
         Args:
             req: 下载目录。空则写到数据目录下的诊断包文件夹。
 
         Returns:
-            dict[str, Any]: ``path`` 是 zip 的本地路径，``filename`` 是文件名。
+            dict[str, Any]: ``path`` 是 zip 的本地路径。``warning`` 非空表示枚举不完整。
+            文件写不出来时 ``status`` 为 ``error``，``message`` 是原因。
         """
         from spider_gd.gateway.execution_bundle import build_ukey_zip, ukey_binding_rows
-        from spider_gd.infrastructure.network.usb_devices import probe_ukeys, ukey_raw_text
+        from spider_gd.infrastructure.network.usb_devices import gather_ukey_download_parts
 
-        report = await asyncio.to_thread(probe_ukeys)
-        raw = await asyncio.to_thread(ukey_raw_text)
-        data_dir = Path(service._ctx.settings.storage.data_dir)
-        dl_dir = Path(req.download_dir) if req.download_dir else data_dir
-        out_dir = dl_dir / "诊断包"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"ukey_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-        zip_path = out_dir / filename
-        saved = service._ctx.state_store.get_setting("stationProfiles") or ""
-        bindings = ukey_binding_rows(mask_station_profiles(saved))
-        raw_report = report if isinstance(report, dict) else {
-            "summary": str(report),
-            "error": "检测结果不是对象",
-        }
-        build_ukey_zip(
-            zip_path,
-            report=raw_report,
-            raw_usb=str(raw.get("usb") or ""),
-            raw_certificates=str(raw.get("certificates") or ""),
-            bindings=bindings,
-        )
+        try:
+            report, raw, warning = await asyncio.to_thread(gather_ukey_download_parts)
+        except Exception as exc:
+            logger.warning("UKey 诊断采集失败: {}", exc)
+            warning = str(exc)
+            report = {
+                "summary": f"读取 USB 设备失败：{exc}",
+                "error": str(exc),
+                "devices": [],
+                "ukeys": [],
+                "certificates": [],
+                "distinguishable": False,
+            }
+            raw = {"usb": warning, "certificates": warning}
+        try:
+            data_dir = Path(service._ctx.settings.storage.data_dir)
+            dl_dir = Path(req.download_dir) if req.download_dir else data_dir
+            out_dir = dl_dir / "诊断包"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"ukey_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_path = out_dir / filename
+            saved = service._ctx.state_store.get_setting("stationProfiles") or ""
+            bindings = ukey_binding_rows(mask_station_profiles(saved))
+            raw_report = report if isinstance(report, dict) else {
+                "summary": str(report),
+                "error": "检测结果不是对象",
+            }
+            build_ukey_zip(
+                zip_path,
+                report=raw_report,
+                raw_usb=str(raw.get("usb") or ""),
+                raw_certificates=str(raw.get("certificates") or ""),
+                bindings=bindings,
+            )
+        except Exception as exc:
+            logger.exception("UKey 诊断包写入失败")
+            return {
+                "status": "error",
+                "message": f"诊断包没有写成文件：{exc}",
+                "warning": warning,
+                "path": "",
+                "filename": "",
+            }
         logger.info("UKey 诊断包已下载: {} ({} bytes)", zip_path, zip_path.stat().st_size)
-        return {"status": "ok", "path": str(zip_path), "filename": filename}
+        return {
+            "status": "ok",
+            "path": str(zip_path),
+            "filename": filename,
+            "warning": warning,
+            "message": warning,
+        }
 
     @app.post("/api/stations/pick")
     async def pick_login_station(
@@ -3770,7 +3851,7 @@ def create_app(
         _tools = Path(__file__).resolve().parent.parent.parent.parent.parent / "tools"
         if str(_tools) not in _sys.path:
             _sys.path.insert(0, str(_tools))
-        from task_runner import build_catchup_config
+        from task_runner import apply_catchup_storage, build_catchup_config, catchup_download_dir
 
         try:
             cfg = build_catchup_config(
@@ -3786,12 +3867,26 @@ def create_app(
             cfg["auto_upload"] = bool(body.auto_upload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            task_rows = service._ctx.state_store.list_task_configs()
+        except Exception:
+            logger.exception("读取任务配置失败，补数将不沿用任务存储路径")
+            task_rows = []
+        cfg = apply_catchup_storage(
+            cfg,
+            task_rows,
+            path_template=body.path_template,
+            path_folders=body.path_folders,
+            path_structure=body.path_structure,
+            download_dir=body.download_dir,
+            storage_overridden=body.storage_overridden,
+        )
         return await run_task_stream(
             "catchup",
             cert_password=body.cert_password,
             account=body.account,
             account_password=body.account_password,
-            download_dir=body.download_dir,
+            download_dir=catchup_download_dir(cfg),
             headless=body.headless,
             minimized=body.minimized,
             prepared=cfg,

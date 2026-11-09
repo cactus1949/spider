@@ -1,7 +1,8 @@
 """导航语义测试：已在目标页面时不要重载文档。
 
 现场原因：pm.gd.csg.cn 的请求签名与文档实例绑定，重载同一个 URL 等于换一份文档，
-站点可能把新文档踢回登录页，也会让别的标签页的签名失效。因此提供 skip_if_loaded。
+站点可能把新文档踢回登录页，也会让别的标签页的签名失效。因此默认跳过重载，
+只有 ``reload: true`` 或 ``skip_if_loaded: false`` 才强制重载。
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ async def test_navigate_reloads_when_page_differs(tmp_path):
     page.goto.assert_awaited_once()
 
 
-async def test_navigate_without_flag_keeps_old_behaviour(tmp_path):
+async def test_navigate_skips_reload_by_default(tmp_path):
     runner = WorkflowRunner({"name": "默认导航"}, download_dir=str(tmp_path))
     page = _page("https://pm.gd.csg.cn/portal/#/powerEnterprise")
     runner.pages = [page]
@@ -60,6 +61,24 @@ async def test_navigate_without_flag_keeps_old_behaviour(tmp_path):
     await runner._exec_step({
         "action": "navigate",
         "url": "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+    })
+
+    page.goto.assert_not_awaited()
+
+
+@pytest.mark.parametrize("step", [
+    {"reload": True},
+    {"skip_if_loaded": False},
+])
+async def test_navigate_can_still_force_reload(tmp_path, step):
+    runner = WorkflowRunner({"name": "强制重载"}, download_dir=str(tmp_path))
+    page = _page("https://pm.gd.csg.cn/portal/#/powerEnterprise")
+    runner.pages = [page]
+
+    await runner._exec_step({
+        "action": "navigate",
+        "url": "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+        **step,
     })
 
     page.goto.assert_awaited_once()

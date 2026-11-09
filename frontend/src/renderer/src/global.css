@@ -499,6 +499,23 @@ body {
   margin-top: 5px;
 }
 
+.catchup-download {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.catchup-download-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.catchup-step-note {
+  color: #8a9099;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 /* 存储结构 */
 .sp-root {
   display: flex;

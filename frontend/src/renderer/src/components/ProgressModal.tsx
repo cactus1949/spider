@@ -32,6 +32,11 @@ export interface CatchupRun {
   outputDates?: Record<string, string[]>
   uploadProfileId?: string
   autoUpload?: boolean
+  /** 这次补数的下载根目录。空则由后端再用全局设置。 */
+  downloadDir?: string
+  pathTemplate?: string
+  pathFolders?: { name: string; indicators: string[] }[]
+  pathStructure?: string
 }
 
 interface IndicatorRow {
@@ -171,7 +176,13 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               indicator_months: catchup.indicatorMonths,
               output_dates: catchup.outputDates || {},
               upload_profile_id: catchup.uploadProfileId || '',
-              auto_upload: Boolean(catchup.autoUpload)
+              auto_upload: Boolean(catchup.autoUpload),
+              download_dir: catchup.downloadDir || '',
+              path_template: catchup.pathTemplate || '',
+              path_folders: catchup.pathFolders || [],
+              path_structure: catchup.pathStructure || '',
+              // 对话框里看到的路径就是这次要用的，空结构也不再回退到任务
+              storage_overridden: true
             }
           : Object.fromEntries(params)
         const res = await fetch(url, {
