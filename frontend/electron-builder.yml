@@ -33,6 +33,7 @@ nsis:
   shortcutName: 广东电力数据采集
   # 用户数据在 Electron userData（%APPDATA%），卸载安装目录时不能删。
   deleteAppDataOnUninstall: false
+  # installer.nsh：旧卸载失败或进程结束不掉时，仍覆盖程序文件。
   include: resources/installer.nsh
 publish:
   provider: generic
