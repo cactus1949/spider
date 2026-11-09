@@ -111,6 +111,10 @@ export default function ExecutionLogs(): JSX.Element {
     setDownloading(execId)
     try {
       const res = await api.downloadExecutionLog(execId, dlDir)
+      if (res.status === 'error') {
+        message.error(res.message || '诊断包没有生成')
+        return
+      }
       message.success(`诊断包已保存: ${res.filename}`)
       // 打开下载目录
       if (res.path) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import zipfile
 
 import pytest
 
@@ -89,10 +90,78 @@ def test_station_profile_keeps_selected_device_id():
 def test_usb_text_timeout_is_a_message(monkeypatch):
     import spider_gd.infrastructure.network.usb_devices as usb
 
-    def boom(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd=["powershell"], timeout=20)
+    def boom(cmd, timeout=20, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(usb, "run_capture", boom)
     monkeypatch.setattr(usb.sys, "platform", "win32")
     text = usb._capture_usb_text()
-    assert text == "读取 USB 设备超时（20 秒）。"
+    assert "超时" in text
+    assert "Get-CimInstance" in text
+    assert "Get-PnpDevice" in text
+    assert "Get-PnpDeviceProperty" not in text
+
+
+@pytest.mark.unit
+def test_successful_fast_probe_does_not_call_get_pnpdevice(monkeypatch):
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    calls: list[str] = []
+
+    def fake(cmd, timeout=20, **_kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "pnputil":
+            return subprocess.CompletedProcess(cmd, 0, "Instance ID: USB\\VID_096E&PID_0317\\A", "")
+        payload = '[{"Name":"钥匙","DeviceID":"USB\\\\VID_096E&PID_0317\\\\A"}]'
+        return subprocess.CompletedProcess(cmd, 0, payload, "")
+
+    monkeypatch.setattr(usb, "run_capture", fake)
+    monkeypatch.setattr(usb.sys, "platform", "win32")
+    text = usb._capture_usb_text()
+    assert "Get-CimInstance" in text
+    assert "pnputil" in calls
+    assert "Get-PnpDevice" not in text
+
+
+@pytest.mark.unit
+def test_gather_still_builds_zip_when_probes_time_out(monkeypatch, tmp_path):
+    import spider_gd.infrastructure.network.usb_devices as usb
+    from spider_gd.gateway.execution_bundle import build_ukey_zip
+
+    def broken_probe():
+        raise subprocess.TimeoutExpired(cmd=["powershell", "Get-PnpDevice"], timeout=20)
+
+    def broken_raw():
+        raise RuntimeError("Get-PnpDevice timed out after 20 seconds")
+
+    monkeypatch.setattr(usb, "probe_ukeys", broken_probe)
+    monkeypatch.setattr(usb, "ukey_raw_text", broken_raw)
+    report, raw, warning = usb.gather_ukey_download_parts()
+    assert "timed out" in str(report["error"]).lower() or "Timeout" in str(report["error"])
+    assert warning
+    dest = tmp_path / "ukey.zip"
+    build_ukey_zip(
+        dest,
+        report=report,
+        raw_usb=str(raw["usb"]),
+        raw_certificates=str(raw["certificates"]),
+        bindings=[],
+    )
+    assert dest.is_file()
+    with zipfile.ZipFile(dest) as archive:
+        packed = archive.read("raw_usb.txt").decode("utf-8")
+        summary = archive.read("summary.txt").decode("utf-8")
+    assert "20" in packed or "timed out" in packed.lower() or "Timeout" in summary
+
+
+@pytest.mark.unit
+def test_probe_exception_is_a_report_not_a_crash(monkeypatch):
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    def boom():
+        raise RuntimeError("枚举失败")
+
+    monkeypatch.setattr(usb, "list_usb_devices", boom)
+    report = usb.probe_ukeys()
+    assert report["devices"] == []
+    assert "枚举失败" in str(report["error"])

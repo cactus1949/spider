@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from spider_gd.gateway.execution_bundle import (
     build_execution_zip,
+    safe_read_log_window,
     select_runtime_artifacts,
 )
 
@@ -71,3 +73,19 @@ def test_priority_files_are_kept_outside_the_run_window(tmp_path: Path):
     files, _notes = select_runtime_artifacts(tmp_path, start, start)
     assert task.resolve() in {path.resolve() for path in files}
     assert old < start
+
+
+@pytest.mark.unit
+def test_safe_select_records_timeout_instead_of_raising(monkeypatch, tmp_path: Path):
+    import spider_gd.gateway.execution_bundle as bundle
+
+    def boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["Get-PnpDevice"], timeout=20)
+
+    monkeypatch.setattr(bundle, "select_runtime_artifacts", boom)
+    files, notes = bundle.safe_select_runtime_artifacts(tmp_path, None, None)
+    assert files == []
+    assert any("20" in note or "timed out" in note.lower() for note in notes)
+    moment = datetime(2026, 11, 9, 10, 0, 0)
+    text = safe_read_log_window(tmp_path / "missing.log", moment, moment)
+    assert "不存在" in text

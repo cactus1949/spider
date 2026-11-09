@@ -353,6 +353,59 @@ def _redact_runtime_bytes(arcname: str, path: Path) -> str | Path:
         return path
 
 
+def safe_select_runtime_artifacts(
+    root: Path,
+    start: datetime | None,
+    end: datetime | None,
+) -> tuple[list[Path], list[str]]:
+    """挑选现场文件。挑选过程出错时返回说明，不抛异常。
+
+    Args:
+        root: 下载根目录。
+        start: 执行开始。
+        end: 执行结束。
+
+    Returns:
+        tuple[list[Path], list[str]]: 文件和说明。失败时文件为空，说明里有原因。
+
+    Examples:
+        >>> missing = Path("/no/such/spider-gd-safe-downloads")
+        >>> files, notes = safe_select_runtime_artifacts(missing, None, None)
+        >>> files == [] and notes[0].startswith("下载目录不存在")
+        True
+    """
+    try:
+        return select_runtime_artifacts(root, start, end)
+    except Exception as exc:
+        return [], [f"挑选现场文件失败：{exc}"]
+
+
+def safe_read_log_window(
+    path: Path,
+    start: datetime | None,
+    end: datetime | None,
+) -> str:
+    """读取日志时间窗。读失败时返回说明，不抛异常。
+
+    Args:
+        path: ``app.log`` 路径。
+        start: 执行开始。
+        end: 执行结束。
+
+    Returns:
+        str: 日志原文，或失败说明。
+
+    Examples:
+        >>> start = datetime(2026, 11, 9, 10, 0, 0)
+        >>> "不存在" in safe_read_log_window(Path("/no/such/spider-gd-safe-log"), start, start)
+        True
+    """
+    try:
+        return read_log_window(path, start, end)
+    except Exception as exc:
+        return f"读取 app.log 失败：{exc}"
+
+
 def select_runtime_artifacts(
     root: Path,
     start: datetime | None,
