@@ -1,20 +1,26 @@
 """构建脚本：用 PyInstaller 将采集后端编译为独立 exe，输出到 frontend/resources/backend/。
 
-用法：
-    python build_backend.py              # 仅编译
-    python build_backend.py --with-browsers  # 编译 + 打包 Playwright Chromium
+用法（必须在要发布的那个 Windows 里、用 x64 Python 运行）：
+    python build_backend.py                 # 编译。会先用当前解释器安装 .[online,win]
+    python build_backend.py --with-browsers # 编译 + 打包 Playwright Chromium
+    python build_backend.py --allow-arm64   # 仅当目标机器也是 Windows ARM64 时使用
 
 注意：
     PyInstaller 不能跨平台编译。在 macOS 上编译的输出只能在 macOS 运行。
     要发布 Windows 版，需要在 Windows 机器上运行此脚本。
-    Windows 下请先：pip install pyinstaller && pip install -e .[online]
+    Mac 上的 Parallels / UTM 若装的是 Windows ARM64，默认 Python 往往也是 ARM64，
+    打出来的 exe 无法在现场的 x64 Windows 上运行。请安装 python.org 的
+    Windows installer (64-bit)，不要选 ARM64，并用那个解释器运行本脚本。
+    脚本会用 ``sys.executable -m pip`` 把 WMI 和 pywin32 装进同一个解释器。
+    漏装或装错解释器时，冻结后的 U-Key 健康检查会报「WMI 未安装」。
 
 前置：
-    pip install pyinstaller
-    pip install -e .[online]    # 安装项目依赖（含 web 模块）
+    python -m pip install pyinstaller
 """
 
+import contextlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -87,6 +93,291 @@ HIDDEN_IMPORTS = [
     "ddddocr",
 ]
 
+# wmi 在函数里延迟导入，PyInstaller 静态分析看不到。
+# pywin32 还要带上 pythoncom / pywintypes 的 DLL，否则冻结进程 import wmi 会失败。
+WMI_HIDDEN_IMPORTS = [
+    "wmi",
+    "win32com",
+    "win32com.client",
+    "win32com.client.dynamic",
+    "win32com.client.gencache",
+    "pythoncom",
+    "pywintypes",
+    "win32api",
+    "win32timezone",
+]
+_WMI_PROBE = "import wmi, win32com.client, pythoncom, pywintypes"
+_ARM64_MACHINES = {"arm64", "aarch64"}
+
+
+def windows_wmi_pyinstaller_args(*, is_win: bool, dlls: list[Path] | None = None) -> list[str]:
+    """生成让冻结包带上 WMI / pywin32 的 PyInstaller 参数。
+
+    Args:
+        is_win: 当前是不是 Windows。其他系统不要加这些参数，否则会去找不存在的模块。
+        dlls: ``pythoncom`` / ``pywintypes`` 的 DLL。放进包根目录，供冻结进程加载。
+
+    Returns:
+        list[str]: 追加到 PyInstaller 命令后面的参数。非 Windows 时为空。
+
+    Examples:
+        >>> args = windows_wmi_pyinstaller_args(is_win=True, dlls=[])
+        >>> "wmi" in args and "pythoncom" in args and "pywintypes" in args
+        True
+        >>> windows_wmi_pyinstaller_args(is_win=False)
+        []
+    """
+    if not is_win:
+        return []
+    args: list[str] = []
+    for mod in WMI_HIDDEN_IMPORTS:
+        args += ["--hidden-import", mod]
+    args += ["--collect-submodules", "win32com"]
+    args += ["--collect-binaries", "win32"]
+    for dll in dlls or []:
+        args += ["--add-binary", f"{dll}{os.pathsep}."]
+    return args
+
+
+def pywin32_dlls(search_roots: list[Path]) -> list[Path]:
+    """在 site-packages 里找出 pywin32 运行时 DLL。
+
+    Args:
+        search_roots: 要查看的目录，通常是 site-packages 和 ``pywin32_system32``。
+
+    Returns:
+        list[Path]: ``pythoncom*.dll`` 与 ``pywintypes*.dll``，同名只留一份。
+
+    Examples:
+        >>> pywin32_dlls([])
+        []
+    """
+    found: list[Path] = []
+    seen: set[str] = set()
+    folders: list[Path] = []
+    for root in search_roots:
+        folders.append(root)
+        folders.append(root / "pywin32_system32")
+        folders.append(root / "win32")
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for dll in folder.glob("*.dll"):
+            name = dll.name.lower()
+            if name in seen:
+                continue
+            if name.startswith(("pythoncom", "pywintypes")):
+                seen.add(name)
+                found.append(dll)
+        for binary in folder.glob("*.pyd"):
+            name = binary.name.lower()
+            if name in seen:
+                continue
+            if name.startswith(("pythoncom", "pywintypes")):
+                seen.add(name)
+                found.append(binary)
+    return found
+
+
+def is_arm64_python(arch: str | None = None) -> bool:
+    """判断这个解释器是不是 Windows ARM64 / aarch64。
+
+    x64 Python 跑在 ARM 虚拟机的仿真层上时，``platform.machine()`` 仍是 AMD64。
+    那种情况可以给现场的 x64 电脑出包。
+
+    Args:
+        arch: ``platform.machine()`` 的结果。空则读取当前解释器。
+
+    Returns:
+        bool: 架构名是 ``ARM64`` 或 ``aarch64`` 时为 True。
+
+    Examples:
+        >>> is_arm64_python("ARM64")
+        True
+        >>> is_arm64_python("AMD64")
+        False
+    """
+    machine = platform.machine() if arch is None else arch
+    return machine.lower() in _ARM64_MACHINES
+
+
+def arm64_windows_python_hint(arch: str) -> str:
+    """说明为什么 Mac 上的 Windows 虚拟机必须用 x64 Python 打包。
+
+    Args:
+        arch: 当前解释器报告的 CPU 架构。
+
+    Returns:
+        str: 给构建日志和退出信息看的中文说明。
+
+    Examples:
+        >>> "x64" in arm64_windows_python_hint("ARM64")
+        True
+    """
+    return (
+        f"当前 Python 是 {arch}。在 Apple Silicon 的 Parallels / UTM 里，"
+        "Windows 经常是 ARM64，打出来的 spider-gd-service.exe 也是 ARM64，"
+        "不能在现场的 x64 Windows 上运行。\n"
+        "请改用 x64 Python：\n"
+        "  1. 打开 https://www.python.org/downloads/windows/\n"
+        "  2. 下载 Windows installer (64-bit)，不要选 ARM64\n"
+        "  3. 用那个 python.exe 运行 build_backend.py\n"
+        "  4. 自检：python -c \"import platform; print(platform.machine())\"\n"
+        "     应打印 AMD64。\n"
+        "pywin32 312 起才有 win_arm64 wheel。只有目标电脑也是 Windows ARM64 时，"
+        "才加 --allow-arm64。"
+    )
+
+
+def win_extra_install_command(python: str) -> list[str]:
+    """构造安装命令，解释器必须和即将运行的 PyInstaller 是同一个。
+
+    Args:
+        python: ``sys.executable``。不要用 PATH 里随便一个 pip。
+
+    Returns:
+        list[str]: ``python -m pip install -e .[online,win]``。
+
+    Examples:
+        >>> cmd = win_extra_install_command(r"C:\\Python312\\python.exe")
+        >>> cmd[:3] == [r"C:\\Python312\\python.exe", "-m", "pip"]
+        True
+        >>> cmd[-1]
+        '.[online,win]'
+    """
+    return [python, "-m", "pip", "install", "-e", ".[online,win]"]
+
+
+def wmi_import_failure_message(detail: str, *, arch: str, python: str) -> str:
+    """把 WMI 导入失败写成会让打包中止的说明。
+
+    Args:
+        detail: ``python -c "import wmi..."`` 的标准错误。
+        arch: 当前解释器架构。
+        python: 实际用来打包的解释器路径。
+
+    Returns:
+        str: 多行中文错误。
+
+    Examples:
+        >>> text = wmi_import_failure_message("No module named wmi", arch="AMD64", python="py")
+        >>> "import wmi" in text
+        True
+    """
+    lines = [
+        "当前解释器无法 import wmi / win32com.client。",
+        "PyInstaller 只会打包这个解释器里已经装好的模块，冻结后的 U-Key 检查会报「WMI 未安装」。",
+        f"解释器: {python}",
+        f"架构: {arch}",
+        detail,
+    ]
+    if is_arm64_python(arch):
+        lines.append(arm64_windows_python_hint(arch))
+    return "\n".join(line for line in lines if line)
+
+
+def probe_wmi_import(python: str) -> str:
+    """在指定解释器里试着导入 WMI 和 pywin32。
+
+    Args:
+        python: 解释器路径。
+
+    Returns:
+        str: 成功时为空字符串；失败时是解释器的错误输出。
+
+    Examples:
+        >>> callable(probe_wmi_import)
+        True
+    """
+    probe = subprocess.run(
+        [python, "-c", _WMI_PROBE],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode == 0:
+        return ""
+    return (probe.stderr or probe.stdout or b"").decode("utf-8", errors="replace").strip()
+
+
+def ensure_windows_wmi(*, allow_arm64: bool) -> None:
+    """把 WMI / pywin32 装进当前解释器，导入失败则中止打包。
+
+    Args:
+        allow_arm64: 为 True 时允许用 ARM64 Python 继续。默认拒绝，避免把
+            ARM64 exe 发给 x64 现场机。
+
+    Returns:
+        None: 依赖可用时直接返回。
+
+    Raises:
+        SystemExit: 架构不对、pip 安装失败，或安装后仍不能导入。
+
+    Examples:
+        >>> callable(ensure_windows_wmi)
+        True
+    """
+    arch = platform.machine()
+    python = sys.executable
+    print(f"解释器: {python}")
+    print(f"架构: {arch}")
+    if is_arm64_python(arch) and not allow_arm64:
+        raise SystemExit(arm64_windows_python_hint(arch))
+    if is_arm64_python(arch):
+        print("[warn] 已指定 --allow-arm64，产物只能在 Windows ARM64 上运行。")
+    print("=== 安装 WMI / pywin32 到当前解释器 ===")
+    try:
+        subprocess.run(win_extra_install_command(python), check=True, cwd=str(ROOT))
+    except subprocess.CalledProcessError as exc:
+        hint = arm64_windows_python_hint(arch) if is_arm64_python(arch) else ""
+        raise SystemExit(
+            "无法把 .[online,win] 装进当前解释器。\n"
+            f"命令: {python} -m pip install -e \".[online,win]\"\n"
+            f"{hint}"
+        ) from exc
+    detail = probe_wmi_import(python)
+    if detail:
+        raise SystemExit(wmi_import_failure_message(detail, arch=arch, python=python))
+    binaries = pywin32_dlls(_pywin32_search_roots())
+    if binaries:
+        names = ", ".join(path.name for path in binaries)
+        print(f"pywin32 运行库: {names}")
+    else:
+        print(
+            "[warn] 没找到 pythoncom / pywintypes 的 DLL 或 PYD。"
+            "冻结后若仍报 WMI 未安装，请确认 pywin32 装在上面这个解释器里。"
+        )
+
+
+def _pywin32_search_roots() -> list[Path]:
+    """列出当前解释器可能放 pywin32 DLL 的目录。
+
+    Returns:
+        list[Path]: site-packages，以及 ``pywintypes`` / ``win32com`` 所在目录。
+
+    Examples:
+        >>> isinstance(_pywin32_search_roots(), list)
+        True
+    """
+    import site
+
+    roots: list[Path] = []
+    with contextlib.suppress(OSError):
+        roots.extend(Path(item) for item in site.getsitepackages())
+    user_site = ""
+    with contextlib.suppress(OSError):
+        user_site = site.getusersitepackages()
+    if user_site:
+        roots.append(Path(user_site))
+    for module_name in ("pywintypes", "pythoncom", "win32com"):
+        try:
+            module = __import__(module_name)
+        except Exception:
+            continue
+        file_name = getattr(module, "__file__", "") or ""
+        if file_name:
+            roots.append(Path(file_name).resolve().parent)
+    return roots
+
 
 def clean_build() -> None:
     """清理上次构建产物，避免 PyInstaller 缓存问题。"""
@@ -121,6 +412,9 @@ def run_pyinstaller() -> None:
 
     for mod in HIDDEN_IMPORTS:
         cmd += ["--hidden-import", mod]
+
+    if IS_WIN:
+        cmd += windows_wmi_pyinstaller_args(is_win=True, dlls=pywin32_dlls(_pywin32_search_roots()))
 
     # curl_cffi 可选：TLS 指纹伪装（JA3/JA4 绕过）
     try:
@@ -215,10 +509,13 @@ def copy_browsers() -> None:
 
 def main() -> None:
     with_browsers = "--with-browsers" in sys.argv
+    allow_arm64 = "--allow-arm64" in sys.argv
 
     print("=== 检查依赖 ===")
     subprocess.run([sys.executable, "-c", "import PyInstaller"], check=True)
     subprocess.run([sys.executable, "-c", "import uvicorn; import fastapi"], check=False)
+    if IS_WIN:
+        ensure_windows_wmi(allow_arm64=allow_arm64)
     print("  OK")
 
     run_pyinstaller()

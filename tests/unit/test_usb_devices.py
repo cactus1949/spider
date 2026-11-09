@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -82,3 +83,16 @@ def test_station_profile_keeps_selected_device_id():
     profile = parse_station_profiles(raw)[0]
     assert profile.device_id == "USB\\VID_096E\\SN1"
     assert profile.wifi_password == "wifi"
+
+
+@pytest.mark.unit
+def test_usb_text_timeout_is_a_message(monkeypatch):
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    def boom(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["powershell"], timeout=20)
+
+    monkeypatch.setattr(usb, "run_capture", boom)
+    monkeypatch.setattr(usb.sys, "platform", "win32")
+    text = usb._capture_usb_text()
+    assert text == "读取 USB 设备超时（20 秒）。"

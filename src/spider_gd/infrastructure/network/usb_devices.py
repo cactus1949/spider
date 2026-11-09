@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -185,10 +186,13 @@ def _list_windows() -> list[UsbDevice]:
         "Class = $_.Class; Parent = $parent } "
         "} | ConvertTo-Json -Compress"
     )
-    result = run_capture(
-        ["powershell", "-NoProfile", "-Command", script],
-        timeout=20,
-    )
+    try:
+        result = run_capture(
+            ["powershell", "-NoProfile", "-Command", script],
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("读取 USB 设备超时（20 秒）") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip() or f"退出码 {result.returncode}"
         raise RuntimeError(f"读取 USB 设备失败：{detail}")
@@ -236,21 +240,23 @@ def ukey_raw_text() -> dict[str, str]:
 def _capture_usb_text() -> str:
     """执行当前系统的 USB 列举命令并返回原文。
 
+    Windows 上不再逐台查父设备。那一步在现场会把 ``Get-PnpDevice`` 拖过 20 秒，
+    诊断包接口因此返回 HTTP 500。超时改成说明文字，调用方仍能打出压缩包。
+
     Returns:
-        str: 标准输出。失败时附上退出码和错误输出。
+        str: 标准输出。失败或超时时附上原因，不抛异常。
+
+    Examples:
+        >>> callable(_capture_usb_text)
+        True
     """
     if sys.platform == "win32":
         command = [
             "powershell", "-NoProfile", "-Command",
             "Get-PnpDevice -PresentOnly | "
-            "Where-Object { $_.InstanceId -match '^(USB|HID|USBSTOR)\\\\' } | "
-            "ForEach-Object { "
-            "$parent = ''; "
-            "try { $parent = [string](Get-PnpDeviceProperty -InstanceId $_.InstanceId "
-            "-KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data } catch {} "
-            "[PSCustomObject]@{ FriendlyName = $_.FriendlyName; InstanceId = $_.InstanceId; "
-            "Class = $_.Class; Parent = $parent } "
-            "} | ConvertTo-Json -Compress",
+            "Where-Object { $_.InstanceId -match 'VID_' } | "
+            "Select-Object FriendlyName, InstanceId, Class, Status, Problem | "
+            "ConvertTo-Json -Compress -Depth 3",
         ]
         timeout = 20
     elif sys.platform == "darwin":
@@ -258,7 +264,10 @@ def _capture_usb_text() -> str:
         timeout = 25
     else:
         return "当前系统没有 USB 列举命令。"
-    result = run_capture(command, timeout=timeout)
+    try:
+        result = run_capture(command, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"读取 USB 设备超时（{timeout} 秒）。"
     text = result.stdout or ""
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
@@ -283,7 +292,10 @@ def _capture_certificate_text() -> str:
         "NotAfter = $_.NotAfter.ToString('yyyy-MM-dd'); Thumbprint = $_.Thumbprint } } | "
         "ConvertTo-Json -Compress"
     )
-    result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    try:
+        result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    except subprocess.TimeoutExpired:
+        return "读取证书库超时（20 秒）。"
     text = result.stdout or ""
     if result.returncode != 0:
         detail = (result.stderr or "").strip()
@@ -646,7 +658,10 @@ def _list_certificates() -> list[dict[str, str]]:
         "NotAfter = $_.NotAfter.ToString('yyyy-MM-dd'); Thumbprint = $_.Thumbprint } } | "
         "ConvertTo-Json -Compress"
     )
-    result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    try:
+        result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
+    except subprocess.TimeoutExpired:
+        return []
     if result.returncode != 0 or not result.stdout.strip():
         return []
     try:

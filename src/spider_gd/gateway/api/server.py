@@ -2419,7 +2419,11 @@ def create_app(
         from spider_gd.infrastructure.network.usb_devices import probe_ukeys, ukey_raw_text
 
         report = await asyncio.to_thread(probe_ukeys)
-        raw = await asyncio.to_thread(ukey_raw_text)
+        try:
+            raw = await asyncio.to_thread(ukey_raw_text)
+        except Exception as exc:
+            logger.warning("UKey 原文采集失败: {}", exc)
+            raw = {"usb": f"读取 USB 原文失败：{exc}", "certificates": ""}
         data_dir = Path(service._ctx.settings.storage.data_dir)
         dl_dir = Path(req.download_dir) if req.download_dir else data_dir
         out_dir = dl_dir / "诊断包"

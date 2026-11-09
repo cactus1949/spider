@@ -28,6 +28,10 @@ __all__ = [
 _SECRET_VALUE = re.compile(
     r"(?i)((?:password|passwd|token|secret|sendkey|openid|cookie)\s*[:=]\s*)(\S+)"
 )
+_SECRET_JSON = re.compile(
+    r'(?i)("(?:password|passwd|token|secret|sendkey|openid|cookie)"\s*:\s*")([^"]*)(")'
+)
+_PRIORITY_DIR_NAMES = {"tasks", "execution_logs"}
 _DIAG_DIR_NAMES = {"_failures", "_diagnostics"}
 _ARTIFACT_SUFFIXES = {".log", ".txt", ".json", ".jsonl", ".png", ".yml", ".yaml", ".html"}
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", "执行日志", "诊断包"}
@@ -55,8 +59,11 @@ def redact_secrets(text: str) -> str:
         'password: ***'
         >>> redact_secrets("name: 交易日历")
         'name: 交易日历'
+        >>> redact_secrets('{"password": "hunter2"}')
+        '{"password": "***"}'
     """
-    return _SECRET_VALUE.sub(r"\1***", text)
+    redacted = _SECRET_VALUE.sub(r"\1***", text)
+    return _SECRET_JSON.sub(r"\1***\3", redacted)
 
 
 def parse_local_timestamp(value: str) -> datetime | None:
@@ -256,6 +263,96 @@ def _diagnostic_dirs(root: Path) -> list[Path]:
     return found
 
 
+def _is_priority_artifact(path: Path, root: Path) -> bool:
+    """判断这个文件是不是诊断包超额时要优先留下的配置。
+
+    Args:
+        path: 候选文件。
+        root: 下载根目录或数据目录。
+
+    Returns:
+        bool: ``tasks/``、``execution_logs/`` 或 ``env.json`` 时为 True。
+
+    Examples:
+        >>> from pathlib import Path
+        >>> _is_priority_artifact(Path("/tmp/app/tasks/a.yml"), Path("/tmp/app"))
+        True
+        >>> _is_priority_artifact(Path("/tmp/app/_failures/a.png"), Path("/tmp/app"))
+        False
+    """
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        rel = path
+    if path.name.lower() == "env.json":
+        return True
+    return any(part.lower() in _PRIORITY_DIR_NAMES for part in rel.parts)
+
+
+def _collect_priority_artifacts(root: Path) -> list[Path]:
+    """收集任务配置、环境文件和执行日志，不受失败现场时间窗限制。
+
+    Args:
+        root: 下载根目录或数据目录。
+
+    Returns:
+        list[Path]: 存在的优先文件，按路径排序。
+
+    Examples:
+        >>> _collect_priority_artifacts(Path("/no/such/spider-gd-priority"))
+        []
+    """
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    env_file = root / "env.json"
+    if env_file.is_file():
+        found.append(env_file)
+    for name in ("tasks", "execution_logs"):
+        folder = root / name
+        if not folder.is_dir():
+            continue
+        try:
+            entries = list(folder.rglob("*"))
+        except OSError:
+            continue
+        for path in entries:
+            if not path.is_file() or path.suffix.lower() not in _ARTIFACT_SUFFIXES:
+                continue
+            found.append(path)
+    return sorted(found)
+
+
+def _redact_runtime_bytes(arcname: str, path: Path) -> str | Path:
+    """优先文件里的口令打码后再放进压缩包。
+
+    Args:
+        arcname: 包内路径。
+        path: 本地文件。
+
+    Returns:
+        str | Path: 文本配置返回打码后的字符串，其它文件仍返回路径。
+
+    Examples:
+        >>> _redact_runtime_bytes("runtime/shot.png", Path("shot.png")) == Path("shot.png")
+        True
+    """
+    lowered = arcname.replace("\\", "/").lower()
+    base = lowered.rsplit("/", 1)[-1]
+    priority = (
+        base == "env.json"
+        or "/tasks/" in f"/{lowered}/"
+        or "/execution_logs/" in f"/{lowered}/"
+    )
+    text_suffixes = {".json", ".jsonl", ".yml", ".yaml", ".txt", ".log", ".html"}
+    if not priority or path.suffix.lower() not in text_suffixes:
+        return path
+    try:
+        return redact_secrets(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return path
+
+
 def select_runtime_artifacts(
     root: Path,
     start: datetime | None,
@@ -264,6 +361,7 @@ def select_runtime_artifacts(
     """挑选这次执行附近的失败截图和诊断文件。
 
     时间窗里没有文件时，改附最近的一小批，避免时钟对不上就什么都没有。
+    ``tasks/``、``env.json``、``execution_logs/`` 不受时间窗限制，文件数到达上限时优先留下。
     单个文件和总大小都有上限，超出的只在说明里记名字。
 
     Args:
@@ -310,10 +408,14 @@ def select_runtime_artifacts(
         chosen = [path for _mtime, path in newest][:_FALLBACK_FILES]
         if chosen:
             notes.append("这次执行的时间范围内没有诊断文件，已附上最近的失败现场文件。")
-    chosen.sort()
+    priority = _collect_priority_artifacts(root)
+    priority_ids = {path.resolve() for path in priority}
+    rest = [path for path in chosen if path.resolve() not in priority_ids]
+    rest.sort()
+    ordered = priority + rest
     selected: list[Path] = []
     total = 0
-    for path in chosen:
+    for path in ordered:
         if len(selected) >= _MAX_FILES:
             notes.append(f"已达到 { _MAX_FILES } 个现场文件上限，其余未打包。")
             break
@@ -436,7 +538,7 @@ def build_execution_zip(
     runtime_notes = list(notes or [])
     for arcname, path in runtime_files or []:
         if path.is_file():
-            payload.append((arcname, path))
+            payload.append((arcname, _redact_runtime_bytes(arcname, path)))
             packed.append(arcname)
         else:
             runtime_notes.append(f"现场文件已消失，未打包: {arcname}")
