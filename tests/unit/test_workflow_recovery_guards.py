@@ -441,10 +441,37 @@ async def test_export_pauses_while_query_is_inflight(tmp_path):
         return False
 
     runner._wait_continue = wait
-    with pytest.raises(WorkflowPaused, match="在途"):
+    with pytest.raises(WorkflowPaused, match="getJddjTree") as caught:
         await runner._do_export({"selector": "#export", "timeout": 50})
+    assert "在途" in str(caught.value)
     assert calls["n"] == 1
     assert page.clicks == []
+
+
+async def test_other_tab_query_and_http0_do_not_block_export(tmp_path):
+    from types import SimpleNamespace
+
+    page = _Tab("https://pm.gd.csg.cn/pfjs/stc/daily")
+    other = _Tab("https://pm.gd.csg.cn/pfxh/stc/index")
+    runner = WorkflowRunner({"name": "导出等待", "steps": []}, download_dir=str(tmp_path))
+    runner.pages = [page, other]
+    query = _Query()
+    query.frame = SimpleNamespace(page=other)
+    runner._inflight.add(query)
+    runner._page_errors.append({
+        "status": 0,
+        "url": (
+            "https://pm.gd.csg.cn/pfxh/qctc-pm-trade-market-out-plzx/"
+            "DaMarkjsc/homeXhMarketAllInfo"
+        ),
+        "resource_type": "xhr",
+        "page_url": other.url,
+        "_page": other,
+    })
+
+    await runner._pause_until_export_ready()
+
+    assert query in runner._inflight
 
 
 @pytest.mark.parametrize(('content_type', 'body', 'recoverable'), [

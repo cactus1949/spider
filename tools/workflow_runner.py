@@ -1941,9 +1941,22 @@ class WorkflowRunner:
     async def _do_navigate(self, step: dict) -> None:
         """导航到指定 URL。如果 expect=new_tab，在新标签页打开。
 
-        `skip_if_loaded: true` 时，若当前文档已经在这个 URL 上就完全不动它。
-        现场原因：pm.gd.csg.cn 的请求签名和“文档实例”绑定，重新加载同一个 URL
-        会换掉签名，站点可能把新文档踢回登录页。已经登录且在目标页时重载有害无益。
+        当前文档已经在目标 URL 上时默认不重载。pm.gd.csg.cn 的请求签名和文档实例绑定，
+        重载同一地址会换掉签名，新文档可能暂时或一直没有「现货交易」等入口。
+        ``reload: true`` 或 ``skip_if_loaded: false`` 才强制重载。
+
+        Args:
+            step (dict): 步骤。``url`` 为目标地址；``expect`` 为 ``new_tab`` 时新开标签。
+
+        Returns:
+            None: 导航或确认已在目标页后返回。
+
+        Examples:
+            >>> WorkflowRunner._same_document_url(
+            ...     "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+            ...     "https://pm.gd.csg.cn/portal#/powerEnterprise",
+            ... )
+            True
         """
         url = step.get("url", "")
         expect = step.get("expect", "")
@@ -1960,7 +1973,8 @@ class WorkflowRunner:
             current = ""
             with contextlib.suppress(Exception):
                 current = self.page.url
-            if step.get("skip_if_loaded", False) and self._same_document_url(current, url):
+            reload = bool(step.get("reload")) or step.get("skip_if_loaded") is False
+            if not reload and self._same_document_url(current, url):
                 logger.info("  已在目标页面，跳过导航（避免重载换掉请求签名）: {}", current)
             else:
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
@@ -1985,21 +1999,61 @@ class WorkflowRunner:
             right.scheme, right.netloc, right.path.rstrip("/"), right.query, right.fragment
         )
 
+    @staticmethod
+    def _describe_same_url_tabs(count: int) -> str:
+        """地址与绑定页完全相同的其他标签，不能再只报同一个 URL。
+
+        Args:
+            count (int): 同域且地址与绑定页相同的未绑定标签数量。
+
+        Returns:
+            str: 拼进点击失败原因的句子。数量小于 1 时为空字符串。
+
+        Examples:
+            >>> "另一份文档" in WorkflowRunner._describe_same_url_tabs(2)
+            True
+            >>> WorkflowRunner._describe_same_url_tabs(0)
+            ''
+        """
+        if count < 1:
+            return ""
+        return (
+            f"。同域另有 {count} 个标签，地址与绑定页完全相同，是另一份文档，不是同一个标签。"
+            "请在专用浏览器顶部改选已经显示出目标元素的那一个，等它变成当前绑定页后再执行；"
+            "地址相同也不会让这一步自动改去点它"
+        )
+
     def _click_miss_message(self, selector: str) -> str:
-        """目标不在当前绑定页时，把同域未绑定标签的地址写进失败原因。
+        """目标不在当前绑定页时，把同域未绑定标签写进失败原因。
 
         单步从当前绑定页开始，不会改去点另一个标签。空闲时绑定页跟随专用浏览器正在显示的标签。
-        只说「目标未出现」会让人以为选择器写错；现场常见的是菜单在现货标签里。
+        地址相同的标签单独说明，避免「绑定页和未绑定页是同一个链接」这种互相矛盾的提示。
+
+        Args:
+            selector (str): 未点到的选择器。
+
+        Returns:
+            str: 给界面和日志的失败原因。
+
+        Examples:
+            >>> WorkflowRunner._describe_same_url_tabs(1).startswith("。同域另有 1 个标签")
+            True
         """
         message = f"点击目标未出现或不可操作: {selector}"
         bound = self._page_url(self.page)
         if isinstance(bound, str) and bound:
             message += f"。这一步打在绑定页 {bound} 上"
+        same_url = 0
         others = []
         for page in self._same_origin_stale_tabs(exclude={self.page}):
             url = self._page_url(page)
-            if isinstance(url, str) and url:
+            if not isinstance(url, str) or not url:
+                continue
+            if self._same_document_url(url, bound):
+                same_url += 1
+            else:
                 others.append(url[:120])
+        message += self._describe_same_url_tabs(same_url)
         if not others:
             return message
         return (
@@ -2730,13 +2784,53 @@ class WorkflowRunner:
         self._emit("storage_reset", origin=origin, types=storage_types,
                    keys=cleared_keys[:20], reload=bool(step.get("reload", True)))
 
+    def _request_owner_page(self, request):
+        """请求是从哪个页面发出的。
+
+        Args:
+            request: Playwright 请求，或测试用的同等对象。
+
+        Returns:
+            Any: 所属页面。没有 frame、页面已分离时为 None。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._request_owner_page(object()) is None
+            True
+        """
+        try:
+            frame = getattr(request, "frame", None)
+            if frame is None:
+                return None
+            return getattr(frame, "page", None)
+        except Exception:
+            return None
+
     def _inflight_query_requests(self) -> list:
-        """仍在途的同源 xhr/fetch。静态资源不算查询。"""
-        page_url = self._page_url(self.page) if self.page else ""
+        """当前绑定页上仍在途的 xhr/fetch。
+
+        别的标签即使同属 pm.gd.csg.cn（门户、现货、结算）也不算这笔导出的查询。
+        静态资源不算。所属页面已关闭的请求从在途集合里去掉。
+
+        Returns:
+            list: 会拦住当前页导出的请求。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._inflight_query_requests()
+            []
+        """
+        page = self.page
+        page_url = self._page_url(page) if page else ""
         found = []
         for request in list(self._inflight):
             try:
                 if getattr(request, "resource_type", "") not in ("xhr", "fetch"):
+                    continue
+                owner = self._request_owner_page(request)
+                if owner is not None and (owner is not page or not self._page_is_open(owner)):
+                    if not self._page_is_open(owner):
+                        self._inflight.discard(request)
                     continue
                 url = getattr(request, "url", "") or ""
                 if page_url and not self._same_origin(url, page_url):
@@ -2749,14 +2843,73 @@ class WorkflowRunner:
                 continue
         return found
 
-    async def _pause_until_export_ready(self) -> None:
-        """导出前若还有未处理请求错误，或查询请求仍在途，就暂停。
+    def _export_blocking_errors(self) -> list[dict]:
+        """只留下当前绑定页上还没确认的请求错误。
 
-        不靠“在途数一段时间没减少”来放行。日期算法和原有 wait 毫秒数不在这里改。
+        Returns:
+            list[dict]: 会拦住这笔导出的错误。其他标签的 HTTP 0 或 4xx 不算。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._export_blocking_errors()
+            []
+        """
+        page = self.page
+        blocking = []
+        for item in self._unacknowledged_page_errors():
+            owner = item.get("_page")
+            if owner is not None and page is not None and owner is not page:
+                continue
+            blocking.append(item)
+        return blocking
+
+    @staticmethod
+    def _describe_inflight(requests: list) -> str:
+        """把仍在途的查询数量和地址写成暂停原因。
+
+        Args:
+            requests (list): 当前页在途的 xhr/fetch。
+
+        Returns:
+            str: 含数量和去查询串后的地址。没有请求时为空字符串。
+
+        Examples:
+            >>> class _Req:
+            ...     url = "https://pm.gd.csg.cn/pfjs/export?day=1"
+            >>> "export" in WorkflowRunner._describe_inflight([_Req()])
+            True
+        """
+        if not requests:
+            return ""
+        urls = []
+        for request in requests[:4]:
+            raw = str(getattr(request, "url", "") or "").split("?", 1)[0]
+            if raw:
+                urls.append(raw[:140])
+        text = f"仍有 {len(requests)} 个当前页的同源查询请求在途"
+        if urls:
+            text += "：" + "；".join(urls)
+        return text
+
+    async def _pause_until_export_ready(self) -> None:
+        """导出前若当前页还有未处理请求错误，或当前页查询仍在途，就暂停。
+
+        其他标签的心跳、长轮询和失败请求不拦截这笔导出。
+        不靠「在途数一段时间没减少」放行当前页查询。日期算法和原有 wait 毫秒数不在这里改。
+
+        Returns:
+            None: 当前页可以导出时返回。
+
+        Raises:
+            WorkflowPaused: 用户取消，或没有继续回调时。
+
+        Examples:
+            >>> WorkflowRunner._describe_inflight([])
+            ''
         """
         while True:
             await self._drain_response_captures()
-            gateway = self._unacknowledged_page_errors()
+            gateway = self._export_blocking_errors()
             inflight = self._inflight_query_requests()
             if not gateway and not inflight:
                 return
@@ -2766,8 +2919,9 @@ class WorkflowRunner:
                     "仍有未处理的请求异常："
                     + "；".join(self._describe_page_errors(gateway))[:300]
                 )
-            if inflight:
-                parts.append(f"仍有 {len(inflight)} 个同源查询请求在途")
+            inflight_text = self._describe_inflight(inflight)
+            if inflight_text:
+                parts.append(inflight_text)
             await self._pause_and_wait(
                 "导出前暂停。" + " ".join(parts) + "。不会在请求未确认时导出。"
             )

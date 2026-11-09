@@ -70,6 +70,22 @@ async def test_click_failure_is_not_reported_as_success(tmp_path):
     assert runner.page.clicked == []
 
 
+async def test_click_miss_explains_same_url_is_another_document(tmp_path):
+    bound = _ClickPage(missing=True)
+    duplicate = _ClickPage()
+    duplicate.context = bound.context
+    bound.context.pages = [bound, duplicate]
+    runner = _runner(tmp_path)
+    runner.pages = [bound]
+    runner.context = bound.context
+    with pytest.raises(WorkflowExecutionError, match="另一份文档") as caught:
+        await runner.exec_step({"action": "click", "selector": "text=现货交易", "timeout": 1})
+    message = str(caught.value)
+    assert "地址与绑定页完全相同" in message
+    assert "未绑定的业务标签：https://pm.gd.csg.cn/portal/#/powerEnterprise" not in message
+    assert duplicate.clicked == []
+
+
 async def test_click_miss_names_the_unbound_business_tab(tmp_path):
     portal = _ClickPage(missing=True)
     spot = _ClickPage()
