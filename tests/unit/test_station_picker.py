@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from spider_gd.core import station_picker
 from spider_gd.core.station_picker import (
     StationPickError,
     _dialog_payload,
+    _picker_command,
     choose_task_stations,
+    extract_picker_argv,
     pick_station,
     pick_stations,
 )
@@ -149,6 +154,93 @@ def test_one_bound_ukey_skips_the_window():
     )
     assert ordered is not None
     assert ordered[0].id == "demo-yangxi"
+
+
+@pytest.mark.unit
+def test_frozen_service_opens_picker_instead_of_another_backend(monkeypatch):
+    argv = [
+        r"C:\app\spider-gd-service.exe",
+        "-m",
+        "spider_gd.ui.station_picker_dialog",
+        "--input",
+        "request.json",
+        "--output",
+        "result.json",
+    ]
+    assert extract_picker_argv(argv) == ["--input", "request.json", "--output", "result.json"]
+    assert extract_picker_argv(["spider-gd-service.exe", "run"]) is None
+
+    monkeypatch.setattr(station_picker.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(station_picker.sys, "executable", r"C:\app\spider-gd-service.exe")
+    command = _picker_command(Path("request.json"), Path("result.json"))
+    assert command[:2] == [r"C:\app\spider-gd-service.exe", "--station-picker"]
+    assert "-m" not in command
+
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        seen["command"] = list(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text('{"id": "demo-yangxi", "cancelled": false}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(station_picker.subprocess, "run", fake_run)
+    raw = station_picker._run_picker({"stations": []}, 3)
+    assert raw is not None
+    assert json.loads(raw)["id"] == "demo-yangxi"
+    assert seen["command"][1] == "--station-picker"
+    assert "-m" not in seen["command"]
+
+
+@pytest.mark.unit
+def test_backend_entry_routes_picker_before_the_server(tmp_path):
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import backend_entry
+
+    request = tmp_path / "request.json"
+    result = tmp_path / "result.json"
+    request.write_text(
+        json.dumps({"stations": [{"id": "a", "name": "阳江"}]}),
+        encoding="utf-8",
+    )
+    code = backend_entry._dispatch_picker(
+        [
+            "spider-gd-service.exe",
+            "--station-picker",
+            "--input",
+            str(request),
+            "--output",
+            str(result),
+            "--choice",
+            "阳江",
+        ]
+    )
+    assert code == 0
+    assert json.loads(result.read_text(encoding="utf-8"))["id"] == "a"
+    assert backend_entry._dispatch_picker(["spider-gd-service.exe"]) is None
+
+
+@pytest.mark.unit
+def test_second_backend_log_does_not_become_the_picker_error(monkeypatch):
+    startup_log = (
+        "2026-11-09 21:35:00.639 | INFO | app:assemble:2292 | - | 告警网关已启用\n"
+        "2026-11-09 21:35:00.720 | ERROR | app:_serve_web:3302 | - | "
+        "控制接口 127.0.0.1:8800 已被占用：[WinError 10048]"
+    )
+
+    def fake_run(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stderr=startup_log.encode("utf-8"))
+
+    monkeypatch.setattr(station_picker.subprocess, "run", fake_run)
+    with pytest.raises(StationPickError, match="8800") as exc:
+        station_picker._run_picker({"stations": []}, 3)
+    message = str(exc.value)
+    assert "告警网关已启用" not in message
+    assert "第二个后端" in message
 
 
 def _fail_multi(profiles: list[StationProfile], timeout_sec: float) -> list[str] | None:

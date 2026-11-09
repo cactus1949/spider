@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from spider_gd.core.station_profile import (
@@ -19,6 +19,9 @@ from spider_gd.core.station_profile import (
 
 DialogOpener = Callable[[list[StationProfile], float], str | None]
 MultiDialogOpener = Callable[[list[StationProfile], float], list[str] | None]
+
+PICKER_FLAG = "--station-picker"
+PICKER_MODULE = "spider_gd.ui.station_picker_dialog"
 
 
 class StationPickError(RuntimeError):
@@ -121,6 +124,108 @@ def _dialog_payload(
     }
 
 
+def extract_picker_argv(argv: Sequence[str]) -> list[str] | None:
+    """从进程参数里取出场站窗口参数。
+
+    打包后的服务程序就是 ``sys.executable``。再用它执行 ``python -m`` 时，
+    PyInstaller 不会启动解释器，而是把同一份入口再跑一遍。第二次会去绑定
+    已经占用的 8800 端口，窗口也就不会出现。
+
+    Args:
+        argv: 进程参数。第一项可以是程序路径。
+
+    Returns:
+        list[str] | None: 交给窗口入口的参数。不是窗口进程时为 None。
+
+    Examples:
+        >>> extract_picker_argv([
+        ...     "spider-gd-service.exe",
+        ...     "--station-picker",
+        ...     "--input", "a.json",
+        ...     "--output", "b.json",
+        ... ])
+        ['--input', 'a.json', '--output', 'b.json']
+        >>> extract_picker_argv([
+        ...     "spider-gd-service.exe",
+        ...     "-m", "spider_gd.ui.station_picker_dialog",
+        ...     "--input", "a.json",
+        ... ])
+        ['--input', 'a.json']
+        >>> extract_picker_argv(["spider-gd-service.exe", "run"]) is None
+        True
+    """
+    args = [str(item) for item in argv]
+    if args and not args[0].startswith("-"):
+        args = args[1:]
+    if PICKER_FLAG in args:
+        index = args.index(PICKER_FLAG)
+        return args[index + 1 :]
+    if "-m" in args:
+        index = args.index("-m")
+        module = args[index + 1] if index + 1 < len(args) else ""
+        if module == PICKER_MODULE:
+            return args[index + 2 :]
+    return None
+
+
+def _picker_command(request_path: Path, result_path: Path) -> list[str]:
+    """组装场站窗口进程的启动命令。
+
+    源码运行使用当前解释器的 ``-m``。打包后的 exe 没有解释器，
+    改为传递 ``--station-picker``，由服务入口转去弹窗。
+
+    Args:
+        request_path: 场站请求 JSON 路径。
+        result_path: 选择结果 JSON 路径。
+
+    Returns:
+        list[str]: 传给子进程的参数，第一项是可执行文件。
+
+    Examples:
+        >>> command = _picker_command(Path("request.json"), Path("result.json"))
+        >>> command[1:3]
+        ['-m', 'spider_gd.ui.station_picker_dialog']
+        >>> "--input" in command and "--output" in command
+        True
+    """
+    window_args = ["--input", str(request_path), "--output", str(result_path)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, PICKER_FLAG, *window_args]
+    return [sys.executable, "-m", PICKER_MODULE, *window_args]
+
+
+def _picker_failure_detail(stderr: str, returncode: int) -> str:
+    """把窗口进程的错误收成一行。
+
+    子进程若误启动成第二个后端，标准错误里会是整段启动日志。
+    调用方只需要看到窗口没有打开的原因。
+
+    Args:
+        stderr: 子进程标准错误文本，可以包含多行日志。
+        returncode: 子进程退出码。没有文本时用它说明失败。
+
+    Returns:
+        str: 展示给调用方的一行原因。
+
+    Examples:
+        >>> _picker_failure_detail("", 1)
+        '退出码 1'
+        >>> _picker_failure_detail("启动日志\\n控制接口已被占用", 1)
+        '场站选择窗口没有打开：它被启动成了第二个后端，8800 端口已被当前服务占用'
+        >>> _picker_failure_detail("无法打开场站选择窗口：没有 tk", 1)
+        '无法打开场站选择窗口：没有 tk'
+    """
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return f"退出码 {returncode}"
+    if any("已被占用" in line for line in lines):
+        return "场站选择窗口没有打开：它被启动成了第二个后端，8800 端口已被当前服务占用"
+    detail = lines[-1]
+    if len(detail) > 400:
+        return detail[:400]
+    return detail
+
+
 def _source_root() -> Path | None:
     """返回源码布局下的 src 目录。
 
@@ -202,7 +307,9 @@ def _run_picker(payload: dict[str, object], timeout_sec: float) -> str | None:
         True
     """
     env = os.environ.copy()
-    src = _source_root()
+    # 打包后的子进程自带模块。把父进程的解压目录写进 PYTHONPATH，
+    # 会让窗口进程去读另一份临时文件。
+    src = None if getattr(sys, "frozen", False) else _source_root()
     if src is not None:
         env["PYTHONPATH"] = str(src) + os.pathsep + env.get("PYTHONPATH", "")
     with tempfile.TemporaryDirectory(prefix="spider-station-") as tmp:
@@ -210,15 +317,7 @@ def _run_picker(payload: dict[str, object], timeout_sec: float) -> str | None:
         request_path = directory / "request.json"
         result_path = directory / "result.json"
         request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        command = [
-            sys.executable,
-            "-m",
-            "spider_gd.ui.station_picker_dialog",
-            "--input",
-            str(request_path),
-            "--output",
-            str(result_path),
-        ]
+        command = _picker_command(request_path, result_path)
         try:
             completed = subprocess.run(
                 command,
@@ -231,7 +330,7 @@ def _run_picker(payload: dict[str, object], timeout_sec: float) -> str | None:
             raise StationPickError("场站选择窗口等待超时") from exc
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
         if completed.returncode not in {0, 2}:
-            detail = stderr or f"退出码 {completed.returncode}"
+            detail = _picker_failure_detail(stderr, completed.returncode)
             raise StationPickError(f"场站选择窗口启动失败：{detail}")
         if not result_path.is_file():
             if completed.returncode == 2:

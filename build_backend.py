@@ -85,6 +85,11 @@ HIDDEN_IMPORTS = [
     "openpyxl",
     "pandas",
     "ddddocr",
+    # 场站窗口在打包后由同一个 exe 以 --station-picker 拉起，tk 在函数内部才 import
+    "spider_gd.ui.station_picker_dialog",
+    "spider_gd.core.station_picker",
+    "tkinter",
+    "tkinter.ttk",
 ]
 
 

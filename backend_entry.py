@@ -82,8 +82,48 @@ def _fix_env_encoding(exe_dir: Path) -> None:
         pass
 
 
+def _dispatch_picker(argv: list[str]) -> int | None:
+    """场站窗口请求只弹窗，不再启动第二套后端。
+
+    Args:
+        argv: 当前进程参数，第一项通常是 exe 路径。
+
+    Returns:
+        int | None: 窗口进程退出码。普通启动时为 None。
+
+    Raises:
+        SystemExit: 窗口参数触发 argparse 帮助或错误时。
+
+    Examples:
+        >>> _dispatch_picker(["spider-gd-service.exe"]) is None
+        True
+    """
+    from spider_gd.core.station_picker import extract_picker_argv
+
+    forwarded = extract_picker_argv(argv)
+    if forwarded is None:
+        return None
+    from spider_gd.ui.station_picker_dialog import main as picker_main
+
+    return int(picker_main(forwarded))
+
+
 def main() -> int:
+    """启动采集后端；参数属于场站窗口时只弹窗。
+
+    打包后的服务程序被再次拉起时，不能再走 ``run_app``，否则会重复占用 8800。
+
+    Returns:
+        int: 进程退出码。窗口取消为 2，失败为 1。
+
+    Examples:
+        >>> callable(main)
+        True
+    """
     _fix_console()
+    picker_code = _dispatch_picker(sys.argv)
+    if picker_code is not None:
+        return picker_code
 
     try:
         exe_dir = _exe_dir()
