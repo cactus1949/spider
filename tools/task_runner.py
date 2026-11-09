@@ -331,6 +331,161 @@ def build_catchup_config(
     return config
 
 
+def match_task_storage(indicators: list[str], tasks: list[dict] | None) -> dict | None:
+    """选出最适合这批补数指标的定时任务，用来沿用它的存储路径。
+
+    只考虑指标有交集的任务。覆盖的指标越多越优先；一样多时已启用的优先；
+    仍相同则用最近创建的。不会改任务本身。
+
+    Args:
+        indicators (list[str]): 本次补数要跑的指标名。
+        tasks (list[dict] | None): 已保存的任务配置。用到 indicators、enabled、created_at。
+
+    Returns:
+        dict | None: 命中的任务配置；没有交集时为 None。
+
+    Examples:
+        >>> tasks = [
+        ...     {"name": "旧", "indicators": ["日前"], "enabled": True, "created_at": 1},
+        ...     {"name": "新", "indicators": ["日前", "实时"], "enabled": True, "created_at": 2},
+        ... ]
+        >>> match_task_storage(["日前"], tasks)["name"]
+        '新'
+        >>> match_task_storage(["其他"], tasks) is None
+        True
+    """
+    wanted = [str(item).strip() for item in indicators or [] if str(item).strip()]
+    if not wanted or not tasks:
+        return None
+    best: dict | None = None
+    best_key: tuple[int, int, float] | None = None
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        raw = task.get("indicators") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            continue
+        owned = {str(item).strip() for item in raw if str(item).strip()}
+        covered = sum(1 for name in wanted if name in owned)
+        if covered <= 0:
+            continue
+        enabled = 1 if bool(task.get("enabled", True)) else 0
+        try:
+            created = float(task.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created = 0.0
+        key = (covered, enabled, created)
+        if best_key is None or key > best_key:
+            best_key = key
+            best = task
+    return best
+
+
+def apply_catchup_storage(
+    config: dict,
+    tasks: list[dict] | None = None,
+    *,
+    path_template: str | None = None,
+    path_folders: list | None = None,
+    path_structure: str | None = None,
+    download_dir: str | None = None,
+    storage_overridden: bool = False,
+) -> dict:
+    """把这次补数的落盘路径写进配置。
+
+    请求明确带了存储（``storage_overridden``，或任一 path_* 不是 None）时，用请求里的值。
+    空的存储结构表示文件直接放在下载根目录，不再回退到任务。
+    请求没带存储结构时，沿用 :func:`match_task_storage` 选中的任务：存储结构、旧模板、文件夹，
+    以及任务单独指定的下载目录。非空的 ``download_dir`` 始终作为这次的下载根目录，
+    覆盖任务目录；没有匹配任务时也同样生效。不修改入参，也不写回定时任务。
+
+    Args:
+        config (dict): :func:`build_catchup_config` 的结果，至少含 indicators。
+        tasks (list[dict] | None): 已保存任务，用来取默认路径。
+        path_template (str | None): 旧版路径模板。None 表示请求没带。
+        path_folders (list | None): 旧版文件夹映射。None 表示请求没带。
+        path_structure (str | None): 存储结构文本。None 表示请求没带。
+        download_dir (str | None): 本次下载根目录。非空时覆盖任务目录；空表示不单独指定。
+        storage_overridden (bool): 为 True 时，即使路径字段为空也不回退到任务。
+
+    Returns:
+        dict: 带上 path_structure / path_template / path_folders，以及可能的下载目录。
+
+    Examples:
+        >>> cfg = {"indicators": ["日前"]}
+        >>> tasks = [{
+        ...     "indicators": ["日前"], "enabled": True, "created_at": 1,
+        ...     "path_structure": "- [日前]", "path_template": "", "path_folders": [],
+        ...     "download_dir": "/data/task", "download_dir_custom": True,
+        ... }]
+        >>> apply_catchup_storage(cfg, tasks)["path_structure"]
+        '- [日前]'
+        >>> apply_catchup_storage(cfg, tasks)["download_dir"]
+        '/data/task'
+        >>> apply_catchup_storage(cfg, tasks, download_dir="/data/once")["download_dir"]
+        '/data/once'
+        >>> apply_catchup_storage(
+        ...     cfg, tasks, path_structure="", storage_overridden=True,
+        ... )["path_structure"]
+        ''
+    """
+    chosen = dict(config)
+    explicit_dir = str(download_dir or "").strip()
+    provided = (
+        bool(storage_overridden)
+        or path_structure is not None
+        or path_template is not None
+        or path_folders is not None
+    )
+    if provided:
+        chosen["path_structure"] = "" if path_structure is None else str(path_structure)
+        chosen["path_template"] = "" if path_template is None else str(path_template)
+        chosen["path_folders"] = list(path_folders or [])
+        chosen["download_dir"] = explicit_dir
+        chosen["download_dir_custom"] = bool(explicit_dir)
+        return chosen
+
+    matched = match_task_storage(list(chosen.get("indicators") or []), tasks)
+    if matched is not None:
+        chosen["path_structure"] = str(matched.get("path_structure") or "")
+        chosen["path_template"] = str(matched.get("path_template") or "")
+        folders = matched.get("path_folders") or []
+        chosen["path_folders"] = list(folders) if isinstance(folders, list) else []
+        task_dir = str(matched.get("download_dir") or "").strip()
+        if matched.get("download_dir_custom") and task_dir:
+            chosen["download_dir"] = task_dir
+            chosen["download_dir_custom"] = True
+    # 只传 download_dir 的旧调用也要落到这次指定的目录，不能被任务目录盖掉。
+    if explicit_dir:
+        chosen["download_dir"] = explicit_dir
+        chosen["download_dir_custom"] = True
+    return chosen
+
+
+def catchup_download_dir(config: dict) -> str:
+    """取出补数这次要传给执行入口的下载根目录。
+
+    配置里单独指定了目录时返回该目录。否则返回空字符串，执行入口再去用全局设置。
+
+    Args:
+        config (dict): :func:`apply_catchup_storage` 返回的配置。
+
+    Returns:
+        str: 下载根目录。空字符串表示沿用全局设置或数据目录。
+
+    Examples:
+        >>> catchup_download_dir({"download_dir": "/data", "download_dir_custom": True})
+        '/data'
+        >>> catchup_download_dir({"download_dir": "/data"})
+        ''
+    """
+    if config.get("download_dir_custom"):
+        return str(config.get("download_dir") or "").strip()
+    return ""
+
+
 def _is_relative_date_value(value: object) -> bool:
     if value is None:
         return True
