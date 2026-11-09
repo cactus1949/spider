@@ -41,6 +41,7 @@ import StoragePathModal, {
 import { workflowPath } from '../components/workflowTree'
 import ProgressModal, { type CatchupRun } from '../components/ProgressModal'
 import CatchupModal from '../components/CatchupModal'
+import { TASK_EDITOR_STEPS } from '../components/taskEditorSteps'
 import { OutputName, OutputPanel } from '../components/OutputPanel'
 import DateWindowSlider, {
   MonthWindowSlider,
@@ -58,7 +59,6 @@ import DateWindowSlider, {
 } from '../components/DateWindowSlider'
 
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-const EDITOR_STEPS = ['基本信息', '采集范围', '存储结构']
 
 interface AutoTask {
   id: string
@@ -396,7 +396,7 @@ export default function Tasks(): JSX.Element {
         return
       }
     }
-    setStep((current) => Math.min(current + 1, EDITOR_STEPS.length - 1))
+    setStep((current) => Math.min(current + 1, TASK_EDITOR_STEPS.length - 1))
   }
 
   const openCreate = (): void => {
@@ -826,10 +826,10 @@ export default function Tasks(): JSX.Element {
         footer={[
           <Button key="cancel" onClick={() => setModalOpen(false)}>取消</Button>,
           step > 0 && <Button key="prev" onClick={() => setStep(step - 1)}>上一步</Button>,
-          step < EDITOR_STEPS.length - 1 && (
+          step < TASK_EDITOR_STEPS.length - 1 && (
             <Button key="next" type={editing ? 'default' : 'primary'} onClick={goNext}>下一步</Button>
           ),
-          (editing || step === EDITOR_STEPS.length - 1) && (
+          (editing || step === TASK_EDITOR_STEPS.length - 1) && (
             <Button key="ok" type="primary" onClick={handleSubmit}>{editing ? '保存' : '创建任务'}</Button>
           )
         ]}
@@ -842,7 +842,7 @@ export default function Tasks(): JSX.Element {
             // 新建只能回头改，往前走要经过「下一步」校验；编辑时随便跳
             if (editing || next < step) setStep(next)
           }}
-          items={EDITOR_STEPS.map((title, index) => ({ title, disabled: !editing && index > step }))}
+          items={TASK_EDITOR_STEPS.map((title, index) => ({ title, disabled: !editing && index > step }))}
         />
         {/* 步骤条固定，只有下面的内容滚动 */}
         <div className="task-editor-scroll">
@@ -1049,6 +1049,7 @@ export default function Tasks(): JSX.Element {
         groups={groups}
         defaultLogin={defaultLoginOf(tasks, workflows)}
         onCancel={() => setCatchupOpen(false)}
+        tasks={tasks}
         onRun={(selection) => {
           const groups = [
             ...Object.values(selection.indicatorDates),
@@ -1064,7 +1065,11 @@ export default function Tasks(): JSX.Element {
             indicators: selection.indicators,
             indicatorDates: selection.indicatorDates,
             indicatorMonths: selection.indicatorMonths,
-            outputDates: selection.outputDates
+            outputDates: selection.outputDates,
+            downloadDir: selection.downloadDir,
+            pathTemplate: selection.pathTemplate,
+            pathFolders: selection.pathFolders,
+            pathStructure: selection.pathStructure
           })
           setCatchupOpen(false)
           setTaskProgressOpen(false)

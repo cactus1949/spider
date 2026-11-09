@@ -177,7 +177,18 @@ def _parse_profile_yaml(text: str) -> dict:
 
 
 class CatchupRunRequest(BaseModel):
-    """一次补数：指定指标和日期，不写入定时任务。"""
+    """一次补数的请求体。不写入定时任务。
+
+    存储字段不传时，沿用能覆盖这些指标的定时任务的下载路径和存储结构。
+    ``storage_overridden`` 为真时用本次请求里的路径；空结构表示直接放在下载根目录。
+
+    Examples:
+        >>> req = CatchupRunRequest(indicators=["日前"], storage_overridden=True, path_structure="")
+        >>> req.path_structure
+        ''
+        >>> req.download_dir
+        ''
+    """
     login: str = ""
     indicators: list[str] = []
     target_dates: list[str] = []
@@ -189,6 +200,11 @@ class CatchupRunRequest(BaseModel):
     account: str = ""
     account_password: str = ""
     download_dir: str = ""
+    path_template: str | None = None
+    path_folders: list[dict[str, Any]] | None = None
+    path_structure: str | None = None
+    # 为真时即使路径为空，也不再回退到定时任务的存储配置
+    storage_overridden: bool = False
     headless: str = "false"
     minimized: str = "true"
 
@@ -3422,7 +3438,7 @@ def create_app(
         _tools = Path(__file__).resolve().parent.parent.parent.parent.parent / "tools"
         if str(_tools) not in _sys.path:
             _sys.path.insert(0, str(_tools))
-        from task_runner import build_catchup_config
+        from task_runner import apply_catchup_storage, build_catchup_config, catchup_download_dir
 
         try:
             cfg = build_catchup_config(
@@ -3436,12 +3452,26 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            task_rows = service._ctx.state_store.list_task_configs()
+        except Exception:
+            logger.exception("读取任务配置失败，补数将不沿用任务存储路径")
+            task_rows = []
+        cfg = apply_catchup_storage(
+            cfg,
+            task_rows,
+            path_template=body.path_template,
+            path_folders=body.path_folders,
+            path_structure=body.path_structure,
+            download_dir=body.download_dir,
+            storage_overridden=body.storage_overridden,
+        )
         return await run_task_stream(
             "catchup",
             cert_password=body.cert_password,
             account=body.account,
             account_password=body.account_password,
-            download_dir=body.download_dir,
+            download_dir=catchup_download_dir(cfg),
             headless=body.headless,
             minimized=body.minimized,
             prepared=cfg,

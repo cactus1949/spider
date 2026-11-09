@@ -29,6 +29,11 @@ export interface CatchupRun {
   indicatorMonths: Record<string, string[]>
   /** 单个导出另选的日期，键是 指标::输出key；空列表 = 不补 */
   outputDates?: Record<string, string[]>
+  /** 这次补数的下载根目录。空则由后端再用全局设置。 */
+  downloadDir?: string
+  pathTemplate?: string
+  pathFolders?: { name: string; indicators: string[] }[]
+  pathStructure?: string
 }
 
 interface Props {
@@ -115,7 +120,13 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               indicators: catchup.indicators,
               indicator_dates: catchup.indicatorDates,
               indicator_months: catchup.indicatorMonths,
-              output_dates: catchup.outputDates || {}
+              output_dates: catchup.outputDates || {},
+              download_dir: catchup.downloadDir || '',
+              path_template: catchup.pathTemplate || '',
+              path_folders: catchup.pathFolders || [],
+              path_structure: catchup.pathStructure || '',
+              // 对话框里看到的路径就是这次要用的，空结构也不再回退到任务
+              storage_overridden: true
             }
           : Object.fromEntries(params)
         const res = await fetch(url, {
