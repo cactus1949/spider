@@ -533,7 +533,7 @@ export const api = {
       body: JSON.stringify({ exec_ids: execIds })
     }),
   downloadExecutionLog: (execId: string, downloadDir: string) =>
-    req<{ status: string; path: string; filename: string }>(`/api/execution-logs/${encodeURIComponent(execId)}/download`, {
+    req<{ status: string; path: string; filename: string; message?: string }>(`/api/execution-logs/${encodeURIComponent(execId)}/download`, {
       method: 'POST',
       body: JSON.stringify({ download_dir: downloadDir })
     }),
@@ -628,7 +628,7 @@ export const api = {
     req<{ devices: UsbDeviceOption[]; error?: string }>('/api/stations/usb-devices'),
   ukeyReport: () => req<UkeyReport>('/api/stations/ukey-report'),
   downloadUkeyReport: (downloadDir: string) =>
-    req<{ status: string; path: string; filename: string }>('/api/stations/ukey-report/download', {
+    req<{ status: string; path: string; filename: string; warning?: string; message?: string }>('/api/stations/ukey-report/download', {
       method: 'POST',
       body: JSON.stringify({ download_dir: downloadDir })
     }),

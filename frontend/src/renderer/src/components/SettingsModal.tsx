@@ -403,7 +403,12 @@ export default function SettingsModal({
     setUkeyDownloading(true)
     try {
       const res = await api.downloadUkeyReport(dir)
-      message.success(`UKey 诊断包已保存: ${res.filename}`)
+      if (res.status === 'error') {
+        message.error(res.message || 'UKey 诊断包没有生成')
+        return
+      }
+      if (res.warning) message.warning(`诊断包已保存，但采集不完整：${res.warning}`)
+      else message.success(`UKey 诊断包已保存: ${res.filename}`)
       if (res.path) {
         const folder = res.path.replace(/[\\/][^\\/]*$/, '')
         if (folder) await window.api.openDir(folder)

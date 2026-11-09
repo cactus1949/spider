@@ -8,8 +8,10 @@ import pytest
 
 from spider_gd.core.crawler.shared_browser import (
     GD_LOGIN_SUCCESS_SELECTOR,
+    PAGE_LOAD_FAILED_MESSAGE,
     SharedBrowser,
     get_shared_browser,
+    is_browser_error_page,
     startup_url,
 )
 
@@ -539,6 +541,115 @@ async def test_reset_cookies_and_reload_refuses_while_task_holds_browser():
         with pytest.raises(RuntimeError, match="正被任务占用"):
             await browser.reset_cookies_and_reload()
     page.reload.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("url", "failed"),
+    [
+        ("chrome-error://chromewebdata/", True),
+        ("chrome-error://chromewebdata/#url=https://pm.gd.csg.cn/", True),
+        ("edge-error://blank", True),
+        ("about:neterror", True),
+        ("chrome://crash", True),
+        ("about:blank", False),
+        ("https://pm.gd.csg.cn/portal/#/home", False),
+        ("", False),
+    ],
+)
+def test_browser_error_page_detection(url, failed):
+    assert is_browser_error_page(url) is failed
+
+
+def test_bound_chrome_error_page_explains_load_failure():
+    browser = _running_browser()
+    page = _open_page("chrome-error://chromewebdata/")
+    browser._pages = [page]
+    with pytest.raises(RuntimeError, match="chrome-error"):
+        _ = browser.page
+
+
+def test_only_chrome_error_tab_is_not_a_generic_disconnect():
+    browser = _running_browser()
+    page = _open_page("chrome-error://chromewebdata/")
+    browser._page_ids = {page: "err"}
+    with pytest.raises(RuntimeError, match="证书客户端") as caught:
+        _ = browser.page
+    assert "尚未选择业务页面" not in str(caught.value)
+
+
+def test_missing_page_stays_generic_when_browser_has_no_error_tab():
+    browser = _running_browser()
+    with pytest.raises(RuntimeError, match="尚未选择业务页面"):
+        _ = browser.page
+
+
+def test_lone_error_tab_is_bound_for_the_dropdown():
+    browser = _running_browser()
+    page = _open_page("chrome-error://chromewebdata/")
+    browser._page_ids = {page: "err"}
+    browser._bind_failed_page_if_alone()
+    assert browser._pages == [page]
+    business = _open_page("https://pm.gd.csg.cn/portal/#/home")
+    browser._pages = []
+    browser._page_ids = {page: "err", business: "ok"}
+    browser._bind_failed_page_if_alone()
+    assert browser._pages == []
+
+
+async def test_list_pages_marks_chrome_error_tab():
+    browser = SharedBrowser()
+    browser._browser = MagicMock()
+    browser._browser.is_connected.return_value = True
+    page = _open_page("chrome-error://chromewebdata/")
+    page.title = AsyncMock(return_value="pm.gd.csg.cn")
+    context = MagicMock()
+    context.pages = [page]
+    browser._browser.contexts = [context]
+    rows = await browser.list_pages()
+    assert rows == [{
+        "id": rows[0]["id"],
+        "context": 0,
+        "title": "pm.gd.csg.cn",
+        "url": "chrome-error://chromewebdata/",
+        "load_error": True,
+    }]
+
+
+async def test_running_chrome_error_page_fails_before_the_task_starts():
+    browser = _running_browser()
+    page = _open_page("chrome-error://chromewebdata/")
+    browser._pages = [page]
+    with pytest.raises(RuntimeError, match="证书客户端"):
+        async with browser.execution("采集"):
+            pass
+    assert browser.status()["run"]["state"] == "failed"
+    assert browser.status()["run"]["reason"] == PAGE_LOAD_FAILED_MESSAGE
+
+
+async def test_check_auth_surfaces_chrome_error():
+    browser = _running_browser()
+    page = _open_page("chrome-error://chromewebdata/")
+    browser._pages = [page]
+    result = await browser.check_auth()
+    assert result["state"] == "unauthenticated"
+    assert "chrome-error" in result["reason"]
+
+
+async def test_check_auth_disconnect_stays_unknown():
+    browser = SharedBrowser()
+    result = await browser.check_auth()
+    assert result["state"] == "unknown"
+    assert "尚未选择业务页面" in result["reason"]
+
+
+async def test_check_auth_closed_page_stays_unknown():
+    browser = _running_browser()
+    page = _open_page("https://pm.gd.csg.cn/portal/#/home")
+    page.is_closed.return_value = True
+    browser._pages = [page]
+    result = await browser.check_auth()
+    assert result["state"] == "unknown"
+    assert "被关闭" in result["reason"]
 
 
 class TestGetSharedBrowser:

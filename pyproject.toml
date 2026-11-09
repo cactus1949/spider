@@ -34,10 +34,12 @@ tls = [
 ocr = [
     "ddddocr>=1.4,<2.0",
 ]
-# Windows 平台设备/网络
+# Windows 平台设备/网络。
+# pywin32 312 起才同时提供 win_amd64 与 win_arm64 wheel。
+# 发给现场 x64 电脑的安装包仍须用 x64 Python 打包，见 build_backend.py。
 win = [
     "WMI>=1.5; sys_platform == 'win32'",
-    "pywin32>=306; sys_platform == 'win32'",
+    "pywin32>=312; sys_platform == 'win32'",
 ]
 dev = [
     "pytest>=8.0,<9.0",

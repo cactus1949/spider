@@ -8,12 +8,19 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from spider_gd.infrastructure.proc import run_capture
 
 _UKEY_VIDS = {"096E"}
+_FAST_PROBE_TIMEOUT = 6.0
+_FALLBACK_PROBE_TIMEOUT = 6.0
+_USB_PROBE_BUDGET = 8.0
+_DOWNLOAD_BUDGET = 14.0
 _HEX_ID = re.compile(r"(?i)(?:VID_|0x)?([0-9A-F]{4})")
 # Windows 给没有序列号的设备编的插口位置，例如 6&256A9945&0&0000。
 _LOCATION_SERIAL = re.compile(r"^\d+&[0-9A-F]+&\d+&\d+$", re.IGNORECASE)
@@ -161,38 +168,267 @@ def parse_macos_usb(raw: str) -> list[UsbDevice]:
     return _with_unique_labels(_collapse_interfaces(found))
 
 
-def _list_windows() -> list[UsbDevice]:
-    """用 PowerShell 列出当前存在的 USB / HID 设备。
+def _command_text(command: list[str], timeout: float, label: str) -> tuple[bool, str]:
+    """执行一条枚举命令。超时和异常都变成文字，不向外抛。
+
+    Args:
+        command: 要执行的程序和参数。
+        timeout: 这一条命令自己的时限，单位秒。
+        label: 写进失败说明的探测名称。
 
     Returns:
-        list[UsbDevice]: 解析后的设备。
+        tuple[bool, str]: 第一项为 True 表示进程正常结束；第二项是原文或失败说明。
+
+    Examples:
+        >>> callable(_command_text)
+        True
+    """
+    try:
+        result = run_capture(command, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"超时（{timeout:.0f} 秒）：{label}"
+    except Exception as exc:
+        return False, f"失败：{label}：{exc}"
+    text = (result.stdout or "").strip()
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()
+        merged = text
+        if detail:
+            merged = f"{merged}\n{detail}".strip()
+        return False, merged or f"失败：{label}：退出码 {result.returncode}"
+    return True, text or "（没有输出）"
+
+
+def _powershell(script: str) -> list[str]:
+    """组装不弹窗、不逐台查父设备的 PowerShell 命令。
+
+    Args:
+        script: 单条 PowerShell 语句。
+
+    Returns:
+        list[str]: 传给 ``run_capture`` 的参数。
+
+    Examples:
+        >>> _powershell("Get-Date")[:3]
+        ['powershell', '-NoProfile', '-NonInteractive']
+    """
+    return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _cim_usb_command() -> list[str]:
+    """用 WMI/CIM 只取带 VID 的即插即用设备。
+
+    Returns:
+        list[str]: ``Get-CimInstance Win32_PnPEntity`` 命令。
+
+    Examples:
+        >>> "Win32_PnPEntity" in " ".join(_cim_usb_command())
+        True
+    """
+    script = (
+        "Get-CimInstance -ClassName Win32_PnPEntity "
+        "-Filter \"DeviceID LIKE '%VID_%'\" | "
+        "Select-Object Name, DeviceID, PNPClass, ConfigManagerErrorCode | "
+        "ConvertTo-Json -Compress -Depth 3"
+    )
+    return _powershell(script)
+
+
+def _pnp_fallback_command() -> list[str]:
+    """慢速兜底：只在更快的探测都失败时才跑 ``Get-PnpDevice``。
+
+    不再逐台调用 ``Get-PnpDeviceProperty``。那一步会把整次诊断拖过 20 秒。
+
+    Returns:
+        list[str]: PowerShell 命令。
+
+    Examples:
+        >>> "Get-PnpDeviceProperty" not in " ".join(_pnp_fallback_command())
+        True
+    """
+    script = (
+        "Get-PnpDevice -PresentOnly | "
+        "Where-Object { $_.InstanceId -match 'VID_' } | "
+        "Select-Object FriendlyName, InstanceId, Class, Status, Problem | "
+        "ConvertTo-Json -Compress -Depth 3"
+    )
+    return _powershell(script)
+
+
+def _pnputil_command() -> list[str]:
+    """列出当前连着的设备，不启动 PowerShell。
+
+    Returns:
+        list[str]: ``pnputil /enum-devices /connected``。
+
+    Examples:
+        >>> _pnputil_command()[0]
+        'pnputil'
+    """
+    return ["pnputil", "/enum-devices", "/connected"]
+
+
+def _discard_probe_future(future: Future) -> None:
+    """读掉后台探测的异常，避免解释器提示异常没人取。
+
+    Args:
+        future: 已经结束或被取消的探测任务。
+
+    Returns:
+        None: 只消费结果，不向外抛。
+
+    Examples:
+        >>> done = Future()
+        >>> done.set_exception(RuntimeError("x"))
+        >>> _discard_probe_future(done)
+    """
+    try:
+        future.exception()
+    except BaseException:
+        return
+
+
+def run_named_probes(
+    probes: list[tuple[str, Callable[[], tuple[bool, str]]]],
+    *,
+    budget: float,
+) -> list[tuple[str, bool, str]]:
+    """并行跑几条探测，到总时限就返回。
+
+    没跑完的记成超时说明，并且不再等它的线程结束。下载接口因此可以先把
+    已经拿到的结果和超时说明写进诊断包。调用方自己的函数仍应带超时，
+    避免线程一直占着。
+
+    Args:
+        probes: ``(名称, 函数)``。函数返回 ``(是否成功, 原文)``。
+        budget: 整批最多等待的秒数。到点后函数返回，不等待未完成的线程。
+
+    Returns:
+        list[tuple[str, bool, str]]: 按输入顺序排列的名称、是否成功、原文或失败说明。
+
+    Examples:
+        >>> rows = run_named_probes([("快", lambda: (True, "ok"))], budget=1)
+        >>> rows[0][2]
+        'ok'
+    """
+    if not probes:
+        return []
+    pool = ThreadPoolExecutor(max_workers=len(probes), thread_name_prefix="ukey-probe")
+    futures = {pool.submit(func): name for name, func in probes}
+    try:
+        done, pending = wait(set(futures), timeout=max(0.0, budget))
+        by_name: dict[str, tuple[bool, str]] = {}
+        for future in done:
+            name = futures[future]
+            try:
+                by_name[name] = future.result()
+            except Exception as exc:
+                by_name[name] = (False, f"失败：{name}：{exc}")
+        for future in pending:
+            name = futures[future]
+            future.add_done_callback(_discard_probe_future)
+            future.cancel()
+            by_name[name] = (False, f"超时（超过总时限 {budget:.0f} 秒）：{name}")
+        return [(name, *by_name[name]) for name, _func in probes]
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _format_probe_sections(rows: list[tuple[str, bool, str]]) -> str:
+    """把多条探测拼成诊断包里的原文。
+
+    Args:
+        rows: :func:`run_named_probes` 的结果。
+
+    Returns:
+        str: 带分段标题的文本。没有探测时返回说明。
+
+    Examples:
+        >>> "CIM" in _format_probe_sections([("CIM", False, "超时")])
+        True
+    """
+    if not rows:
+        return "没有执行设备枚举。"
+    return "\n\n".join(f"===== {name} =====\n{text}" for name, _ok, text in rows)
+
+
+def _windows_usb_sections() -> list[tuple[str, bool, str]]:
+    """先并行跑 CIM 和 pnputil，都失败才兜底 ``Get-PnpDevice``。
+
+    Returns:
+        list[tuple[str, bool, str]]: 每条探测的名称、是否成功、原文。
+
+    Examples:
+        >>> callable(_windows_usb_sections)
+        True
+    """
+    def cim() -> tuple[bool, str]:
+        return _command_text(_cim_usb_command(), _FAST_PROBE_TIMEOUT, "Get-CimInstance")
+
+    def pnputil() -> tuple[bool, str]:
+        return _command_text(_pnputil_command(), _FAST_PROBE_TIMEOUT, "pnputil")
+
+    fast = [("Get-CimInstance", cim), ("pnputil", pnputil)]
+    rows = run_named_probes(fast, budget=_USB_PROBE_BUDGET)
+    if any(ok for _name, ok, _text in rows):
+        return rows
+    ok, text = _command_text(_pnp_fallback_command(), _FALLBACK_PROBE_TIMEOUT, "Get-PnpDevice")
+    rows.append(("Get-PnpDevice", ok, text))
+    return rows
+
+
+def _devices_from_probe_text(text: str) -> tuple[list[UsbDevice], str]:
+    """从一条探测原文里解析设备。失败时返回原因，不抛异常。
+
+    Args:
+        text: 命令标准输出。可能是 JSON，也可能是失败说明。
+
+    Returns:
+        tuple[list[UsbDevice], str]: 设备列表，以及失败原因。成功时原因为空串。
+
+    Examples:
+        >>> devices, error = _devices_from_probe_text("")
+        >>> devices == [] and bool(error)
+        True
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith(("超时", "失败")) or "超过总时限" in stripped:
+        return [], stripped or "没有输出"
+    try:
+        return parse_pnp_devices(stripped), ""
+    except json.JSONDecodeError as exc:
+        return [], f"不是设备 JSON：{exc}"
+
+
+def _list_windows() -> list[UsbDevice]:
+    """列出当前存在的 USB 设备。
+
+    先用 CIM。CIM 失败才用 ``Get-PnpDevice``，并且不再逐台查父设备。
+
+    Returns:
+        list[UsbDevice]: 解析后的设备。命令成功但没有设备时为空列表。
 
     Raises:
-        RuntimeError: PowerShell 没有正常返回。
+        RuntimeError: 快速探测和兜底都没有拿到可解析的结果。
 
     Examples:
         >>> callable(_list_windows)
         True
     """
-    script = (
-        "Get-PnpDevice -PresentOnly | "
-        "Where-Object { $_.InstanceId -match '^(USB|HID|USBSTOR)\\\\' } | "
-        "ForEach-Object { "
-        "$parent = ''; "
-        "try { $parent = [string](Get-PnpDeviceProperty -InstanceId $_.InstanceId "
-        "-KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data } catch {} "
-        "[PSCustomObject]@{ FriendlyName = $_.FriendlyName; InstanceId = $_.InstanceId; "
-        "Class = $_.Class; Parent = $parent } "
-        "} | ConvertTo-Json -Compress"
-    )
-    result = run_capture(
-        ["powershell", "-NoProfile", "-Command", script],
-        timeout=20,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip() or f"退出码 {result.returncode}"
-        raise RuntimeError(f"读取 USB 设备失败：{detail}")
-    return parse_pnp_devices(result.stdout)
+    notes: list[str] = []
+    for label, command, timeout in (
+        ("Get-CimInstance", _cim_usb_command(), _FAST_PROBE_TIMEOUT),
+        ("Get-PnpDevice", _pnp_fallback_command(), _FALLBACK_PROBE_TIMEOUT),
+    ):
+        ok, text = _command_text(command, timeout, label)
+        if not ok:
+            notes.append(text)
+            continue
+        try:
+            return parse_pnp_devices(text)
+        except json.JSONDecodeError as exc:
+            notes.append(f"{label} 不是设备 JSON：{exc}")
+    raise RuntimeError("；".join(notes) or "没有枚举到 USB 设备")
 
 
 def _list_macos() -> list[UsbDevice]:
@@ -221,6 +457,7 @@ def _list_macos() -> list[UsbDevice]:
 def ukey_raw_text() -> dict[str, str]:
     """读取 UKey 检测用到的系统原文。
 
+    设备和证书并行采集。任何一条超时或失败都写成说明，不抛异常。
     证书查询只含主体、颁发者、截止日期和指纹，不含私钥。
 
     Returns:
@@ -230,52 +467,97 @@ def ukey_raw_text() -> dict[str, str]:
         >>> callable(ukey_raw_text)
         True
     """
-    return {"usb": _capture_usb_text(), "certificates": _capture_certificate_text()}
+    try:
+        rows = run_named_probes(
+            [
+                ("usb", _capture_usb_outcome),
+                ("certificates", _capture_certificate_outcome),
+            ],
+            budget=_DOWNLOAD_BUDGET,
+        )
+    except Exception as exc:
+        message = f"读取诊断原文失败：{exc}"
+        return {"usb": message, "certificates": message}
+    found = {name: text for name, _ok, text in rows}
+    return {
+        "usb": _clip_probe_text(found.get("usb") or "没有 USB 原文。"),
+        "certificates": _clip_probe_text(found.get("certificates") or "没有证书原文。"),
+    }
+
+
+def _clip_probe_text(text: str) -> str:
+    """截断过长的探测原文。
+
+    Args:
+        text: 命令输出或失败说明。
+
+    Returns:
+        str: 最长约 1 MB。
+
+    Examples:
+        >>> _clip_probe_text("abc")
+        'abc'
+    """
+    if len(text) > 1_000_000:
+        return text[:1_000_000] + "\n...已截断"
+    return text
+
+
+def _capture_usb_outcome() -> tuple[bool, str]:
+    """采集 USB 原文，并把失败收成文字。
+
+    Returns:
+        tuple[bool, str]: 是否至少有一条探测成功，以及拼好的原文。
+
+    Examples:
+        >>> callable(_capture_usb_outcome)
+        True
+    """
+    try:
+        if sys.platform == "win32":
+            rows = _windows_usb_sections()
+            return any(ok for _name, ok, _text in rows), _format_probe_sections(rows)
+        if sys.platform == "darwin":
+            return _command_text(
+                ["system_profiler", "SPUSBDataType", "-json"],
+                12,
+                "system_profiler",
+            )
+        return True, "当前系统没有 USB 列举命令。"
+    except Exception as exc:
+        return False, f"失败：USB：{exc}"
 
 
 def _capture_usb_text() -> str:
     """执行当前系统的 USB 列举命令并返回原文。
 
+    Windows 上先并行跑 CIM 和 pnputil。两者都失败才兜底 ``Get-PnpDevice``，
+    并且不再逐台查父设备。超时和异常都留在原文里。
+
     Returns:
-        str: 标准输出。失败时附上退出码和错误输出。
+        str: 探测原文。失败时是说明，不抛异常。
+
+    Examples:
+        >>> callable(_capture_usb_text)
+        True
     """
-    if sys.platform == "win32":
-        command = [
-            "powershell", "-NoProfile", "-Command",
-            "Get-PnpDevice -PresentOnly | "
-            "Where-Object { $_.InstanceId -match '^(USB|HID|USBSTOR)\\\\' } | "
-            "ForEach-Object { "
-            "$parent = ''; "
-            "try { $parent = [string](Get-PnpDeviceProperty -InstanceId $_.InstanceId "
-            "-KeyName 'DEVPKEY_Device_Parent' -ErrorAction Stop).Data } catch {} "
-            "[PSCustomObject]@{ FriendlyName = $_.FriendlyName; InstanceId = $_.InstanceId; "
-            "Class = $_.Class; Parent = $parent } "
-            "} | ConvertTo-Json -Compress",
-        ]
-        timeout = 20
-    elif sys.platform == "darwin":
-        command = ["system_profiler", "SPUSBDataType", "-json"]
-        timeout = 25
-    else:
-        return "当前系统没有 USB 列举命令。"
-    result = run_capture(command, timeout=timeout)
-    text = result.stdout or ""
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip()
-        text += f"\n退出码 {result.returncode}\n{detail}"
-    if len(text) > 1_000_000:
-        text = text[:1_000_000] + "\n...已截断"
-    return text
+    _ok, text = _capture_usb_outcome()
+    return _clip_probe_text(text)
 
 
-def _capture_certificate_text() -> str:
-    """读取当前用户证书库的公开字段原文。
+def _capture_certificate_outcome() -> tuple[bool, str]:
+    """读取证书库原文。失败时返回说明，不抛异常。
 
     Returns:
-        str: PowerShell 输出。非 Windows 或查询失败时返回说明。
+        tuple[bool, str]: 是否读到命令结果，以及原文或失败说明。
+
+    Examples:
+        >>> ok, text = _capture_certificate_outcome()
+        >>> ok is True and "证书" in text
+        True
     """
     if sys.platform != "win32":
-        return "当前系统没有 Windows 证书库，读不到 UKey 证书单位。"
+        return True, "当前系统没有 Windows 证书库，读不到 UKey 证书单位。"
     script = (
         "Get-ChildItem Cert:\\CurrentUser\\My | "
         "Where-Object { $_.NotAfter -gt (Get-Date) } | "
@@ -283,14 +565,24 @@ def _capture_certificate_text() -> str:
         "NotAfter = $_.NotAfter.ToString('yyyy-MM-dd'); Thumbprint = $_.Thumbprint } } | "
         "ConvertTo-Json -Compress"
     )
-    result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
-    text = result.stdout or ""
-    if result.returncode != 0:
-        detail = (result.stderr or "").strip()
-        text += f"\n退出码 {result.returncode}\n{detail}"
-    if len(text) > 1_000_000:
-        text = text[:1_000_000] + "\n...已截断"
-    return text or "证书库没有返回内容。"
+    try:
+        return _command_text(_powershell(script), _FAST_PROBE_TIMEOUT, "证书库")
+    except Exception as exc:
+        return False, f"失败：证书库：{exc}"
+
+
+def _capture_certificate_text() -> str:
+    """读取当前用户证书库的公开字段原文。
+
+    Returns:
+        str: PowerShell 输出。非 Windows 或查询失败时返回说明，不抛异常。
+
+    Examples:
+        >>> isinstance(_capture_certificate_text(), str)
+        True
+    """
+    _ok, text = _capture_certificate_outcome()
+    return _clip_probe_text(text or "证书库没有返回内容。")
 
 
 def _walk_macos(nodes: list[object], found: list[UsbDevice]) -> None:
@@ -529,11 +821,36 @@ def _device_rank(device: UsbDevice) -> tuple[bool, bool]:
 def probe_ukeys() -> dict[str, object]:
     """检测外部 USB 和证书，判断多把 UKey 能不能分开。
 
+    枚举失败时仍返回结论对象，不把异常抛给下载接口。
+
     Returns:
         dict[str, object]: 设备、证书、是否可区分，以及给现场看的中文结论。
 
     Examples:
         >>> isinstance(probe_ukeys(), dict)
+        True
+    """
+    try:
+        return _probe_ukeys_uncached()
+    except Exception as exc:
+        return {
+            "devices": [],
+            "ukeys": [],
+            "certificates": [],
+            "distinguishable": False,
+            "summary": f"读取 USB 设备失败：{exc}",
+            "error": str(exc),
+        }
+
+
+def _probe_ukeys_uncached() -> dict[str, object]:
+    """真正执行一次 UKey 检测。
+
+    Returns:
+        dict[str, object]: 和 :func:`probe_ukeys` 相同的字段。
+
+    Examples:
+        >>> callable(_probe_ukeys_uncached)
         True
     """
     error = ""
@@ -542,7 +859,11 @@ def probe_ukeys() -> dict[str, object]:
     except Exception as exc:
         devices = []
         error = str(exc)
-    certificates = _list_certificates()
+    try:
+        certificates = _list_certificates()
+    except Exception as exc:
+        certificates = []
+        error = error or f"读取证书失败：{exc}"
     ukeys = [device for device in devices if device.ukey_candidate]
     organizations = _certificate_orgs(certificates)
     return {
@@ -625,6 +946,287 @@ def ukey_summary(ukeys: list[UsbDevice], organizations: list[str], error: str = 
     return "".join(lines)
 
 
+def gather_ukey_download_parts() -> tuple[dict[str, object], dict[str, str], str]:
+    """并行采集检测结论和原文，任何失败都收进警告。
+
+    下载接口用这个结果写 zip。函数本身不抛异常，这样枚举超时也不会变成 HTTP 500。
+
+    Returns:
+        tuple[dict[str, object], dict[str, str], str]: 检测结论、原文、给界面看的警告。
+        警告为空表示这次枚举没有失败说明。
+
+    Examples:
+        >>> callable(gather_ukey_download_parts)
+        True
+    """
+    try:
+        rows = run_named_probes(
+            [
+                ("report", _probe_outcome),
+                ("raw", _raw_outcome),
+            ],
+            budget=_DOWNLOAD_BUDGET,
+        )
+    except Exception as exc:
+        message = f"读取 USB 设备失败：{exc}"
+        report = {
+            "devices": [],
+            "ukeys": [],
+            "certificates": [],
+            "distinguishable": False,
+            "summary": message,
+            "error": str(exc),
+        }
+        return report, {"usb": message, "certificates": message}, message
+    found = {name: text for name, _ok, text in rows}
+    report = _decode_report_outcome(found.get("report") or "")
+    raw = _decode_raw_outcome(found.get("raw") or "")
+    return report, raw, ukey_download_warning(report, raw)
+
+
+def _probe_outcome() -> tuple[bool, str]:
+    """把检测结论收成 JSON 文字，失败也返回。
+
+    Returns:
+        tuple[bool, str]: 是否没有错误字段，以及 JSON 文本。
+
+    Examples:
+        >>> callable(_probe_outcome)
+        True
+    """
+    try:
+        report = probe_ukeys()
+        if not isinstance(report, dict):
+            report = {
+                "devices": [],
+                "ukeys": [],
+                "certificates": [],
+                "distinguishable": False,
+                "summary": str(report),
+                "error": "检测结果不是对象",
+            }
+        return not str(report.get("error") or "").strip(), json.dumps(report, ensure_ascii=False)
+    except Exception as exc:
+        payload = {
+            "devices": [],
+            "ukeys": [],
+            "certificates": [],
+            "distinguishable": False,
+            "summary": f"读取 USB 设备失败：{exc}",
+            "error": str(exc),
+        }
+        return False, json.dumps(payload, ensure_ascii=False)
+
+
+def _raw_outcome() -> tuple[bool, str]:
+    """把 USB 和证书原文收成 JSON。
+
+    Returns:
+        tuple[bool, str]: 原文里没有超时或失败字样时为成功，以及 JSON 文本。
+
+    Examples:
+        >>> callable(_raw_outcome)
+        True
+    """
+    try:
+        raw = ukey_raw_text()
+        if not isinstance(raw, dict):
+            raw = {"usb": str(raw), "certificates": ""}
+        usb = str(raw.get("usb") or "")
+        certificates = str(raw.get("certificates") or "")
+        failed = _text_has_probe_failure(usb) or _text_has_probe_failure(certificates)
+        payload = {"usb": usb, "certificates": certificates}
+        return not failed, json.dumps(payload, ensure_ascii=False)
+    except Exception as exc:
+        message = f"读取诊断原文失败：{exc}"
+        return False, json.dumps({"usb": message, "certificates": message}, ensure_ascii=False)
+
+
+def _decode_report_outcome(text: str) -> dict[str, object]:
+    """从并行探测的文字里还原检测结论。
+
+    Args:
+        text: JSON 对象，或超时说明。
+
+    Returns:
+        dict[str, object]: 检测结论。解析失败时 ``error`` 里是原文。
+
+    Examples:
+        >>> _decode_report_outcome("超时")["error"]
+        '超时'
+    """
+    fallback = {
+        "devices": [],
+        "ukeys": [],
+        "certificates": [],
+        "distinguishable": False,
+        "summary": text or "没有检测结论。",
+        "error": text or "没有检测结论。",
+    }
+    try:
+        parsed = json.loads(text or "")
+    except json.JSONDecodeError:
+        return fallback
+    if not isinstance(parsed, dict):
+        return fallback
+    parsed.setdefault("devices", [])
+    parsed.setdefault("ukeys", [])
+    parsed.setdefault("certificates", [])
+    parsed.setdefault("distinguishable", False)
+    parsed.setdefault("summary", "")
+    parsed.setdefault("error", "")
+    return parsed
+
+
+def _decode_raw_outcome(text: str) -> dict[str, str]:
+    """从并行探测的文字里还原 USB 和证书原文。
+
+    Args:
+        text: JSON 对象，或超时说明。
+
+    Returns:
+        dict[str, str]: ``usb`` 和 ``certificates``。
+
+    Examples:
+        >>> _decode_raw_outcome("超时")["usb"]
+        '超时'
+    """
+    try:
+        parsed = json.loads(text or "")
+    except json.JSONDecodeError:
+        message = text or "没有诊断原文。"
+        return {"usb": message, "certificates": message}
+    if not isinstance(parsed, dict):
+        message = text or "没有诊断原文。"
+        return {"usb": message, "certificates": message}
+    return {
+        "usb": str(parsed.get("usb") or ""),
+        "certificates": str(parsed.get("certificates") or ""),
+    }
+
+
+_SECTION_HEADER = re.compile(r"(?m)^===== .+ =====\s*")
+
+
+def _probe_sections(text: str) -> list[str]:
+    """按诊断分段标题切开原文。
+
+    Args:
+        text: 一条或几条探测拼起来的原文。
+
+    Returns:
+        list[str]: 去掉标题后的各段。没有标题时整段作为一块。
+
+    Examples:
+        >>> _probe_sections("===== CIM =====\\nVID_096E")
+        ['VID_096E']
+    """
+    raw = text or ""
+    if not _SECTION_HEADER.search(raw):
+        return [raw] if raw else []
+    return [part.strip() for part in _SECTION_HEADER.split(raw) if part.strip()]
+
+
+def _section_failed(text: str) -> bool:
+    """判断这一段是不是枚举超时或失败说明。
+
+    只看第一行。设备名或证书主题里偶然出现「超时」不算失败。
+
+    Args:
+        text: 一段探测原文。
+
+    Returns:
+        bool: 第一行是超时或失败说明时为 True。
+
+    Examples:
+        >>> _section_failed("超时（6 秒）：pnputil")
+        True
+        >>> _section_failed('[{"Name":"操作超时"}]')
+        False
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    head = stripped.splitlines()[0].strip()
+    return head.startswith(("超时", "失败")) or "超过总时限" in head
+
+
+def _failure_excerpt(text: str) -> str:
+    """取出第一段失败说明，跳过诊断分段标题。
+
+    Args:
+        text: 探测原文。
+
+    Returns:
+        str: 失败段的第一行，最长 180 字。没有失败段时为空串。
+
+    Examples:
+        >>> _failure_excerpt("===== CIM =====\\n超时（6 秒）：CIM")
+        '超时（6 秒）：CIM'
+    """
+    for section in _probe_sections(text):
+        if _section_failed(section):
+            return section.strip().splitlines()[0][:180]
+    return ""
+
+
+def _text_has_probe_failure(text: str) -> bool:
+    """判断这次枚举是不是整段都失败了。
+
+    多段探测里只要有一段成功，就不把另外一段的超时当成整次失败。
+    否则 CIM 已经列出设备、pnputil 超时，界面仍会报采集不完整。
+
+    Args:
+        text: 探测输出。
+
+    Returns:
+        bool: 没有成功段时为 True。空文本为 False。
+
+    Examples:
+        >>> _text_has_probe_failure("超时（6 秒）：Get-CimInstance")
+        True
+        >>> _text_has_probe_failure("VID_096E")
+        False
+        >>> mixed = "===== CIM =====\\nVID_096E\\n\\n===== pnputil =====\\n超时（6 秒）：pnputil"
+        >>> _text_has_probe_failure(mixed)
+        False
+    """
+    sections = _probe_sections(text)
+    if not sections:
+        return False
+    return all(_section_failed(part) for part in sections)
+
+
+def ukey_download_warning(report: dict[str, object], raw: dict[str, str]) -> str:
+    """抽出给界面看的一句警告。
+
+    Args:
+        report: 检测结论。
+        raw: USB 和证书原文。
+
+    Returns:
+        str: 没有失败时为空串，最长约 400 字。
+
+    Examples:
+        >>> ukey_download_warning({"error": ""}, {"usb": "VID_096E", "certificates": ""})
+        ''
+        >>> sample = {"usb": "超时（6 秒）：Get-CimInstance", "certificates": ""}
+        >>> "超时" in ukey_download_warning({"error": ""}, sample)
+        True
+    """
+    parts: list[str] = []
+    error = str(report.get("error") or "").strip()
+    if error:
+        parts.append(error)
+    usb = str(raw.get("usb") or "")
+    certificates = str(raw.get("certificates") or "")
+    if _text_has_probe_failure(usb) or _text_has_probe_failure(certificates):
+        source = usb if _text_has_probe_failure(usb) else certificates
+        first = _failure_excerpt(source)
+        parts.append(first or "部分设备或证书枚举没有完成，失败说明已经写进诊断包。")
+    return "；".join(dict.fromkeys(parts))[:400]
+
+
 def _list_certificates() -> list[dict[str, str]]:
     """读取当前用户尚未过期的证书。
 
@@ -646,11 +1248,11 @@ def _list_certificates() -> list[dict[str, str]]:
         "NotAfter = $_.NotAfter.ToString('yyyy-MM-dd'); Thumbprint = $_.Thumbprint } } | "
         "ConvertTo-Json -Compress"
     )
-    result = run_capture(["powershell", "-NoProfile", "-Command", script], timeout=20)
-    if result.returncode != 0 or not result.stdout.strip():
+    ok, text = _command_text(_powershell(script), _FAST_PROBE_TIMEOUT, "证书库")
+    if not ok or not text.strip() or text == "（没有输出）":
         return []
     try:
-        data = json.loads(result.stdout)
+        data = json.loads(text)
     except json.JSONDecodeError:
         return []
     rows = data if isinstance(data, list) else [data]

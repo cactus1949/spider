@@ -199,6 +199,49 @@ def default_profile_dir() -> Path:
     return Path.home() / ".local/share/spider-gd/browser-profiles/default"
 
 
+# 专用浏览器没打开业务站、停在 Chrome 错误页时给操作人员的说明。
+PAGE_LOAD_FAILED_MESSAGE = (
+    "业务页面加载失败（chrome-error），请在专用浏览器中刷新并确认 U-Key 证书客户端已运行后重新登录"
+)
+
+
+def is_browser_error_page(url: str) -> bool:
+    """判断标签是浏览器错误页，不能当作业务页。
+
+    ``about:blank`` 不算。专用浏览器启动时会短暂停在空白页再跳转。
+
+    Args:
+        url: 标签地址，例如 ``chrome-error://chromewebdata/``。
+
+    Returns:
+        bool: Chrome / Edge 错误页、崩溃页或 ``chromewebdata`` 时为 True。
+
+    Examples:
+        >>> is_browser_error_page("chrome-error://chromewebdata/")
+        True
+        >>> is_browser_error_page("https://pm.gd.csg.cn/portal/#/home")
+        False
+        >>> is_browser_error_page("about:blank")
+        False
+    """
+    text = (url or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if "chromewebdata" in lowered:
+        return True
+    parts = urlsplit(text)
+    scheme = parts.scheme.lower()
+    if scheme in {"chrome-error", "edge-error"}:
+        return True
+    host = (parts.netloc or "").lower()
+    path = (parts.path or "").lower()
+    chrome_hosts = {"crash", "kill", "hang", "badcastcrash", "system"}
+    blank_error = scheme == "about" and path == "neterror"
+    crashed = scheme == "chrome" and host in chrome_hosts
+    return blank_error or crashed
+
+
 def is_public_portal_url(url: str) -> bool:
     """广东门户首页和登录页也有导航菜单，不能据此认定已登录。"""
     from urllib.parse import urlsplit
@@ -352,14 +395,67 @@ class SharedBrowser:
     def is_running(self) -> bool:
         return self._browser is not None and bool(self._browser.is_connected())
 
+    def _bind_page(self, page: Any) -> None:
+        """把这一页设成当前业务页。
+
+        Args:
+            page: Playwright 页面对象。
+
+        Returns:
+            None: 结果写在实例上。
+
+        Examples:
+            >>> browser = SharedBrowser()
+            >>> page = type("P", (), {"context": "ctx"})()
+            >>> browser._bind_page(page)
+            >>> browser._pages == [page] and browser._context == "ctx"
+            True
+        """
+        self._context = page.context
+        self._pages = [page]
+        self._current_page_idx = 0
+
+    def _bind_failed_page_if_alone(self) -> None:
+        """只有错误页时也绑定它，让界面能标出加载失败。
+
+        旁边还有正常网页时不改绑定，避免把错误页盖过业务页。
+
+        Returns:
+            None: 没有单独的错误页时保持原绑定。
+
+        Examples:
+            >>> callable(SharedBrowser._bind_failed_page_if_alone)
+            True
+        """
+        live = [page for page in self._page_ids if not page.is_closed()]
+        failed = [
+            page for page in live
+            if is_browser_error_page(str(getattr(page, "url", "") or ""))
+        ]
+        if live and len(failed) == len(live):
+            self._bind_page(failed[-1])
+            logger.warning("专用浏览器当前页加载失败：{}", getattr(failed[-1], "url", ""))
+
     @property
     def page(self) -> Any:
-        if not self.is_running or not self._pages:
+        if not self.is_running:
             raise RuntimeError("浏览器未连接或尚未选择业务页面")
-        page = self._pages[self._current_page_idx]
-        if page.is_closed():
-            raise RuntimeError("已绑定的业务页面被关闭，请重新选择页面")
-        return page
+        if self._pages:
+            page = self._pages[self._current_page_idx]
+            if page.is_closed():
+                raise RuntimeError("已绑定的业务页面被关闭，请重新选择页面")
+            url = str(getattr(page, "url", "") or "")
+            if is_browser_error_page(url):
+                raise RuntimeError(PAGE_LOAD_FAILED_MESSAGE)
+            return page
+        live = [page for page in self._page_ids if not page.is_closed()]
+        failed = [
+            page for page in live
+            if is_browser_error_page(str(getattr(page, "url", "") or ""))
+        ]
+        if live and len(failed) == len(live):
+            raise RuntimeError(PAGE_LOAD_FAILED_MESSAGE)
+        raise RuntimeError("浏览器未连接或尚未选择业务页面")
 
     def _require_idle(self) -> None:
         if self._execution_lock.locked():
@@ -396,7 +492,14 @@ class SharedBrowser:
                 title = ""
                 with contextlib.suppress(Exception):
                     title = await asyncio.wait_for(page.title(), 2)
-                result.append({"id": page_id, "context": context_index, "title": title, "url": page.url})
+                url = str(page.url or "")
+                result.append({
+                    "id": page_id,
+                    "context": context_index,
+                    "title": title,
+                    "url": url,
+                    "load_error": is_browser_error_page(url),
+                })
         self._page_ids = {p: key for p, key in self._page_ids.items() if p in live}
         for page in [page for page in self._visibility_probes if page not in self._page_ids]:
             await self._discard_visibility_probe(page)
@@ -647,9 +750,9 @@ class SharedBrowser:
             from urllib.parse import urlsplit
             matches = [p for p in self._page_ids if urlsplit(p.url).netloc == urlsplit(self._config["target_origin"]).netloc]
             if len(matches) == 1:
-                self._context = matches[0].context
-                self._pages = matches
-                self._current_page_idx = 0
+                self._bind_page(matches[0])
+            elif not self._pages:
+                self._bind_failed_page_if_alone()
         except BaseException:
             await self._detach()
             raise
@@ -900,13 +1003,34 @@ class SharedBrowser:
     async def check_auth(
         self, page: Any = None, *, require_storage_keys: list[str] | None = None,
     ) -> dict[str, Any]:
-        """业务探测器：站点、成功元素、可选身份必须同时匹配。
+        """判断当前页是否已经登录业务站。
 
-        require_storage_keys 仅为兼容旧调用保留，不再读取 localStorage。
+        浏览器错误页记成未登录，并带上证书客户端说明。浏览器没连上、绑定页已关闭
+        仍记成未知，避免被当成可以自动登录。
+
+        Args:
+            page: 要检查的页面。空则用当前绑定页。
+            require_storage_keys: 兼容旧调用，不再读取 localStorage。
+
+        Returns:
+            dict[str, Any]: ``state`` 为 authenticated、unauthenticated、challenge、
+            wrong_account 或 unknown。``reason`` 是给界面的说明。
+
+        Examples:
+            >>> SharedBrowser.check_auth.__name__
+            'check_auth'
         """
         from urllib.parse import urlsplit
         try:
-            page = page or self.page
+            try:
+                page = page or self.page
+            except RuntimeError as exc:
+                reason = str(exc)
+                if reason == PAGE_LOAD_FAILED_MESSAGE:
+                    return {"state": "unauthenticated", "reason": reason}
+                raise
+            if is_browser_error_page(str(getattr(page, "url", "") or "")):
+                return {"state": "unauthenticated", "reason": PAGE_LOAD_FAILED_MESSAGE}
             if urlsplit(page.url).netloc != urlsplit(self._config["target_origin"]).netloc:
                 return {"state": "unauthenticated", "reason": "当前页面不是配置的业务站点"}
             if await page.locator(".ant-modal-confirm").first.is_visible():
@@ -968,7 +1092,10 @@ class SharedBrowser:
         self._event_sink = on_event
         self._save()
         try:
-            self.page  # 必须已经选择，禁止新建隔离 Context 兜底
+            await self.list_pages()
+            # 必须已经选择。错误页在这里抛出加载失败说明，禁止新建隔离 Context 兜底。
+            _bound = self.page
+            del _bound
             self.emit({"event": "run_started", "run_id": self._run["id"]})
             self._warn_stale_tabs()
             yield self.emit

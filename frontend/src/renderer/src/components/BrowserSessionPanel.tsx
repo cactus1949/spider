@@ -4,7 +4,13 @@ import { ChromeOutlined, ReloadOutlined } from '@ant-design/icons'
 
 const BASE = 'http://localhost:8800/api/browser'
 const DISMISSED_ALERT_KEY = 'spider-gd:dismissed-browser-run-alert'
-type Page = { id: string; title: string; url: string }
+const PAGE_LOAD_FAILED = '业务页面加载失败（chrome-error），请在专用浏览器中刷新并确认 U-Key 证书客户端已运行后重新登录'
+type Page = { id: string; title: string; url: string; load_error?: boolean }
+
+function pageLabel(page: Page): string {
+  const text = `${page.title || '无标题'} · ${page.url}`
+  return page.load_error ? `加载失败 · ${text}` : text
+}
 type Run = { id: string; name: string; state: string; reason: string; pause_version: number }
 type State = {
   running: boolean; busy: boolean; owns_process: boolean; selected_page_id?: string
@@ -83,7 +89,7 @@ export default function BrowserSessionPanel(): JSX.Element {
         <Select size="small" aria-label="当前绑定标签" value={state.selected_page_id || undefined}
           placeholder="等待当前标签页" showSearch optionFilterProp="label"
           style={{ width: 380, maxWidth: '45vw' }} disabled={state.busy || loading}
-          options={pages.map(page => ({ value: page.id, label: `${page.title || '无标题'} · ${page.url}` }))}
+          options={pages.map(page => ({ value: page.id, label: pageLabel(page) }))}
           onChange={page_id => void action('select', { page_id })} />
         <Button size="small" disabled={state.busy || loading || !state.selected_page_id} onClick={() => void action('auth/check')}>检查登录</Button>
         <Button size="small" disabled={state.busy || loading} onClick={() => void action('detach')}>断开连接</Button>
@@ -106,6 +112,9 @@ export default function BrowserSessionPanel(): JSX.Element {
         空闲时跟随专用浏览器当前标签{state.busy ? '；任务占用期间保持原来的绑定' : ''}
         {state.download_dir ? `。下载目录：${state.download_dir}` : ''}
       </Typography.Text>
+      {pages.some((page) => page.load_error && page.id === state.selected_page_id) && (
+        <div><Typography.Text type="warning">{PAGE_LOAD_FAILED}</Typography.Text></div>
+      )}
     </div>}
     {run && ['paused', 'interrupted', 'failed'].includes(run.state) && runAlertKey !== dismissedAlertKey &&
       <Alert style={{ marginTop: 8 }} showIcon closable

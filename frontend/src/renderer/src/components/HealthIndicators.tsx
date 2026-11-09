@@ -9,10 +9,11 @@ import {
 } from '@ant-design/icons'
 import { api, type Health } from '../services/api'
 
-type Status = 'ok' | 'err' | 'unknown'
+type Status = 'ok' | 'warn' | 'err' | 'unknown'
 
 const TAG_STYLE: Record<Status, React.CSSProperties> = {
   ok: { color: '#fff', background: '#10b981', borderColor: '#10b981' },
+  warn: { color: '#fff', background: '#f59e0b', borderColor: '#f59e0b' },
   err: { color: '#fff', background: '#ef4444', borderColor: '#ef4444' },
   unknown: { color: '#8b98a8', background: '#2d333b', borderColor: '#444c56' },
 }
@@ -25,6 +26,7 @@ function pickStatus(health: Health | null, keywords: string[]): Status {
   if (!c) return health.overall === 'healthy' ? 'ok' : 'err'
   const s = (c.status || '').toLowerCase()
   if (s.includes('ok') || s.includes('healthy') || s.includes('up')) return 'ok'
+  if (s === 'warn' || s.includes('warning') || s.includes('degraded')) return 'warn'
   return 'err'
 }
 
