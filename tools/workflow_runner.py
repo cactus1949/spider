@@ -35,6 +35,7 @@ for _path in (_TOOLS_DIR, _SRC_DIR):
 from calendar_data import (  # noqa: E402
     build_calendar_table,
     calendar_csv_text,
+    calendar_rows_from_api,
     merge_calendar_rows,
     normalize_month,
 )
@@ -406,42 +407,8 @@ class _PointerUnavailableError(RuntimeError):
     """旧输入路径的鼠标轨迹无法完成；默认输入路径遇到此错误会停止。"""
 
 
-#: 周选择器面板探测：只认可见面板，返回年月与目标日/翻月按钮在全文档同类节点里的索引，
-#: 供 _low_profile_click 用纯 CSS + index 点击（不用 Playwright 伪类，两条输入路径都兼容）。
-_WEEK_PICKER_PROBE_JS = r"""
-({day}) => {
-    const visible = el => !!(el && el.offsetParent !== null);
-    const panels = [...document.querySelectorAll('.el-picker-panel')]
-        .filter(p => visible(p) && p.querySelector('.el-date-table'));
-    if (!panels.length) return null;
-    const panel = panels[panels.length - 1];
-    const nums = [...panel.querySelectorAll('.el-date-picker__header-label')]
-        .map(el => parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10))
-        .filter(n => Number.isFinite(n));
-    let year = null, month = null;
-    for (const n of nums) {
-        if (n > 12) year = n;
-        else if (month === null) month = n;
-    }
-    const all = sel => [...document.querySelectorAll(sel)];
-    const tds = all('.el-picker-panel .el-date-table td');
-    const target = [...panel.querySelectorAll('.el-date-table td')].find(td =>
-        td.classList.contains('available') &&
-        !td.classList.contains('prev-month') &&
-        !td.classList.contains('next-month') &&
-        (td.textContent || '').trim() === String(day));
-    const lefts = all('.el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-left');
-    const rights = all('.el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-right');
-    const localLeft = panel.querySelector('.el-picker-panel__icon-btn.el-icon-arrow-left');
-    const localRight = panel.querySelector('.el-picker-panel__icon-btn.el-icon-arrow-right');
-    return {
-        year, month,
-        dayIndex: target ? tds.indexOf(target) : -1,
-        prevIndex: localLeft ? lefts.indexOf(localLeft) : -1,
-        nextIndex: localRight ? rights.indexOf(localRight) : -1,
-    };
-}
-"""
+#: 周明细不再轮询日期面板。翻周只做坐标点击，事件从 findTradeCalendar 响应读取。
+#: 月视图在没有捕获到该接口时，仍用下面的脚本读一次网格。
 
 #: FullCalendar 交易日历读取脚本。月/周/日视图通用：日期取 ``[data-date]``，
 #: 事件取 ``.fc-event``，状态取自定义样式类（tradeBg / NotBg / greyBg）。
@@ -685,6 +652,12 @@ class WorkflowRunner:
         self._page_observers: dict[Any, dict[str, Any]] = {}
         self._response_tasks: set[asyncio.Task] = set()
         self._page_errors: list[dict[str, Any]] = []
+        # findTradeCalendar 的响应正文。周明细从这里取事件，不再刮日历 DOM。
+        self._calendar_payloads: list[dict[str, Any]] = []
+        self._calendar_shown_monday: date | None = None
+        self._calendar_watch_baseline = 0
+        self._calendar_payload_baseline = 0
+        self._calendar_week_clicked = False
         self._console_errors: list[dict[str, Any]] = []
         self._page_exceptions: list[str] = []
         self._auth_traffic: list[dict[str, Any]] = []
@@ -1115,6 +1088,8 @@ class WorkflowRunner:
         self.pages.append(new_page)
         self._current_page_idx = len(self.pages) - 1
         self._observe_page(new_page)
+        # 新标签若没被选中，标签栏会空着，后台页的签名也容易被拒。
+        await self._bring_page_to_front(new_page)
 
     # ----- 页面观测：网关拒绝 / 控制台异常 / 网络静默 -----
 
@@ -1269,6 +1244,44 @@ class WorkflowRunner:
 
     _GATEWAY_BODY_MAX = 64
 
+    async def _remember_calendar_payload(self, response, request, status: int, url: str, content_type: str) -> None:
+        """记下 findTradeCalendar 的响应正文，供周明细直接使用。
+
+        这是网络监听，不在页面里执行脚本。正文只留这一条接口，并且截断。
+
+        Args:
+            response: Playwright 响应。
+            request: 对应请求，用来找所属页面。
+            status: HTTP 状态码。
+            url: 请求地址。
+            content_type: 响应类型。
+
+        Returns:
+            None: 结果追加到 ``_calendar_payloads``。
+
+        Examples:
+            >>> "findtradecalendar" in "https://x/findTradeCalendar".lower()
+            True
+        """
+        page = request.frame.page if getattr(request, "frame", None) is not None else None
+        text = ""
+        try:
+            body = await asyncio.wait_for(response.body(), timeout=2)
+            text = body[:1_000_000].decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        self._calendar_payloads.append({
+            "status": status,
+            "url": url,
+            "text": text,
+            "resource_type": getattr(request, "resource_type", "") or "xhr",
+            "content_type": content_type,
+            "page_url": self._page_url(page),
+            "_page": page,
+            "at": time.strftime("%H:%M:%S"),
+        })
+        del self._calendar_payloads[:-30]
+
     def _on_page_response(self, response) -> None:
         """同步接入点。正文长度在任务里读完再分类，避免挡住事件循环。"""
         try:
@@ -1301,6 +1314,8 @@ class WorkflowRunner:
                         content_type=content_type, page=self._trace_url(self._page_url(origin_page)),
                         context=str(id(origin_page.context)))
             self._record_auth_traffic(request, response, status, url, content_type, None)
+            if "findtradecalendar" in url.split("?", 1)[0].lower():
+                await self._remember_calendar_payload(response, request, status, url, content_type)
             if status < 400 or url.split("?", 1)[0].lower().endswith(self._STATIC_SUFFIXES):
                 return
             page = request.frame.page if request.frame is not None else None
@@ -2358,9 +2373,44 @@ class WorkflowRunner:
             await result
 
     async def _bring_page_to_front(self, page) -> None:
+        """把绑定页设成窗口里选中的标签。
+
+        只调 Playwright 的 ``bring_to_front``（对应 CDP ``Target.activateTarget``）。
+        失败时再试一次 CDP，并写警告。关掉当前标签或新开业务页之后必须调用，
+        否则标签栏会没有任何选中项，瑞数也会把后台页的签名判失效。
+
+        Args:
+            page: 要激活的页面。空页面直接返回。
+
+        Returns:
+            None: 激活结束后返回。页面没有这个方法时也返回。
+
+        Examples:
+            >>> inspect.iscoroutinefunction(WorkflowRunner._bring_page_to_front)
+            True
+        """
+        if page is None:
+            return
         bring = getattr(page, "bring_to_front", None)
-        with contextlib.suppress(Exception):
+        try:
             await self._call_optional(bring)
+            return
+        except Exception as exc:
+            logger.warning("  绑定页未能带到前台: {}", exc)
+        try:
+            session = await page.context.new_cdp_session(page)
+        except Exception:
+            return
+        try:
+            info = await session.send("Target.getTargetInfo")
+            target_id = str((info.get("targetInfo") or {}).get("targetId") or "")
+            if target_id:
+                await session.send("Target.activateTarget", {"targetId": target_id})
+        except Exception as exc:
+            logger.warning("  CDP 激活标签失败: {}", exc)
+        finally:
+            with contextlib.suppress(Exception):
+                await session.detach()
 
     async def _human_move_to(self, box: dict) -> None:
         """按人的轨迹分段移到 box 中心附近并停住；只移动，不按键。
@@ -3931,14 +3981,19 @@ class WorkflowRunner:
         if page_to_close in self._protected_pages:
             logger.info("保留用户已有页面")
             return
+        survivor = self.pages[index - 1] if index > 0 else self.pages[index + 1]
+        # 先选中留下的标签再关，避免标签栏出现没有任何选中项的状态。
+        await self._bring_page_to_front(survivor)
         self.pages.pop(index)
         try:
             await page_to_close.close()
         except Exception as exc:
             logger.warning("  关闭标签页失败: {}", exc)
-        # 调整当前索引
-        if self._current_page_idx >= len(self.pages):
+        if survivor in self.pages:
+            self._current_page_idx = self.pages.index(survivor)
+        elif self._current_page_idx >= len(self.pages):
             self._current_page_idx = len(self.pages) - 1
+        await self._bring_page_to_front(self.page)
         logger.info("  已关闭标签页 #{}，剩余 {} 个", index, len(self.pages))
 
     async def _do_close_other_tabs(self, step: dict) -> None:
@@ -3964,6 +4019,7 @@ class WorkflowRunner:
         kept_page = self.pages[keep_idx]
         self.pages = [kept_page] + [p for p in self.pages if p != kept_page and p in self._protected_pages]
         self._current_page_idx = 0
+        await self._bring_page_to_front(kept_page)
         logger.info("  已关闭 {} 个其他标签页，保留 #{}", closed, keep_idx)
 
     async def _do_extract(self, step: dict) -> None:
@@ -4739,102 +4795,120 @@ class WorkflowRunner:
         if blocking:
             await self._pause_for_calendar_gateway(blocking)
 
-    async def _wait_calendar_week_shown(self, selector: str, monday: date) -> bool:
-        """等周视图切到目标周，途中网关拒绝就暂停。
+    def _tracked_calendar_monday(self) -> date:
+        """当前认为周视图停在哪一周。
 
-        不用 ``wait_for_function``。翻周后的日期格用和点击相同的页面脚本读取，
-        同时盯着日历查询有没有被网关拒绝。
-
-        Args:
-            selector: 周视图容器。
-            monday: 目标周的周一。
+        优先用上一周成功切过去的周一。还没切过时，按今天所在周，
+        和页面刚打开时默认显示的当前周一致。不再读日历 DOM。
 
         Returns:
-            bool: 日期格已经是这一周时为 True。超时仍未切到则为 False。
-
-        Raises:
-            WorkflowPaused: 翻周过程中当前文档被网关拒绝。
+            date: 该周周一。
 
         Examples:
-            >>> date(2026, 9, 7).weekday() == 0
+            >>> WorkflowRunner._tracked_calendar_monday.__name__
+            '_tracked_calendar_monday'
+        """
+        shown = getattr(self, "_calendar_shown_monday", None)
+        if isinstance(shown, date):
+            return shown
+        today = date.today()
+        return today - timedelta(days=today.weekday())
+
+    def _calendar_payload_on_page(self, item: dict) -> bool:
+        """这条日历响应是不是当前绑定页的。
+
+        Args:
+            item: ``_calendar_payloads`` 里的一条。
+
+        Returns:
+            bool: 没有页面归属，或归属就是当前页时为 True。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._calendar_payload_on_page({"status": 200})
             True
         """
-        deadline = time.monotonic() + 10
-        baseline = getattr(self, "_calendar_watch_baseline", 0)
+        owner = item.get("_page")
+        page = self.page
+        return not (owner is not None and page is not None and owner is not page)
+
+    async def _await_calendar_payload(self, baseline: int, *, clicked: bool) -> dict | None:
+        """等到这一周的 findTradeCalendar 响应。
+
+        没点翻周时用已经捕获的最近一条。点过之后只认基线之后的新响应。
+        网关 400 在这里暂停，不返回给调用方去记空周。
+
+        Args:
+            baseline: 本周点击前已有的响应条数。
+            clicked: 这一周是否点过日期格。
+
+        Returns:
+            dict | None: 响应记录。超时且没有可用响应时为 None。
+
+        Raises:
+            WorkflowPaused: 当前文档的日历或开关请求被网关拒绝。
+
+        Examples:
+            >>> "findTradeCalendar" in "findTradeCalendar"
+            True
+        """
+        if not clicked:
+            prior = [item for item in self._calendar_payloads if self._calendar_payload_on_page(item)]
+            if prior:
+                return prior[-1]
+        deadline = time.monotonic() + 8
+        watch = getattr(self, "_calendar_watch_baseline", 0)
         while time.monotonic() < deadline:
             await self._drain_response_captures()
-            blocking = self._calendar_blocking_errors(baseline)
+            blocking = self._calendar_blocking_errors(watch)
             if blocking:
                 await self._pause_for_calendar_gateway(blocking)
-            try:
-                shown = await self._shown_week_monday(selector)
-            except WorkflowExecutionError:
-                shown = None
-            if shown == monday:
-                return True
-            await asyncio.sleep(0.2)
-        return False
+            fresh = [
+                item for item in self._calendar_payloads[baseline:]
+                if self._calendar_payload_on_page(item)
+            ]
+            if fresh:
+                return fresh[-1]
+            await asyncio.sleep(0.15)
+        return None
 
     async def _do_select_calendar_week(self, step: dict, *, target: date | None = None) -> None:
         """用页面自带的周选择器把周视图移到任务目标周。
 
-        2026-10-31 现场核对：站点 FullCalendar 没有 fc-prev/next 工具栏，
-        翻周只能点 .date-box 里的只读周选择输入框（el-date-editor--week），
-        在弹出面板里翻月后点目标日期。点击统一走 _low_profile_click，
-        几何只由页面内 JS 读取，避免触发前置网关拒绝。
+        只做和日清算相同的坐标点击：打开日期框、按已知月份差点翻月、点目标日。
+        不轮询面板脚本，也不读日历 DOM。事件由随后的 findTradeCalendar 响应提供。
         """
         target = target or self.target_date or date.today()
         monday = target - timedelta(days=target.weekday())
         selector = str(step.get("selector") or ".calendar-box")
-        shown = await self._shown_week_monday(selector)
+        shown = self._tracked_calendar_monday()
+        self._calendar_week_clicked = shown != monday
         if shown == monday:
             return
+        await self._bring_page_to_front(self.page)
+        # 只做和日清算相同的坐标点击。月份差按已知周计算，不再轮询面板脚本。
         if not await self._low_profile_click(f"{selector} .date-box input", timeout=5000):
             if not await self._low_profile_click(".date-box input", timeout=5000):
                 raise WorkflowExecutionError("找不到周选择输入框（.date-box input）")
-        await asyncio.sleep(0.6)
-        state = None
-        for _ in range(24):
-            state = await self.page.evaluate(_WEEK_PICKER_PROBE_JS, {"day": monday.day})
-            if not isinstance(state, dict):
-                raise WorkflowExecutionError("周选择器面板没有弹出，无法翻周")
-            panel_ym = (state.get("year"), state.get("month"))
-            if panel_ym == (monday.year, monday.month):
-                break
-            if None in panel_ym:
-                raise WorkflowExecutionError("周选择器面板读不出年月，无法翻周")
-            going_back = panel_ym > (monday.year, monday.month)
-            arrow = ".el-icon-arrow-left" if going_back else ".el-icon-arrow-right"
-            index = int(state.get("prevIndex" if going_back else "nextIndex", -1))
-            if index < 0 or not await self._low_profile_click(
-                f".el-picker-panel .el-picker-panel__icon-btn{arrow}", timeout=3000, index=index,
-            ):
+        await asyncio.sleep(0.4)
+        delta = (monday.year - shown.year) * 12 + (monday.month - shown.month)
+        arrow = (
+            ".el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-left"
+            if delta < 0
+            else ".el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-right"
+        )
+        for _ in range(abs(delta)):
+            if not await self._low_profile_click(arrow, timeout=3000):
                 raise WorkflowExecutionError("周选择器翻月按钮不可用，无法翻周")
-            await asyncio.sleep(0.4)
-        else:
-            raise WorkflowExecutionError(f"周选择器无法翻到 {monday.isoformat()} 所在月份")
-        day_index = int(state.get("dayIndex", -1))
-        if day_index < 0 or not await self._low_profile_click(
-            ".el-picker-panel .el-date-table td", timeout=3000, index=day_index,
-        ):
+            await asyncio.sleep(0.35)
+        day_selector = (
+            ".el-picker-panel .el-date-table td.available"
+            f":not(.prev-month):not(.next-month):text-is('{monday.day}')"
+        )
+        if not await self._low_profile_click(day_selector, timeout=3000):
             raise WorkflowExecutionError(f"周选择器里找不到目标日期 {monday.isoformat()}")
-        if not await self._wait_calendar_week_shown(selector, monday):
-            raise WorkflowExecutionError(f"周视图没有切换到 {monday.isoformat()} 所在周")
-
-    async def _shown_week_monday(self, selector: str) -> date:
-        visible = await self.page.evaluate("""(selector) => {
-            const root = document.querySelector(selector);
-            const week = root && root.querySelector('.fc-dayGridWeek-view');
-            if (!week) return '';
-            const dates = [...week.querySelectorAll('.fc-daygrid-day[data-date]')]
-                .map(el => el.getAttribute('data-date')).filter(Boolean).sort();
-            return dates[0] || '';
-        }""", selector)
-        try:
-            shown = date.fromisoformat(str(visible))
-        except ValueError as exc:
-            raise WorkflowExecutionError("周视图未显示日期，无法定位目标周") from exc
-        return shown - timedelta(days=shown.weekday())
+        self._calendar_shown_monday = monday
+        self._calendar_week_clicked = True
 
     async def _do_extract_calendar_month_weeks(self, step: dict) -> None:
         """按月选、按周执行：一次运行内翻遍目标月的所有周并合并进月文件。
@@ -4852,12 +4926,18 @@ class WorkflowRunner:
         # 点“周”后页面上可能同时留着月视图日历盒。周选择器在周视图那一盒里，
         # 所以翻周用本步骤的 selector（.calendar-box:has(周视图)），不要点到月视图的输入框。
         week_selector = str(step.get("week_selector") or step.get("selector") or ".calendar-box")
-        extract_step = {**step, "action": "extract_calendar", "month_mode": "week"}
+        extract_step = {
+            **step,
+            "action": "extract_calendar",
+            "month_mode": "week",
+            "from_network": True,
+        }
         for monday in mondays:
             # 这一周里新出现的网关 400 不能记成「没有交易事件」。
             self._calendar_watch_baseline = len(self._page_errors)
+            self._calendar_payload_baseline = len(self._calendar_payloads)
+            await self._bring_page_to_front(self.page)
             await self._do_select_calendar_week({"selector": week_selector}, target=monday)
-            await self._ensure_calendar_settled(self._calendar_watch_baseline)
             await self._do_extract_calendar(extract_step, strict=False)
             await asyncio.sleep(0.8)
 
@@ -4885,27 +4965,60 @@ class WorkflowRunner:
             month_mode = "page"
 
         logger.info("  读取交易日历: {}", selector)
-        try:
-            raw = await self.page.evaluate(
-                _CALENDAR_EXTRACT_JS,
-                {"selector": selector, "includeOther": include_other},
+        network_view = ""
+        rows: list = []
+        if step.get("from_network"):
+            payload = await self._await_calendar_payload(
+                getattr(self, "_calendar_payload_baseline", 0),
+                clicked=bool(getattr(self, "_calendar_week_clicked", True)),
             )
-        except Exception as exc:
-            raise WorkflowExecutionError(f"交易日历读取失败: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise WorkflowExecutionError("交易日历读取失败: 页面返回结构异常")
-        rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
+            if payload is None and not getattr(self, "_calendar_week_clicked", True):
+                logger.warning("  没有捕获到 findTradeCalendar，退回读网格")
+            elif payload is None:
+                raise WorkflowExecutionError(
+                    "翻周后没有收到 findTradeCalendar 响应，不能记成没有交易事件"
+                )
+            elif int(payload.get("status") or 0) >= 400:
+                await self._pause_for_calendar_gateway([payload])
+            else:
+                parsed = calendar_rows_from_api(str(payload.get("text") or ""))
+                if parsed is None:
+                    raise WorkflowExecutionError(
+                        "findTradeCalendar 返回的不是 JSON，不能记成没有交易事件"
+                    )
+                rows = parsed
+                network_view = "周"
+        if not network_view:
+            try:
+                raw = await self.page.evaluate(
+                    _CALENDAR_EXTRACT_JS,
+                    {"selector": selector, "includeOther": include_other},
+                )
+            except Exception as exc:
+                raise WorkflowExecutionError(f"交易日历读取失败: {exc}") from exc
+            if not isinstance(raw, dict):
+                raise WorkflowExecutionError("交易日历读取失败: 页面返回结构异常")
+            rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
+            page_month_hint = str(raw.get("month") or "")
+            view_hint = str(raw.get("view") or "")
+        else:
+            page_month_hint = ""
+            view_hint = network_view
         if not rows:
             await self._ensure_calendar_settled(
                 getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
             )
             if not strict:
-                logger.info("  交易日历当前周无事件，跳过")
+                if step.get("from_network"):
+                    logger.info("  交易日历目标周没有交易事件，跳过")
+                    self._note_file("empty", reason="没有交易事件")
+                else:
+                    logger.info("  交易日历当前周无事件，跳过")
                 return
             # 不写空文件：没有日期通常意味着页面没加载完/账号没有日历权限。
             raise WorkflowExecutionError("交易日历读取失败: 页面上没有找到任何日期")
 
-        page_month = normalize_month(str(raw.get("month") or ""))
+        page_month = normalize_month(page_month_hint)
         target_month = (self.target_date or date.today()).strftime("%Y-%m")
         month = target_month if month_mode == "target" else (page_month or target_month)
 
@@ -4919,7 +5032,7 @@ class WorkflowRunner:
             if save_path.suffix.lower() != ".csv":
                 save_path = save_path.with_suffix(".csv")
             table = build_calendar_table(
-                rows, month=output_month, view=str(raw.get("view") or "月"),
+                rows, month=output_month, view=view_hint or "月",
                 include_empty_days=bool(include_empty_days),
                 captured_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             )

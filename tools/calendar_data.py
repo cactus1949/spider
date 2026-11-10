@@ -16,6 +16,7 @@ from __future__ import annotations
 import calendar
 import csv
 import io
+import json
 import re
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
@@ -27,6 +28,7 @@ __all__ = [
     "EMPTY_DAY_STATUS",
     "build_calendar_table",
     "calendar_csv_text",
+    "calendar_rows_from_api",
     "normalize_month",
 ]
 
@@ -272,3 +274,116 @@ def merge_calendar_rows(
 
     ordered = sorted(merged.items(), key=lambda item: item[0][0])
     return [header] + [values for _, values in ordered]
+
+
+_API_DATE_KEYS = ("date", "tradeDate", "pdate", "rq", "day", "jyrq", "日期")
+_API_EVENT_KEYS = ("event", "tradeName", "title", "name", "content", "tradeTypeName", "交易名称")
+_API_RANGE_KEYS = ("time_range", "delivery", "targetTime", "bdTime", "标的时间", "交易时间范围")
+_API_APPLY_KEYS = ("apply_time", "applyTime", "apply", "sbTime", "申报时间")
+_API_TYPE_KEYS = ("event_type", "tradeType", "type", "类型")
+_API_STATUS_KEYS = ("status", "tradeStatus", "state", "状态")
+_API_LIST_KEYS = ("data", "result", "records", "list", "rows", "content")
+
+
+def _api_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """按候选键取出第一段非空文本。
+
+    Args:
+        item: 接口里的一条记录。
+        keys: 字段名，先精确匹配，再忽略大小写。
+
+    Returns:
+        str: 找到的文本。都没有时为空字符串。
+
+    Examples:
+        >>> _api_text({"tradeName": "周双边"}, ("event", "tradeName"))
+        '周双边'
+    """
+    lowered = {str(key).lower(): value for key, value in item.items()}
+    for key in keys:
+        value = item.get(key, lowered.get(key.lower()))
+        text = str(value or "").strip()
+        if text and text.lower() not in {"none", "null"}:
+            return text
+    return ""
+
+
+def _unwrap_calendar_items(payload: Any) -> list[dict[str, Any]]:
+    """把接口外层剥到事件列表。
+
+    Args:
+        payload: ``json.loads`` 的结果。
+
+    Returns:
+        list[dict[str, Any]]: 事件记录。无法识别时为空列表。
+
+    Examples:
+        >>> _unwrap_calendar_items({"data": [{"date": "2026-09-01"}]})[0]["date"]
+        '2026-09-01'
+    """
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    for key in _API_LIST_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _unwrap_calendar_items(value)
+            if nested:
+                return nested
+            rows = []
+            for day, events in value.items():
+                if isinstance(events, list):
+                    for event in events:
+                        if isinstance(event, dict):
+                            rows.append({"date": str(day), **event})
+                elif isinstance(events, dict):
+                    rows.append({"date": str(day), **events})
+            if rows:
+                return rows
+    if _api_text(payload, _API_DATE_KEYS):
+        return [payload]
+    return []
+
+
+def calendar_rows_from_api(text: str) -> list[dict[str, str]] | None:
+    """把 findTradeCalendar 的 JSON 收成日历行。
+
+    不是 JSON 时返回 None，调用方不能把它当成空周。
+    JSON 里没有事件时返回空列表，那才是这一周确实没有安排。
+
+    Args:
+        text: 响应正文。
+
+    Returns:
+        list[dict[str, str]] | None: 每行含 date、event 等字段。解析失败为 None。
+
+    Examples:
+        >>> payload = '{"data":[{"tradeDate":"2026-09-07","tradeName":"周双边"}]}'
+        >>> calendar_rows_from_api(payload)[0]["event"]
+        '周双边'
+        >>> calendar_rows_from_api("<html></html>") is None
+        True
+        >>> calendar_rows_from_api('{"data":[]}')
+        []
+    """
+    try:
+        payload = json.loads(text or "")
+    except json.JSONDecodeError:
+        return None
+    rows: list[dict[str, str]] = []
+    for item in _unwrap_calendar_items(payload):
+        iso_date = _api_text(item, _API_DATE_KEYS)[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso_date):
+            continue
+        rows.append({
+            "date": iso_date,
+            "event": _api_text(item, _API_EVENT_KEYS),
+            "time_range": _api_text(item, _API_RANGE_KEYS),
+            "apply_time": _api_text(item, _API_APPLY_KEYS),
+            "event_type": _api_text(item, _API_TYPE_KEYS),
+            "status": _api_text(item, _API_STATUS_KEYS),
+        })
+    return rows

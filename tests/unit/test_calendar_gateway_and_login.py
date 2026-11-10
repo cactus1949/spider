@@ -128,3 +128,111 @@ async def test_login_click_skips_when_portal_home_already_shows_account(tmp_path
     assert runner._skip_remaining_login_steps is True
     assert any(event.get("event") == "workflow_done" for event in events)
     assert not any(event.get("event") == "step_error" for event in events)
+
+
+@pytest.mark.unit
+async def test_network_calendar_400_is_not_an_empty_week(tmp_path):
+    runner, events = _calendar_runner(tmp_path)
+    runner._calendar_payloads.append({**_gateway(), "text": "\r\n\r\n\r\n"})
+    runner._calendar_payload_baseline = 0
+    runner._calendar_week_clicked = True
+    runner._page_errors.append(_gateway())
+
+    with pytest.raises(WorkflowPaused, match="不能记成没有交易事件"):
+        await runner._do_extract_calendar(
+            {"from_network": True, "month_mode": "week", "include_empty_days": False},
+            strict=False,
+        )
+
+    assert not any(event.get("status") == "empty" for event in events)
+
+
+@pytest.mark.unit
+async def test_network_calendar_events_do_not_read_the_dom(tmp_path):
+    class _NoEval:
+        url = "https://pm.gd.csg.cn/pfjy/stc/index"
+
+        async def evaluate(self, *_args, **_kwargs):
+            raise AssertionError("周明细不应再执行页面脚本")
+
+    runner = WorkflowRunner(
+        {"name": "周"}, download_dir=str(tmp_path), target_date="2026-09-07",
+    )
+    runner.pages = [_NoEval()]
+    runner._calendar_week_clicked = True
+    runner._calendar_payload_baseline = 0
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": (
+            '{"data":[{"tradeDate":"2026-09-07","tradeName":"周双边",'
+            '"applyTime":"09-07 14:00"}]}'
+        ),
+        "resource_type": "xhr",
+        "content_type": "application/json",
+    })
+
+    await runner._do_extract_calendar(
+        {
+            "from_network": True,
+            "month_mode": "week",
+            "include_empty_days": False,
+            "save_as": "交易日历明细{month_iso}.csv",
+        },
+        strict=False,
+    )
+
+    text = (tmp_path / "交易日历明细2026-09.csv").read_text(encoding="utf-8-sig")
+    assert "周双边" in text
+
+
+class _Tab:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.front = 0
+        self.closed = False
+
+    async def bring_to_front(self) -> None:
+        self.front += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def opener(self):
+        return None
+
+
+@pytest.mark.unit
+async def test_closing_the_selected_tab_activates_the_one_left(tmp_path):
+    runner = WorkflowRunner({"name": "标签"}, download_dir=str(tmp_path))
+    keep = _Tab("https://pm.gd.csg.cn/portal/#/home")
+    gone = _Tab("https://pm.gd.csg.cn/pfjy/stc/index")
+    runner.pages = [keep, gone]
+    runner._current_page_idx = 1
+
+    await runner._do_close_tab({"index": 1})
+
+    assert gone.closed is True
+    assert keep.front >= 1
+    assert runner.page is keep
+
+
+@pytest.mark.unit
+async def test_new_business_tab_is_brought_to_front(tmp_path):
+    runner = WorkflowRunner({"name": "标签"}, download_dir=str(tmp_path))
+    portal = _Tab("https://pm.gd.csg.cn/portal/#/home")
+    popup = _Tab("https://pm.gd.csg.cn/pfjy/stc/index")
+
+    async def opener():
+        return portal
+
+    popup.opener = opener
+    runner.pages = [portal]
+
+    await runner._on_new_page(popup)
+
+    assert runner.page is popup
+    assert popup.front == 1

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
+import re
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 import yaml
@@ -70,6 +72,7 @@ async def test_week_navigation_already_on_target_week_does_nothing(tmp_path):
     page = _WeekPickerFakePage(shown_monday=date(2026, 10, 26))
     runner = WorkflowRunner({"name": "周"}, download_dir=str(tmp_path), target_date="2026-10-28")
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_select_calendar_week({"action": "select_calendar_week"})
     assert page.clicks == []
@@ -84,6 +87,7 @@ async def test_week_navigation_picks_day_via_week_picker(tmp_path):
     page = _WeekPickerFakePage(shown_monday=date(2026, 10, 26), panel_month=(2026, 10))
     runner = WorkflowRunner({"name": "周"}, download_dir=str(tmp_path), target_date="2026-10-19")
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_select_calendar_week({"action": "select_calendar_week"})
     assert page.shown_monday == date(2026, 10, 19)
@@ -99,6 +103,7 @@ async def test_week_navigation_crosses_month_backward(tmp_path):
     page = _WeekPickerFakePage(shown_monday=date(2026, 10, 26), panel_month=(2026, 10))
     runner = WorkflowRunner({"name": "周"}, download_dir=str(tmp_path), target_date="2026-09-28")
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_select_calendar_week({"action": "select_calendar_week"})
     assert page.shown_monday == date(2026, 9, 28)
@@ -113,6 +118,7 @@ async def test_week_navigation_crosses_month_forward(tmp_path):
     page = _WeekPickerFakePage(shown_monday=date(2026, 10, 26), panel_month=(2026, 10))
     runner = WorkflowRunner({"name": "周"}, download_dir=str(tmp_path), target_date="2026-11-04")
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_select_calendar_week({"action": "select_calendar_week"})
     assert page.shown_monday == date(2026, 11, 2)
@@ -142,35 +148,10 @@ class _WeekPickerFakePage:
         raise AssertionError("翻周不得走 page.click 路径")
 
     async def evaluate(self, script, arg=None):
-        if "el-date-picker__header-label" in script:
-            if not self.panel_open:
-                return None
-            year, month = self.panel_month
-            day = int(arg["day"])
-            import calendar as _cal
-
-            days = _cal.monthrange(year, month)[1]
-            return {
-                "year": year,
-                "month": month,
-                "dayIndex": day - 1 if 1 <= day <= days else -1,
-                "prevIndex": 0,
-                "nextIndex": 0,
-            }
-        if "fc-timeGridDay-view" in script:
-            # _CALENDAR_EXTRACT_JS：每周造一个事件（周一+3 天）。
-            # 注意要先于 fc-dayGridWeek-view 判断：提取脚本里也含周视图类名。
-            if self.shown_monday in self.empty_weeks:
-                return {"view": "周", "month": self.shown_monday.strftime("%Y-%m"), "rows": []}
-            day = self.shown_monday + timedelta(days=3)
-            return {"view": "周", "month": self.shown_monday.strftime("%Y-%m"),
-                    "rows": [{"date": day.isoformat(), "event": f"交易{day.isoformat()}"}]}
-        if "fc-dayGridWeek-view" in script:
-            return self.shown_monday.isoformat()
-        raise AssertionError(f"未预期的 evaluate 脚本: {script[:60]!r}")
+        raise AssertionError(f"翻周不得执行页面脚本: {str(script)[:60]!r}")
 
     async def wait_for_function(self, script, *, arg, timeout):
-        assert self.shown_monday.isoformat() == arg["expected"], "周视图未切到目标周"
+        raise AssertionError("翻周不得 wait_for_function")
 
     def apply_click(self, selector: str, index):
         self.selectors.append(selector)
@@ -187,10 +168,11 @@ class _WeekPickerFakePage:
                 year, month = year + 1, 1
             self.panel_month = (year, month)
             self.clicks.append(("prev-month" if delta < 0 else "next-month", None))
-        elif ".el-date-table td" in selector:
+        elif "text-is" in selector or ".el-date-table td" in selector:
             assert self.panel_open, "面板未打开就点日期格"
             year, month = self.panel_month
-            day = int(index) + 1
+            matched = re.search(r"text-is\('(\d+)'\)", selector)
+            day = int(matched.group(1)) if matched else int(index) + 1
             picked = date(year, month, day)
             self.shown_monday = picked - timedelta(days=picked.weekday())
             self.panel_open = False
@@ -202,6 +184,22 @@ class _WeekPickerFakePage:
 def _stub_picker_clicks(runner, page):
     async def fake_click(selector, *, timeout=3000, index=None):
         page.apply_click(selector, index)
+        if page.clicks and page.clicks[-1][0] == "day":
+            monday = page.shown_monday
+            day = monday + timedelta(days=3)
+            events = [] if monday in page.empty_weeks else [{
+                "date": day.isoformat(),
+                "tradeName": f"交易{day.isoformat()}",
+                "applyTime": day.strftime("%m-%d") + " 14:00",
+            }]
+            runner._calendar_payloads.append({
+                "status": 200,
+                "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+                "text": json.dumps({"code": 0, "data": events}),
+                "resource_type": "xhr",
+                "content_type": "application/json",
+                "_page": page,
+            })
         return True
 
     runner._low_profile_click = fake_click
@@ -218,6 +216,7 @@ async def test_month_weeks_loop_reads_every_week_of_month(tmp_path):
         target_date="2026-10-01", query_month="2026-10",
     )
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_extract_calendar_month_weeks({
         "action": "extract_calendar_month_weeks",
@@ -245,6 +244,7 @@ async def test_month_weeks_loop_tolerates_empty_week(tmp_path):
         target_date="2026-10-01", query_month="2026-10",
     )
     runner.pages = [page]
+    runner._calendar_shown_monday = page.shown_monday
     _stub_picker_clicks(runner, page)
     await runner._do_extract_calendar_month_weeks({
         "action": "extract_calendar_month_weeks",
