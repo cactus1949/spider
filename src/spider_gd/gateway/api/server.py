@@ -1586,14 +1586,11 @@ def create_app(
             except Exception as exc:
                 errors.append(f"{cfg_id}: {exc}")
 
-        # 刷新调度器
+        # 刷新调度器。连续导入时调度没变就不要拆掉再注册。
         try:
-            from spider_gd.app import register_jobs as _register_jobs
-            existing = await service._ctx.scheduler.list_jobs()
-            for j in existing:
-                if j.job_id.startswith("task_"):
-                    await service._ctx.scheduler.remove_job(j.job_id)
-            await _register_jobs(service._ctx)
+            from spider_gd.app import reload_task_jobs_if_changed
+
+            await reload_task_jobs_if_changed(service._ctx)
         except Exception:
             pass
 
@@ -1700,15 +1697,11 @@ def create_app(
         body["id"] = config_id
         service._ctx.state_store.save_task_config(body)
 
-        # 自动刷新调度
+        # 自动刷新调度。界面一次保存会把每条任务都 PUT 一遍，调度没变就跳过。
         try:
-            from spider_gd.app import register_jobs as _register_jobs
+            from spider_gd.app import reload_task_jobs_if_changed
 
-            existing = await service._ctx.scheduler.list_jobs()
-            for j in existing:
-                if j.job_id.startswith("task_"):
-                    await service._ctx.scheduler.remove_job(j.job_id)
-            await _register_jobs(service._ctx)
+            await reload_task_jobs_if_changed(service._ctx)
         except Exception:
             pass  # 不阻塞保存
 
@@ -1971,14 +1964,18 @@ def create_app(
             from spider_gd.core.path_structure import (
                 build_structure_dirs,
                 resolve_structure,
+                structure_indicator_scope,
                 structure_warnings,
             )
 
-            task_outputs = _workflow_outputs_for(service, task_indicators)
+            known_indicators = structure_indicator_scope(
+                task_indicators, cfg.get("_structure_indicators"),
+            )
+            task_outputs = _workflow_outputs_for(service, known_indicators)
             try:
                 result = resolve_structure(
                     structure,
-                    task_indicators,
+                    known_indicators,
                     outputs=task_outputs,
                     ssid=wifi_name,
                     when=datetime.now().date(),
@@ -1989,7 +1986,9 @@ def create_app(
                 raise HTTPException(
                     status_code=400, detail=f"任务存储结构配置错误: {exc}"
                 ) from exc
-            structure_issues = structure_warnings(result, task_outputs)
+            structure_issues = structure_warnings(
+                result, task_outputs, indicators=known_indicators,
+            )
             # 结构配置优先；不让我旧的 path_folders 再叠加一层。
             cfg["path_folders"] = []
             Path(dl_dir).mkdir(parents=True, exist_ok=True)

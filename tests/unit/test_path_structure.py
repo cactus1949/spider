@@ -158,6 +158,39 @@ def test_old_single_output_key_survives_week_step_insertion():
     assert result.assignments == {"交易日历::s8": ["周报"]}
 
 
+def test_structure_scope_keeps_tags_from_the_whole_task():
+    """补数据只跑其中一个指标时，任务结构里的其他标签不能被报成失效。"""
+    from spider_gd.core.path_structure import structure_indicator_scope
+
+    scope = structure_indicator_scope(["日清算"], ["日清算", "交易日历", "现货"])
+    result = resolve_structure(
+        "- 日\n  - [日清算]\n  - [交易日历]\n  - [现货]",
+        scope,
+    )
+
+    assert result.invalid == []
+    assert result.assignments["日清算::"] == ["日"]
+    assert structure_warnings(result, indicators=scope) == []
+
+
+def test_duplicate_invalid_tags_warn_once_and_name_the_reason():
+    result = resolve_structure(
+        "- [现货]\n- [现货]\n- [日清算::旧文件.xlsx]",
+        ["日清算"],
+        outputs={"日清算": [
+            OutputSpec("甲.xlsx", "日清算", 1, "export", "甲.xlsx", "甲.xlsx", "s1"),
+            OutputSpec("乙.xlsx", "日清算", 2, "export", "乙.xlsx", "乙.xlsx", "s2"),
+        ]},
+    )
+
+    lines = structure_warnings(result, indicators=["日清算"])
+
+    assert result.invalid.count("现货") == 2
+    assert sum("现货" in line for line in lines) == 1
+    assert any("现货" in line and "不在当前任务" in line for line in lines)
+    assert any("日清算::旧文件.xlsx" in line and "save_as" in line for line in lines)
+
+
 def test_structure_warnings_explain_invalid_tags_and_duplicate_save_as():
     outputs = {"指标X": [
         OutputSpec("s1", "指标X", 1, "export", "同名.xlsx", "同名.xlsx", "s1", True),

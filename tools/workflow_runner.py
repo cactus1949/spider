@@ -281,6 +281,127 @@ class WorkflowSkipRepeatRound(WorkflowExecutionError):
     """当前 repeat 日期没有数据，跳过本轮并继续下一轮。"""
 
 
+class WorkflowDateExportFailed(WorkflowExecutionError):
+    """单个日期的导出没有拿到文件。
+
+    日期循环捕获它之后继续后面的日期，并在循环结束时汇总失败原因。
+    按钮缺失、文档签名被网关拒绝这类整页问题不使用这个异常。
+    """
+
+
+# 业务页用弹窗说明「这一天没有数」时，不应把整次补数判死。
+_EXPORT_EMPTY_MARKERS = (
+    "暂无数据",
+    "无数据",
+    "没有数据",
+    "未查询到",
+    "没有查询到",
+    "尚未发布",
+    "暂未发布",
+    "未发布",
+    "暂无记录",
+    "无记录",
+)
+
+_EXPORT_NOTICE_SELECTORS = (
+    ".el-message-box__message",
+    ".el-message-box__content",
+    ".el-message--error .el-message__content",
+    ".el-message--warning .el-message__content",
+    ".el-notification__content",
+    ".ant-modal-confirm-content",
+    ".ant-message-error",
+    ".ant-message-warning",
+    ".ant-notification-notice-description",
+)
+
+
+def diagnose_export_miss(
+    errors: list[dict],
+    dialog_text: str = "",
+    *,
+    timeout_error: str = "",
+) -> dict[str, str] | None:
+    """判断这次导出为什么没有等到下载。
+
+    还没有任何弹窗、失败请求，并且下载仍在等待时返回 None。
+    页面已经说明该日没有数据时，``action`` 为 ``skip``，日期循环进入下一天。
+    网关空 HTML 400 时 ``action`` 为 ``gateway``，整次运行应暂停，不要在这份文档上继续点。
+    其他请求失败或超时 ``action`` 为 ``fail``：这一天失败，其余日期仍可继续。
+
+    Args:
+        errors: 点击导出之后新记下的页面请求错误。
+        dialog_text: 当前可见的提示框文字。
+        timeout_error: 下载等待已经结束时的原始异常文本。还在等待时留空。
+
+    Returns:
+        dict | None: 含 ``action`` 与 ``reason``。不能定性且下载还在等时为 None。
+
+    Examples:
+        >>> diagnose_export_miss([], "") is None
+        True
+        >>> diagnose_export_miss([], "查询结果暂无数据")["action"]
+        'skip'
+        >>> diagnose_export_miss([{
+        ...     "status": 400, "resource_type": "xhr", "content_type": "text/html",
+        ...     "body_size": 6, "body_blank": True, "url": "https://pm.gd.csg.cn/pfjs/export",
+        ... }], "")["action"]
+        'gateway'
+        >>> reason = diagnose_export_miss([{
+        ...     "status": 0, "resource_type": "xhr", "failure": "net::ERR_ABORTED",
+        ...     "content_type": "", "page_url": "https://pm.gd.csg.cn/page",
+        ...     "url": "https://pm.gd.csg.cn/pfjs/export",
+        ... }], "", timeout_error="Timeout 60000ms exceeded")["reason"]
+        >>> "HTTP 0" in reason and "net::ERR_ABORTED" in reason
+        True
+    """
+    text = re.sub(r"\s+", " ", str(dialog_text or "")).strip()
+    if text and any(marker in text for marker in _EXPORT_EMPTY_MARKERS):
+        return {"action": "skip", "reason": f"该日期没有可导出的数据：{text[:300]}"}
+
+    described = ""
+    if errors:
+        described = "；".join(WorkflowRunner._describe_page_errors(errors))[:500]
+    gateway = [item for item in errors if WorkflowRunner._is_gateway_form(item)]
+    if gateway:
+        return {
+            "action": "gateway",
+            "reason": (
+                "导出被网关拒绝（HTTP 400 空 HTML，当前文档的请求签名已失效）。"
+                f"{described}。"
+                "不要刷新当前文档，请取消本次运行，回到门户重新进入业务页后再导出。"
+            ),
+        }
+    if text:
+        return {"action": "fail", "reason": f"导出没有产生文件。页面提示：{text[:300]}"}
+    if errors:
+        statuses = []
+        for item in errors:
+            try:
+                statuses.append(int(item.get("status") or 0))
+            except (TypeError, ValueError):
+                statuses.append(0)
+        if statuses and all(status == 0 for status in statuses):
+            reason = (
+                "导出请求没有收到 HTTP 响应（HTTP 0），浏览器没有产生下载。"
+                f"{described}。"
+                "若同一页面的业务接口同时返回 HTTP 400 空 HTML，这是文档签名失效，"
+                "需要重新进入业务页；只有这一天失败时会继续补其余日期。"
+            )
+        else:
+            reason = f"导出请求失败，没有收到文件。{described}。"
+        return {"action": "fail", "reason": reason}
+    if timeout_error:
+        return {
+            "action": "fail",
+            "reason": (
+                "导出失败: 等待下载超时，没有捕获到文件、页面提示或失败请求。"
+                f"原始错误：{timeout_error[:300]}"
+            ),
+        }
+    return None
+
+
 class _PointerUnavailableError(RuntimeError):
     """旧输入路径的鼠标轨迹无法完成；默认输入路径遇到此错误会停止。"""
 
@@ -1254,6 +1375,25 @@ class WorkflowRunner:
 
     @staticmethod
     def _describe_page_errors(errors: list[dict]) -> list[str]:
+        """把页面请求错误收成短句。
+
+        HTTP 0 会带上浏览器的 ``failure``（例如 ``net::ERR_ABORTED``）。
+        没有这段文字时，日志里只有状态码，分不清连接被重置还是请求被页面取消。
+
+        Args:
+            errors: ``_page_errors`` 里的记录。
+
+        Returns:
+            list[str]: 每条是一种错误；相同错误合并次数。
+
+        Examples:
+            >>> text = WorkflowRunner._describe_page_errors([{
+            ...     "status": 0, "resource_type": "xhr",
+            ...     "url": "https://pm.gd.csg.cn/export", "failure": "net::ERR_ABORTED",
+            ... }])[0]
+            >>> text.endswith("failure=net::ERR_ABORTED")
+            True
+        """
         grouped: dict[str, int] = {}
         for item in errors:
             key = (
@@ -1263,6 +1403,9 @@ class WorkflowRunner:
                 f"page={item.get('page_url') or '-'} "
                 f"{str(item.get('url') or '').split('?', 1)[0]}"
             )
+            failure = str(item.get("failure") or "").strip()
+            if failure:
+                key += f" failure={failure}"
             grouped[key] = grouped.get(key, 0) + 1
         return [f"{key}（{count} 次）" if count > 1 else key for key, count in grouped.items()]
 
@@ -1881,7 +2024,26 @@ class WorkflowRunner:
     # ----- 具体实现 -----
 
     async def _do_repeat(self, step: dict) -> None:
-        """按日期重复选日期和导出。没有入参时用步骤上的默认窗口。"""
+        """按日期重复选日期和导出。没有入参时用步骤上的默认窗口。
+
+        某一天导出失败（下载超时、HTTP 0、页面提示）时记下原因并继续后面的日期。
+        网关 400 和按钮缺失仍会立刻结束整次运行。循环结束后，只要有日期失败，
+        就抛出汇总，避免任务被标成全部成功。
+
+        Args:
+            step: ``repeat`` 步骤，含嵌套 ``steps`` 和可选日期窗口。
+
+        Returns:
+            None: 每一天都成功或明确无数据时返回。
+
+        Raises:
+            WorkflowExecutionError: 至少有一天导出失败。
+            WorkflowPaused: 文档签名被网关拒绝，或用户取消暂停。
+
+        Examples:
+            >>> WorkflowDateExportFailed("HTTP 0").__class__.__name__
+            'WorkflowDateExportFailed'
+        """
         nested = [item for item in (step.get("steps") or []) if isinstance(item, dict)]
         dates = resolve_repeat_dates(step, self.config, self.repeat_dates, date.today())
         previous_prefix = getattr(self, "_repeat_output_key", None)
@@ -1895,6 +2057,7 @@ class WorkflowRunner:
             logger.info("  日期循环没有可执行的日期")
             return
         saved = self.target_date
+        failures: list[str] = []
         try:
             for index, (current, indexes) in enumerate(rounds, start=1):
                 if self._stopped:
@@ -1926,9 +2089,22 @@ class WorkflowRunner:
                         indicator=self._indicator_id(),
                     )
                     continue
+                except WorkflowDateExportFailed as exc:
+                    logger.error("  日期 {} 导出失败，继续后续日期：{}", current.isoformat(), exc)
+                    self._note_file("failed", reason=str(exc), when=current)
+                    self._emit(
+                        "repeat_date_failed",
+                        date=current.isoformat(),
+                        message=str(exc),
+                        indicator=self._indicator_id(),
+                    )
+                    failures.append(f"{current.isoformat()}：{exc}")
+                    continue
         finally:
             self.target_date = saved
             self._repeat_output_key = previous_prefix
+        if failures:
+            raise WorkflowExecutionError("部分日期导出失败：" + "；".join(failures))
 
     @staticmethod
     def _resolve_repeat_placeholders(value: Any, target: date) -> Any:
@@ -3254,8 +3430,253 @@ class WorkflowRunner:
             index += 1
         return saved
 
+    def _export_error_on_page(self, item: dict) -> bool:
+        """这条请求错误是不是当前绑定页上的。
+
+        Args:
+            item: ``_page_errors`` 中的一条。
+
+        Returns:
+            bool: 没有页面归属，或归属就是当前页时为 True。其他标签的错误为 False。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._export_error_on_page({"status": 0})
+            True
+        """
+        owner = item.get("_page")
+        page = self.page
+        return not (owner is not None and page is not None and owner is not page)
+
+    async def _read_export_notice(self) -> str:
+        """读取导出后弹出的错误框或提示文字。
+
+        Returns:
+            str: 合并后的可见文字。页面读不到时为空字符串。
+
+        Examples:
+            >>> "暂无数据" in "查询 暂无数据"
+            True
+        """
+        if self.page is None:
+            return ""
+        texts: list[str] = []
+        for selector in _EXPORT_NOTICE_SELECTORS:
+            try:
+                found = await self._dom_texts(selector, visible_only=True)
+            except Exception:
+                continue
+            for item in found:
+                cleaned = re.sub(r"\s+", " ", str(item or "")).strip()
+                if cleaned and cleaned not in texts:
+                    texts.append(cleaned)
+        return "；".join(texts)[:300]
+
+    async def _export_diagnosis(
+        self, baseline: int, timeout_error: str = "",
+    ) -> dict[str, str] | None:
+        """看点击之后的新错误和弹窗，决定这次导出算什么。
+
+        Args:
+            baseline: 点击前 ``_page_errors`` 的长度。
+            timeout_error: 下载等待已经结束时的原始异常。还在等时留空。
+
+        Returns:
+            dict | None: :func:`diagnose_export_miss` 的结果。
+
+        Examples:
+            >>> diagnose_export_miss([], "", timeout_error="") is None
+            True
+        """
+        await self._drain_response_captures()
+        errors = [
+            item for item in self._page_errors[baseline:]
+            if not item.get("_resolved") and self._export_error_on_page(item)
+        ]
+        dialog = await self._read_export_notice()
+        return diagnose_export_miss(errors, dialog, timeout_error=timeout_error)
+
+    async def _export_download(self, selector: str, timeout: int, baseline: int) -> tuple[str, Any]:
+        """点击导出并等待下载；出现弹窗或请求失败就提前返回。
+
+        Args:
+            selector: 导出按钮选择器。
+            timeout: 等待下载的毫秒数。
+            baseline: 点击前的错误条数，只把之后的新错误算进这次导出。
+
+        Returns:
+            tuple[str, Any]: ``("download", download)`` 或 ``("miss", diagnosis)``。
+
+        Raises:
+            WorkflowExecutionError: 导出按钮不存在，或点击过程中页面探测失败。
+
+        Examples:
+            >>> diagnose_export_miss([], "暂无数据")["action"]
+            'skip'
+        """
+        timeout_ms = max(int(timeout), 1)
+        context = self.page.expect_download(timeout=timeout_ms)
+        try:
+            download_info = await context.__aenter__()
+        except Exception as exc:
+            diagnosis = await self._export_diagnosis(baseline, timeout_error=str(exc))
+            if diagnosis is None:
+                diagnosis = {
+                    "action": "fail",
+                    "reason": f"导出失败: 等待下载时出错。原始错误：{exc}",
+                }
+            return ("miss", diagnosis)
+
+        closed = False
+
+        async def _close(exc_type=None, exc=None, tb=None) -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            with contextlib.suppress(Exception):
+                await context.__aexit__(exc_type, exc, tb)
+
+        try:
+            try:
+                clicked = await self._low_profile_click(selector, timeout=min(timeout_ms, 10000))
+            except WorkflowExecutionError:
+                await _close(WorkflowExecutionError, WorkflowExecutionError("点击未完成"), None)
+                raise
+            except Exception as exc:
+                await _close(type(exc), exc, exc.__traceback__)
+                raise WorkflowExecutionError(self._click_miss_message(selector)) from exc
+            if not clicked:
+                miss = WorkflowExecutionError(self._click_miss_message(selector))
+                await _close(WorkflowExecutionError, miss, None)
+                raise miss
+
+            async def _wait_value():
+                return await download_info.value
+
+            waiter = asyncio.create_task(_wait_value())
+            diagnosis: dict[str, str] | None = None
+            try:
+                deadline = time.monotonic() + timeout_ms / 1000
+                while True:
+                    diagnosis = await self._export_diagnosis(baseline)
+                    if diagnosis is not None:
+                        # 浏览器把成功的下载也记成 HTTP 0。给下载事件留一点时间，
+                        # 避免把已经开始的文件当成失败。
+                        if diagnosis.get("action") == "fail" and not waiter.done():
+                            await asyncio.wait({waiter}, timeout=1.0)
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _pending = await asyncio.wait({waiter}, timeout=min(0.3, remaining))
+                    if waiter in done:
+                        break
+                if waiter.done() and not waiter.cancelled() and waiter.exception() is None:
+                    download = waiter.result()
+                    self._acknowledge_page_errors([
+                        item for item in self._page_errors[baseline:]
+                        if self._export_error_on_page(item)
+                        and str(item.get("failure") or "").find("ERR_ABORTED") >= 0
+                    ])
+                    await _close()
+                    return ("download", download)
+                if diagnosis is None and waiter.done() and not waiter.cancelled():
+                    caught = waiter.exception()
+                    if caught is not None:
+                        diagnosis = await self._export_diagnosis(
+                            baseline, timeout_error=str(caught),
+                        )
+                if diagnosis is None:
+                    diagnosis = await self._export_diagnosis(
+                        baseline,
+                        timeout_error=(
+                            f'Timeout {timeout_ms}ms exceeded while waiting for event "download"'
+                        ),
+                    )
+                if diagnosis is None:
+                    diagnosis = {
+                        "action": "fail",
+                        "reason": "导出失败: 等待下载超时，没有捕获到文件。",
+                    }
+                return ("miss", diagnosis)
+            finally:
+                if not waiter.done():
+                    waiter.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await waiter
+        finally:
+            await _close(asyncio.CancelledError, asyncio.CancelledError(), None)
+
+    async def _settle_export_miss(
+        self, step: dict, diagnosis: dict[str, str], baseline: int,
+    ) -> None:
+        """按诊断结果结束这次没拿到文件的导出。
+
+        Args:
+            step: 导出步骤，用来读 ``save_as`` 和 API 兜底。
+            diagnosis: :func:`diagnose_export_miss` 的结果。
+            baseline: 点击前的错误条数。被本次诊断消费的错误会标成已确认，
+                避免下一天的导出闸门再被它们拦住。
+
+        Returns:
+            None: API 兜底成功时返回。
+
+        Raises:
+            WorkflowSkipRepeatRound: 页面说明该日没有可导出的数据。
+            WorkflowPaused: 文档签名被网关拒绝。
+            WorkflowDateExportFailed: 这一天导出失败，日期循环可以继续。
+
+        Examples:
+            >>> diagnose_export_miss([], "无数据")["action"]
+            'skip'
+        """
+        action = diagnosis.get("action") or "fail"
+        reason = str(diagnosis.get("reason") or "导出失败")
+        fresh = [
+            item for item in self._page_errors[baseline:]
+            if self._export_error_on_page(item)
+        ]
+        logger.error("  {}", reason)
+        if action == "skip":
+            self._acknowledge_page_errors(fresh)
+            self._note_file("empty", reason=reason)
+            raise WorkflowSkipRepeatRound(reason)
+        if action == "gateway":
+            if self.page is not None:
+                self._poisoned_pages.add(self.page)
+            await self._pause_and_wait(reason)
+            self._acknowledge_page_errors(fresh)
+            raise WorkflowPaused(reason)
+        self._acknowledge_page_errors(fresh)
+        save_name = str(step.get("save_as") or "")
+        if await self._try_api_fallback(save_name, RuntimeError(reason)):
+            return
+        raise WorkflowDateExportFailed(reason)
+
     async def _do_export(self, step: dict) -> None:
-        """点击导出并使用站点提供的原始文件名保存到配置目录。"""
+        """点击导出并使用站点提供的原始文件名保存到配置目录。
+
+        等待下载时同时看当前页的请求结果和提示框。网关 400、HTTP 0 或
+        「暂无数据」一类提示出现后立刻结束，不再干等下载事件。
+        保存阶段的异常仍视为整步失败。
+
+        Args:
+            step: ``export`` 步骤。可用 ``timeout``、``selector``、``save_as``。
+
+        Returns:
+            None: 文件已保存，或 API 兜底成功。
+
+        Raises:
+            WorkflowExecutionError: 按钮缺失，或文件保存失败。
+            WorkflowDateExportFailed: 这一天没有下载到文件。
+            WorkflowSkipRepeatRound: 页面说明该日没有数据。
+            WorkflowPaused: 文档签名失效，或导出前查询一直不结束。
+
+        Examples:
+            >>> "skip" == diagnose_export_miss([], "暂无数据")["action"]
+            True
+        """
         selector = step.get("selector", "button:has-text('导出')")
         save_name = str(step.get("save_as") or "")
         timeout = step.get("timeout", 30000)
@@ -3265,15 +3686,15 @@ class WorkflowRunner:
         )
 
         logger.info("  点击导出: {}", selector)
+        baseline = len(self._page_errors)
+        kind, payload = await self._export_download(selector, int(timeout), baseline)
+        if kind == "miss":
+            await self._settle_export_miss(step, payload, baseline)
+            return
 
+        download = payload
         try:
-            async with self.page.expect_download(timeout=timeout) as download_info:
-                if not await self._low_profile_click(selector, timeout=timeout):
-                    # 缺少导出按钮可走显式配置的 API 兜底；探测异常不能绕过。
-                    raise TimeoutError(self._click_miss_message(selector))
-            download = await download_info.value
             original_name = download.suggested_filename
-
             # 浏览器导出按 save_as 重命名（扩展名以站点为准），没写则保留站点原名。
             save_path = self._export_path(save_name, original_name)
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3291,14 +3712,8 @@ class WorkflowRunner:
                 logger.success("  导出成功（已保留旧版本 {}）→ {}", result.archived_path, save_path)
             else:
                 logger.success("  导出成功 → {}", save_path)
-
         except Exception as exc:
             logger.error("  导出失败: {}", exc)
-            await self._pause_until_export_ready()
-            if isinstance(exc, WorkflowExecutionError):
-                raise
-            if await self._try_api_fallback(save_name, exc):
-                return
             raise WorkflowExecutionError(f"导出失败: {exc}") from exc
 
     async def _try_api_fallback(self, save_as: str, original_error: BaseException) -> bool:
