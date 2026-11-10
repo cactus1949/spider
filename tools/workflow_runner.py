@@ -557,6 +557,8 @@ class WorkflowRunner:
         self._failed = False
         self._failure_reason = ""
         self._skip_remaining_login_steps = False
+        # 显式登录提交后，后续认证请求的 4xx/5xx 不能再按未登录前的探测请求忽略。
+        self._login_submit_seen = False
 
         # 页面观测。网关 4xx 只允许关掉本次新开的标签再重放，不刷新当前文档。
         self._page_observers: dict[Any, dict[str, Any]] = {}
@@ -1479,6 +1481,17 @@ class WorkflowRunner:
                 return False
             step = self.steps[index]
             if self.config.get("type") == "login" or step.get("_login_step"):
+                # 登录前的 logged/info 401 是未登录探测，可以确认后继续表单；
+                # 点过“立即登录”后再出现任何业务请求错误，必须告警并暂停，
+                # 否则会继续走后续步骤，最终把失败流程误认为完成。
+                if self._login_submit_seen:
+                    self._emit_http_rejection(index, errors, gateway=False)
+                    described = "；".join(self._describe_page_errors(errors))[:500]
+                    await self._pause_and_wait(
+                        "登录提交后请求异常，已暂停整个任务，不会继续执行后续步骤。"
+                        f"{described}。请处理证书/账号/验证码或网络问题后再继续。"
+                    )
+                    continue
                 # 登录提交后的网关空 HTML 400 只暂停。不刷新当前文档，也不重放立即登录。
                 gateway = [item for item in errors if self._is_gateway_form(item)]
                 if gateway and len(gateway) == len(errors):
@@ -2324,6 +2337,8 @@ class WorkflowRunner:
                 raise
             raise WorkflowExecutionError(self._click_miss_message(selector)) from exc
         logger.info("  点击: {}", selector)
+        if self.config.get("type") == "login" and "立即登录" in str(selector):
+            self._login_submit_seen = True
         await self._trace_browser_action("click.after")
 
         if expect == "new_tab":
@@ -2956,11 +2971,14 @@ class WorkflowRunner:
             text += "：" + "；".join(urls)
         return text
 
-    async def _pause_until_export_ready(self) -> None:
-        """导出前若当前页还有未处理请求错误，或当前页查询仍在途，就暂停。
+    async def _pause_until_export_ready(
+        self, *, timeout: int = 60000, settle_ms: int = 1200
+    ) -> None:
+        """导出前等待当前页查询完成，再给页面一个短暂稳定时间。
 
         其他标签的心跳、长轮询和失败请求不拦截这笔导出。
-        不靠「在途数一段时间没减少」放行当前页查询。日期算法和原有 wait 毫秒数不在这里改。
+        查询成功后自动等待 ``settle_ms``；只有请求失败或超过 ``timeout``
+        才暂停人工处理。这样慢网络会多等一会儿，不会直接把任务卡成暂停。
 
         Returns:
             None: 当前页可以导出时返回。
@@ -2972,11 +2990,18 @@ class WorkflowRunner:
             >>> WorkflowRunner._describe_inflight([])
             ''
         """
+        deadline = time.monotonic() + max(int(timeout), 0) / 1000
+        settle_s = max(int(settle_ms), 0) / 1000
         while True:
             await self._drain_response_captures()
             gateway = self._export_blocking_errors()
             inflight = self._inflight_query_requests()
             if not gateway and not inflight:
+                if settle_s:
+                    await asyncio.sleep(settle_s)
+                    await self._drain_response_captures()
+                    if self._export_blocking_errors() or self._inflight_query_requests():
+                        continue
                 return
             parts = []
             if gateway:
@@ -2987,6 +3012,11 @@ class WorkflowRunner:
             inflight_text = self._describe_inflight(inflight)
             if inflight_text:
                 parts.append(inflight_text)
+            if not gateway and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+                continue
+            if not gateway:
+                parts.insert(0, f"等待查询完成超过 {int(timeout)}ms")
             await self._pause_and_wait(
                 "导出前暂停。" + " ".join(parts) + "。不会在请求未确认时导出。"
             )
@@ -3226,10 +3256,13 @@ class WorkflowRunner:
 
     async def _do_export(self, step: dict) -> None:
         """点击导出并使用站点提供的原始文件名保存到配置目录。"""
-        await self._pause_until_export_ready()
         selector = step.get("selector", "button:has-text('导出')")
         save_name = str(step.get("save_as") or "")
         timeout = step.get("timeout", 30000)
+        await self._pause_until_export_ready(
+            timeout=int(step.get("query_wait_timeout", timeout)),
+            settle_ms=int(step.get("query_settle_ms", 1200)),
+        )
 
         logger.info("  点击导出: {}", selector)
 
@@ -3910,8 +3943,24 @@ class WorkflowRunner:
 
     async def _do_dismiss_modal(self, step: dict) -> None:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-        selector = ".ant-modal-confirm-btns button"
-        if not await self._dom_visible(selector, timeout=step.get("timeout", 5000)):
+        selector = step.get("selector", ".ant-modal-confirm-btns button")
+        timeout = step.get("timeout", 5000)
+        error_selectors = step.get("error_selectors") or [
+            selector,
+            ".ant-modal-confirm",
+            ".el-message-box",
+            ".ant-message-error",
+            ".el-message--error",
+            ".ant-notification-notice-error",
+        ]
+        visible_selector = ""
+        deadline = time.monotonic() + max(int(timeout), 0) / 1000
+        for candidate in error_selectors:
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            if await self._dom_visible(candidate, timeout=remaining):
+                visible_selector = candidate
+                break
+        if not visible_selector:
             return
         async def optional_text(selector):
             try:
@@ -3921,6 +3970,8 @@ class WorkflowRunner:
                 return ""
         title = await optional_text(".ant-modal-confirm-title")
         content = await optional_text(".ant-modal-confirm-content")
+        if not content:
+            content = await optional_text(visible_selector)
         reason = f"{title}: {content}" if title else content or "业务页面错误弹窗"
         if step.get("report_error", True):
             await self._pause_login_error(reason)
