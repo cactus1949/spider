@@ -399,9 +399,10 @@ export default function Tasks(): JSX.Element {
     api.listWorkflowGroups().then(setGroups).catch(() => {})
   }, [])
 
-  const persist = useCallback((next: AutoTask[]) => {
+  const persist = useCallback((next: AutoTask[], dirty: AutoTask[]) => {
     setTasks(next)
-    saveTaskConfigs(next)
+    // 只写改过的那一条。以前每次都把全部任务 PUT 一遍，后端就会把调度器拆装同样多遍。
+    if (dirty.length) saveTaskConfigs(dirty)
   }, [])
 
   const filtered = useMemo(() => {
@@ -555,7 +556,7 @@ export default function Tasks(): JSX.Element {
       const next = editing
         ? tasks.map((t) => (t.id === editing.id ? payload : t))
         : [payload, ...tasks]
-      persist(next)
+      persist(next, [payload])
 
       // 同时保存为后端 YAML 任务文件（含调度信息）
       try {
@@ -610,7 +611,7 @@ export default function Tasks(): JSX.Element {
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: () => {
-        persist(tasks.filter((t) => t.id !== task.id))
+        persist(tasks.filter((t) => t.id !== task.id), [])
         deleteTaskConfig(task.id)
         message.success('已删除')
       }
@@ -618,7 +619,8 @@ export default function Tasks(): JSX.Element {
   }
 
   const toggleEnabled = (task: AutoTask, enabled: boolean): void => {
-    persist(tasks.map((t) => (t.id === task.id ? { ...t, enabled } : t)))
+    const updated = { ...task, enabled }
+    persist(tasks.map((t) => (t.id === task.id ? updated : t)), [updated])
   }
 
   const runNow = (task: AutoTask): void => {

@@ -38,6 +38,7 @@ __all__ = [
     "parse_structure",
     "resolve_structure",
     "save_as_conflicts",
+    "structure_indicator_scope",
     "structure_warnings",
 ]
 
@@ -171,7 +172,7 @@ def resolve_structure(
             if not separator:
                 indicator, key = node.name, ""
             if indicator not in known:
-                unknown.append(indicator)
+                unknown.append(node.name)
                 continue
             specs = _specs_for(indicator, outputs)
             if key:
@@ -181,7 +182,7 @@ def resolve_structure(
                     # The only output remains unambiguous for an old task.
                     matched = specs
                 if not matched:
-                    unknown.append(f"{indicator}::{key}")
+                    unknown.append(node.name)
                     continue
                 assign(matched[0], prefix)
             else:
@@ -243,15 +244,72 @@ def save_as_conflicts(
     return [canonical for group in groups.values() if len(group) > 1 for canonical in group]
 
 
+def structure_indicator_scope(selected: list[str], stored: list[str] | None = None) -> list[str]:
+    """解析存储结构时要用的指标名单。
+
+    补数据只跑选中的指标，结构文本却通常来自整张定时任务。
+    只用选中名单去对标签，会把这次没选的指标报成已经改名。
+
+    Args:
+        selected: 这次实际要跑的指标。
+        stored: 结构所属任务上的全部指标。为空时只用 ``selected``。
+
+    Returns:
+        list[str]: 去重后的指标名，选中的排在前面。
+
+    Examples:
+        >>> structure_indicator_scope(["日清算"], ["日清算", "交易日历"])
+        ['日清算', '交易日历']
+        >>> structure_indicator_scope(["日清算"], None)
+        ['日清算']
+    """
+    names: list[str] = []
+    for source in (selected, stored or []):
+        for item in source:
+            text = str(item).strip()
+            if text and text not in names:
+                names.append(text)
+    return names
+
+
 def structure_warnings(
     result: StructureResult,
     outputs: dict[str, list[OutputSpec]] | None = None,
+    *,
+    indicators: list[str] | None = None,
 ) -> list[str]:
-    """运行时要告诉用户的存储结构问题；都不阻塞任务。"""
-    lines = [
-        f"存储结构标签 [{tag}] 已失效（指标或 save_as 已改名/删除），该文件落到基础目录"
-        for tag in result.invalid
-    ]
+    """运行时要告诉用户的存储结构问题；都不阻塞任务。
+
+    Args:
+        result: :func:`resolve_structure` 的结果。
+        outputs: 各指标的输出定义，用来检查同名文件是否落在同一目录。
+        indicators: 这次解析用的指标名单。标签的指标不在其中时，说明它不属于本次任务。
+
+    Returns:
+        list[str]: 告警句子。同一次失效只出现一句。
+
+    Examples:
+        >>> from spider_gd.core.path_structure import resolve_structure
+        >>> result = resolve_structure("- [不存在]", ["日清算"])
+        >>> "不在当前任务" in structure_warnings(result, indicators=["日清算"])[0]
+        True
+    """
+    known = {str(item) for item in (indicators or [])}
+    lines = []
+    seen: set[str] = set()
+    for tag in result.invalid:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        name = tag.split("::", 1)[0]
+        if known and name not in known:
+            lines.append(
+                f"存储结构标签 [{tag}] 不在当前任务的指标里，该文件落到基础目录"
+            )
+        else:
+            lines.append(
+                f"存储结构标签 [{tag}] 已失效（输出名或 save_as 已改），该文件落到基础目录"
+            )
     conflicts = set(save_as_conflicts(result, outputs))
     for indicator, specs in (outputs or {}).items():
         names = sorted({

@@ -35,6 +35,7 @@ for _path in (_TOOLS_DIR, _SRC_DIR):
 from calendar_data import (  # noqa: E402
     build_calendar_table,
     calendar_csv_text,
+    calendar_rows_from_api,
     merge_calendar_rows,
     normalize_month,
 )
@@ -281,46 +282,166 @@ class WorkflowSkipRepeatRound(WorkflowExecutionError):
     """当前 repeat 日期没有数据，跳过本轮并继续下一轮。"""
 
 
+class WorkflowDateExportFailed(WorkflowExecutionError):
+    """单个日期的导出没有拿到文件。
+
+    日期循环捕获它之后继续后面的日期，并在循环结束时汇总失败原因。
+    按钮缺失、文档签名被网关拒绝这类整页问题不使用这个异常。
+    """
+
+
+# 业务页用弹窗说明「这一天没有数」时，不应把整次补数判死。
+_EXPORT_EMPTY_MARKERS = (
+    "暂无数据",
+    "无数据",
+    "没有数据",
+    "未查询到",
+    "没有查询到",
+    "尚未发布",
+    "暂未发布",
+    "未发布",
+    "暂无记录",
+    "无记录",
+)
+
+_EXPORT_NOTICE_SELECTORS = (
+    ".el-message-box__message",
+    ".el-message-box__content",
+    ".el-message--error .el-message__content",
+    ".el-message--warning .el-message__content",
+    ".el-notification__content",
+    ".ant-modal-confirm-content",
+    ".ant-message-error",
+    ".ant-message-warning",
+    ".ant-notification-notice-description",
+)
+
+
+def diagnose_export_miss(
+    errors: list[dict],
+    dialog_text: str = "",
+    *,
+    timeout_error: str = "",
+) -> dict[str, str] | None:
+    """判断这次导出为什么没有等到下载。
+
+    还没有任何弹窗、失败请求，并且下载仍在等待时返回 None。
+    页面已经说明该日没有数据时，``action`` 为 ``skip``，日期循环进入下一天。
+    网关空 HTML 400 时 ``action`` 为 ``gateway``，整次运行应暂停，不要在这份文档上继续点。
+    其他请求失败或超时 ``action`` 为 ``fail``：这一天失败，其余日期仍可继续。
+
+    Args:
+        errors: 点击导出之后新记下的页面请求错误。
+        dialog_text: 当前可见的提示框文字。
+        timeout_error: 下载等待已经结束时的原始异常文本。还在等待时留空。
+
+    Returns:
+        dict | None: 含 ``action`` 与 ``reason``。不能定性且下载还在等时为 None。
+
+    Examples:
+        >>> diagnose_export_miss([], "") is None
+        True
+        >>> diagnose_export_miss([], "查询结果暂无数据")["action"]
+        'skip'
+        >>> diagnose_export_miss([{
+        ...     "status": 400, "resource_type": "xhr", "content_type": "text/html",
+        ...     "body_size": 6, "body_blank": True, "url": "https://pm.gd.csg.cn/pfjs/export",
+        ... }], "")["action"]
+        'gateway'
+        >>> reason = diagnose_export_miss([{
+        ...     "status": 0, "resource_type": "xhr", "failure": "net::ERR_ABORTED",
+        ...     "content_type": "", "page_url": "https://pm.gd.csg.cn/page",
+        ...     "url": "https://pm.gd.csg.cn/pfjs/export",
+        ... }], "", timeout_error="Timeout 60000ms exceeded")["reason"]
+        >>> "HTTP 0" in reason and "net::ERR_ABORTED" in reason
+        True
+    """
+    text = re.sub(r"\s+", " ", str(dialog_text or "")).strip()
+    if text and any(marker in text for marker in _EXPORT_EMPTY_MARKERS):
+        return {"action": "skip", "reason": f"该日期没有可导出的数据：{text[:300]}"}
+
+    described = ""
+    if errors:
+        described = "；".join(WorkflowRunner._describe_page_errors(errors))[:500]
+    gateway = [item for item in errors if WorkflowRunner._is_gateway_form(item)]
+    if gateway:
+        return {
+            "action": "gateway",
+            "reason": (
+                "导出被网关拒绝（HTTP 400 空 HTML，当前文档的请求签名已失效）。"
+                f"{described}。"
+                "不要刷新当前文档，请取消本次运行，回到门户重新进入业务页后再导出。"
+            ),
+        }
+    if text:
+        return {"action": "fail", "reason": f"导出没有产生文件。页面提示：{text[:300]}"}
+    if errors and not timeout_error:
+        # 下载还在等时，心跳或被取消的无关请求也会是 HTTP 0。
+        # 只有导出地址自己失败才提前结束；其余等到下载超时再写进原因。
+        kept = []
+        for item in errors:
+            try:
+                status = int(item.get("status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status != 0 or _looks_like_export_url(str(item.get("url") or "")):
+                kept.append(item)
+        errors = kept
+        if not errors:
+            return None
+    if errors:
+        statuses = []
+        for item in errors:
+            try:
+                statuses.append(int(item.get("status") or 0))
+            except (TypeError, ValueError):
+                statuses.append(0)
+        if statuses and all(status == 0 for status in statuses):
+            reason = (
+                "导出请求没有收到 HTTP 响应（HTTP 0），浏览器没有产生下载。"
+                f"{described}。"
+                "若同一页面的业务接口同时返回 HTTP 400 空 HTML，这是文档签名失效，"
+                "需要重新进入业务页；只有这一天失败时会继续补其余日期。"
+            )
+        else:
+            reason = f"导出请求失败，没有收到文件。{described}。"
+        return {"action": "fail", "reason": reason}
+    if timeout_error:
+        return {
+            "action": "fail",
+            "reason": (
+                "导出失败: 等待下载超时，没有捕获到文件、页面提示或失败请求。"
+                f"原始错误：{timeout_error[:300]}"
+            ),
+        }
+    return None
+
+
+def _looks_like_export_url(url: str) -> bool:
+    """这个地址像不像本次导出请求。
+
+    Args:
+        url: 请求地址，查询串不参与判断。
+
+    Returns:
+        bool: 路径里带有导出或下载字样时为 True。
+
+    Examples:
+        >>> _looks_like_export_url("https://pm.gd.csg.cn/pfjs/exportItems")
+        True
+        >>> _looks_like_export_url("https://pm.gd.csg.cn/pfjs/getSwitch")
+        False
+    """
+    path = url.split("?", 1)[0].lower()
+    return any(token in path for token in ("export", "download", "downfile"))
+
+
 class _PointerUnavailableError(RuntimeError):
     """旧输入路径的鼠标轨迹无法完成；默认输入路径遇到此错误会停止。"""
 
 
-#: 周选择器面板探测：只认可见面板，返回年月与目标日/翻月按钮在全文档同类节点里的索引，
-#: 供 _low_profile_click 用纯 CSS + index 点击（不用 Playwright 伪类，两条输入路径都兼容）。
-_WEEK_PICKER_PROBE_JS = r"""
-({day}) => {
-    const visible = el => !!(el && el.offsetParent !== null);
-    const panels = [...document.querySelectorAll('.el-picker-panel')]
-        .filter(p => visible(p) && p.querySelector('.el-date-table'));
-    if (!panels.length) return null;
-    const panel = panels[panels.length - 1];
-    const nums = [...panel.querySelectorAll('.el-date-picker__header-label')]
-        .map(el => parseInt((el.textContent || '').replace(/[^0-9]/g, ''), 10))
-        .filter(n => Number.isFinite(n));
-    let year = null, month = null;
-    for (const n of nums) {
-        if (n > 12) year = n;
-        else if (month === null) month = n;
-    }
-    const all = sel => [...document.querySelectorAll(sel)];
-    const tds = all('.el-picker-panel .el-date-table td');
-    const target = [...panel.querySelectorAll('.el-date-table td')].find(td =>
-        td.classList.contains('available') &&
-        !td.classList.contains('prev-month') &&
-        !td.classList.contains('next-month') &&
-        (td.textContent || '').trim() === String(day));
-    const lefts = all('.el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-left');
-    const rights = all('.el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-right');
-    const localLeft = panel.querySelector('.el-picker-panel__icon-btn.el-icon-arrow-left');
-    const localRight = panel.querySelector('.el-picker-panel__icon-btn.el-icon-arrow-right');
-    return {
-        year, month,
-        dayIndex: target ? tds.indexOf(target) : -1,
-        prevIndex: localLeft ? lefts.indexOf(localLeft) : -1,
-        nextIndex: localRight ? rights.indexOf(localRight) : -1,
-    };
-}
-"""
+#: 周明细不再轮询日期面板。翻周只做坐标点击，事件从 findTradeCalendar 响应读取。
+#: 月视图在没有捕获到该接口时，仍用下面的脚本读一次网格。
 
 #: FullCalendar 交易日历读取脚本。月/周/日视图通用：日期取 ``[data-date]``，
 #: 事件取 ``.fc-event``，状态取自定义样式类（tradeBg / NotBg / greyBg）。
@@ -564,6 +685,14 @@ class WorkflowRunner:
         self._page_observers: dict[Any, dict[str, Any]] = {}
         self._response_tasks: set[asyncio.Task] = set()
         self._page_errors: list[dict[str, Any]] = []
+        # findTradeCalendar 的响应正文。周明细从这里取事件，不再刮日历 DOM。
+        self._calendar_payloads: list[dict[str, Any]] = []
+        self._calendar_shown_monday: date | None = None
+        self._calendar_watch_baseline = 0
+        self._calendar_payload_baseline = 0
+        self._calendar_week_clicked = False
+        self._calendar_ignored_requests: set[int] = set()
+        self._calendar_saved_paths: set[str] = set()
         self._console_errors: list[dict[str, Any]] = []
         self._page_exceptions: list[str] = []
         self._auth_traffic: list[dict[str, Any]] = []
@@ -952,6 +1081,31 @@ class WorkflowRunner:
                 continue
         return False
 
+    async def _account_marker_visible(self) -> bool:
+        """页面上是否已经有登录后才出现的账号标记。
+
+        门户 ``#/home`` 在已登录时往往不再显示「登 录」，但地址仍是公开首页，
+        不能靠菜单判断。用户名或「退出登录」才算已经进了会话。
+
+        Returns:
+            bool: 看到账号标记时为 True。
+
+        Examples:
+            >>> "退出登录" in "a:has-text('退出登录')"
+            True
+        """
+        for selector in (
+            GD_WORKBENCH_USER,
+            "text=退出登录",
+            "a:has-text('退出登录')",
+        ):
+            try:
+                if await self._dom_visible(selector, timeout=300):
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def exec_step(self, step: dict) -> None:
         """执行单个步骤并发出 start/done 事件。公开方法，供外部单步播放使用。"""
         await self._exec_step(step)
@@ -969,6 +1123,8 @@ class WorkflowRunner:
         self.pages.append(new_page)
         self._current_page_idx = len(self.pages) - 1
         self._observe_page(new_page)
+        # 新标签若没被选中，标签栏会空着，后台页的签名也容易被拒。
+        await self._bring_page_to_front(new_page)
 
     # ----- 页面观测：网关拒绝 / 控制台异常 / 网络静默 -----
 
@@ -1123,6 +1279,46 @@ class WorkflowRunner:
 
     _GATEWAY_BODY_MAX = 64
 
+    async def _remember_calendar_payload(self, response, request, status: int, url: str, content_type: str) -> None:
+        """记下 findTradeCalendar 的响应正文，供周明细直接使用。
+
+        这是网络监听，不在页面里执行脚本。正文只留这一条接口，并且截断。
+
+        Args:
+            response: Playwright 响应。
+            request: 对应请求，用来找所属页面。
+            status: HTTP 状态码。
+            url: 请求地址。
+            content_type: 响应类型。
+
+        Returns:
+            None: 结果追加到 ``_calendar_payloads``。
+
+        Examples:
+            >>> "findtradecalendar" in "https://x/findTradeCalendar".lower()
+            True
+        """
+        page = request.frame.page if getattr(request, "frame", None) is not None else None
+        text = ""
+        try:
+            body = await asyncio.wait_for(response.body(), timeout=2)
+            text = body[:1_000_000].decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        self._calendar_payloads.append({
+            "status": status,
+            "url": url,
+            "text": text,
+            "resource_type": getattr(request, "resource_type", "") or "xhr",
+            "content_type": content_type,
+            "page_url": self._page_url(page),
+            "_page": page,
+            "at": time.strftime("%H:%M:%S"),
+            # 翻周点击之前就已经在飞的请求，不算这一周的新结果。
+            "ignored": id(request) in self._calendar_ignored_requests,
+        })
+        del self._calendar_payloads[:-30]
+
     def _on_page_response(self, response) -> None:
         """同步接入点。正文长度在任务里读完再分类，避免挡住事件循环。"""
         try:
@@ -1155,6 +1351,8 @@ class WorkflowRunner:
                         content_type=content_type, page=self._trace_url(self._page_url(origin_page)),
                         context=str(id(origin_page.context)))
             self._record_auth_traffic(request, response, status, url, content_type, None)
+            if "findtradecalendar" in url.split("?", 1)[0].lower():
+                await self._remember_calendar_payload(response, request, status, url, content_type)
             if status < 400 or url.split("?", 1)[0].lower().endswith(self._STATIC_SUFFIXES):
                 return
             page = request.frame.page if request.frame is not None else None
@@ -1254,6 +1452,25 @@ class WorkflowRunner:
 
     @staticmethod
     def _describe_page_errors(errors: list[dict]) -> list[str]:
+        """把页面请求错误收成短句。
+
+        HTTP 0 会带上浏览器的 ``failure``（例如 ``net::ERR_ABORTED``）。
+        没有这段文字时，日志里只有状态码，分不清连接被重置还是请求被页面取消。
+
+        Args:
+            errors: ``_page_errors`` 里的记录。
+
+        Returns:
+            list[str]: 每条是一种错误；相同错误合并次数。
+
+        Examples:
+            >>> text = WorkflowRunner._describe_page_errors([{
+            ...     "status": 0, "resource_type": "xhr",
+            ...     "url": "https://pm.gd.csg.cn/export", "failure": "net::ERR_ABORTED",
+            ... }])[0]
+            >>> text.endswith("failure=net::ERR_ABORTED")
+            True
+        """
         grouped: dict[str, int] = {}
         for item in errors:
             key = (
@@ -1263,6 +1480,9 @@ class WorkflowRunner:
                 f"page={item.get('page_url') or '-'} "
                 f"{str(item.get('url') or '').split('?', 1)[0]}"
             )
+            failure = str(item.get("failure") or "").strip()
+            if failure:
+                key += f" failure={failure}"
             grouped[key] = grouped.get(key, 0) + 1
         return [f"{key}（{count} 次）" if count > 1 else key for key, count in grouped.items()]
 
@@ -1881,7 +2101,26 @@ class WorkflowRunner:
     # ----- 具体实现 -----
 
     async def _do_repeat(self, step: dict) -> None:
-        """按日期重复选日期和导出。没有入参时用步骤上的默认窗口。"""
+        """按日期重复选日期和导出。没有入参时用步骤上的默认窗口。
+
+        某一天导出失败（下载超时、HTTP 0、页面提示）时记下原因并继续后面的日期。
+        网关 400 和按钮缺失仍会立刻结束整次运行。循环结束后，只要有日期失败，
+        就抛出汇总，避免任务被标成全部成功。
+
+        Args:
+            step: ``repeat`` 步骤，含嵌套 ``steps`` 和可选日期窗口。
+
+        Returns:
+            None: 每一天都成功或明确无数据时返回。
+
+        Raises:
+            WorkflowExecutionError: 至少有一天导出失败。
+            WorkflowPaused: 文档签名被网关拒绝，或用户取消暂停。
+
+        Examples:
+            >>> WorkflowDateExportFailed("HTTP 0").__class__.__name__
+            'WorkflowDateExportFailed'
+        """
         nested = [item for item in (step.get("steps") or []) if isinstance(item, dict)]
         dates = resolve_repeat_dates(step, self.config, self.repeat_dates, date.today())
         previous_prefix = getattr(self, "_repeat_output_key", None)
@@ -1895,6 +2134,7 @@ class WorkflowRunner:
             logger.info("  日期循环没有可执行的日期")
             return
         saved = self.target_date
+        failures: list[str] = []
         try:
             for index, (current, indexes) in enumerate(rounds, start=1):
                 if self._stopped:
@@ -1926,9 +2166,22 @@ class WorkflowRunner:
                         indicator=self._indicator_id(),
                     )
                     continue
+                except WorkflowDateExportFailed as exc:
+                    logger.error("  日期 {} 导出失败，继续后续日期：{}", current.isoformat(), exc)
+                    self._note_file("failed", reason=str(exc), when=current)
+                    self._emit(
+                        "repeat_date_failed",
+                        date=current.isoformat(),
+                        message=str(exc),
+                        indicator=self._indicator_id(),
+                    )
+                    failures.append(f"{current.isoformat()}：{exc}")
+                    continue
         finally:
             self.target_date = saved
             self._repeat_output_key = previous_prefix
+        if failures:
+            raise WorkflowExecutionError("部分日期导出失败：" + "；".join(failures))
 
     @staticmethod
     def _resolve_repeat_placeholders(value: Any, target: date) -> Any:
@@ -2012,7 +2265,9 @@ class WorkflowRunner:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
         await asyncio.sleep(3)  # 等 SPA 渲染完
         logger.info("  导航到: {}", url)
-        if self.config.get("type") == "login" and await self._login_stage_ok():
+        if self.config.get("type") == "login" and (
+            await self._login_stage_ok() or await self._account_marker_visible()
+        ):
             self._skip_remaining_login_steps = True
             logger.info("  已检测到完整登录状态，跳过后续登录表单步骤")
 
@@ -2046,6 +2301,7 @@ class WorkflowRunner:
             self._observe_page(new_page)
             await new_page.goto(url, wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(2)
+            await self._bring_page_to_front(new_page)
             logger.info("  在新标签页打开: {}", url)
         else:
             current = ""
@@ -2155,9 +2411,44 @@ class WorkflowRunner:
             await result
 
     async def _bring_page_to_front(self, page) -> None:
+        """把绑定页设成窗口里选中的标签。
+
+        只调 Playwright 的 ``bring_to_front``（对应 CDP ``Target.activateTarget``）。
+        失败时再试一次 CDP，并写警告。关掉当前标签或新开业务页之后必须调用，
+        否则标签栏会没有任何选中项，瑞数也会把后台页的签名判失效。
+
+        Args:
+            page: 要激活的页面。空页面直接返回。
+
+        Returns:
+            None: 激活结束后返回。页面没有这个方法时也返回。
+
+        Examples:
+            >>> inspect.iscoroutinefunction(WorkflowRunner._bring_page_to_front)
+            True
+        """
+        if page is None:
+            return
         bring = getattr(page, "bring_to_front", None)
-        with contextlib.suppress(Exception):
+        try:
             await self._call_optional(bring)
+            return
+        except Exception as exc:
+            logger.warning("  绑定页未能带到前台: {}", exc)
+        try:
+            session = await page.context.new_cdp_session(page)
+        except Exception:
+            return
+        try:
+            info = await session.send("Target.getTargetInfo")
+            target_id = str((info.get("targetInfo") or {}).get("targetId") or "")
+            if target_id:
+                await session.send("Target.activateTarget", {"targetId": target_id})
+        except Exception as exc:
+            logger.warning("  CDP 激活标签失败: {}", exc)
+        finally:
+            with contextlib.suppress(Exception):
+                await session.detach()
 
     async def _human_move_to(self, box: dict) -> None:
         """按人的轨迹分段移到 box 中心附近并停住；只移动，不按键。
@@ -2327,10 +2618,13 @@ class WorkflowRunner:
             if (
                 self.config.get("type") == "login"
                 and "登 录" in selector
-                and await self._login_stage_ok()
+                and (
+                    await self._login_stage_ok()
+                    or await self._account_marker_visible()
+                )
             ):
                 self._skip_remaining_login_steps = True
-                logger.info("  登录按钮未出现，但登录阶段条件已满足，跳过后续登录表单步骤")
+                logger.info("  登录按钮未出现，页面已有登录标记，跳过后续登录表单步骤")
                 return
             logger.warning("  点击失败: {}", selector)
             if isinstance(exc, WorkflowExecutionError):
@@ -3254,8 +3548,253 @@ class WorkflowRunner:
             index += 1
         return saved
 
+    def _export_error_on_page(self, item: dict) -> bool:
+        """这条请求错误是不是当前绑定页上的。
+
+        Args:
+            item: ``_page_errors`` 中的一条。
+
+        Returns:
+            bool: 没有页面归属，或归属就是当前页时为 True。其他标签的错误为 False。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._export_error_on_page({"status": 0})
+            True
+        """
+        owner = item.get("_page")
+        page = self.page
+        return not (owner is not None and page is not None and owner is not page)
+
+    async def _read_export_notice(self) -> str:
+        """读取导出后弹出的错误框或提示文字。
+
+        Returns:
+            str: 合并后的可见文字。页面读不到时为空字符串。
+
+        Examples:
+            >>> "暂无数据" in "查询 暂无数据"
+            True
+        """
+        if self.page is None:
+            return ""
+        texts: list[str] = []
+        for selector in _EXPORT_NOTICE_SELECTORS:
+            try:
+                found = await self._dom_texts(selector, visible_only=True)
+            except Exception:
+                continue
+            for item in found:
+                cleaned = re.sub(r"\s+", " ", str(item or "")).strip()
+                if cleaned and cleaned not in texts:
+                    texts.append(cleaned)
+        return "；".join(texts)[:300]
+
+    async def _export_diagnosis(
+        self, baseline: int, timeout_error: str = "",
+    ) -> dict[str, str] | None:
+        """看点击之后的新错误和弹窗，决定这次导出算什么。
+
+        Args:
+            baseline: 点击前 ``_page_errors`` 的长度。
+            timeout_error: 下载等待已经结束时的原始异常。还在等时留空。
+
+        Returns:
+            dict | None: :func:`diagnose_export_miss` 的结果。
+
+        Examples:
+            >>> diagnose_export_miss([], "", timeout_error="") is None
+            True
+        """
+        await self._drain_response_captures()
+        errors = [
+            item for item in self._page_errors[baseline:]
+            if not item.get("_resolved") and self._export_error_on_page(item)
+        ]
+        dialog = await self._read_export_notice()
+        return diagnose_export_miss(errors, dialog, timeout_error=timeout_error)
+
+    async def _export_download(self, selector: str, timeout: int, baseline: int) -> tuple[str, Any]:
+        """点击导出并等待下载；出现弹窗或请求失败就提前返回。
+
+        Args:
+            selector: 导出按钮选择器。
+            timeout: 等待下载的毫秒数。
+            baseline: 点击前的错误条数，只把之后的新错误算进这次导出。
+
+        Returns:
+            tuple[str, Any]: ``("download", download)`` 或 ``("miss", diagnosis)``。
+
+        Raises:
+            WorkflowExecutionError: 导出按钮不存在，或点击过程中页面探测失败。
+
+        Examples:
+            >>> diagnose_export_miss([], "暂无数据")["action"]
+            'skip'
+        """
+        timeout_ms = max(int(timeout), 1)
+        context = self.page.expect_download(timeout=timeout_ms)
+        try:
+            download_info = await context.__aenter__()
+        except Exception as exc:
+            diagnosis = await self._export_diagnosis(baseline, timeout_error=str(exc))
+            if diagnosis is None:
+                diagnosis = {
+                    "action": "fail",
+                    "reason": f"导出失败: 等待下载时出错。原始错误：{exc}",
+                }
+            return ("miss", diagnosis)
+
+        closed = False
+
+        async def _close(exc_type=None, exc=None, tb=None) -> None:
+            nonlocal closed
+            if closed:
+                return
+            closed = True
+            with contextlib.suppress(Exception):
+                await context.__aexit__(exc_type, exc, tb)
+
+        try:
+            try:
+                clicked = await self._low_profile_click(selector, timeout=min(timeout_ms, 10000))
+            except WorkflowExecutionError:
+                await _close(WorkflowExecutionError, WorkflowExecutionError("点击未完成"), None)
+                raise
+            except Exception as exc:
+                await _close(type(exc), exc, exc.__traceback__)
+                raise WorkflowExecutionError(self._click_miss_message(selector)) from exc
+            if not clicked:
+                miss = WorkflowExecutionError(self._click_miss_message(selector))
+                await _close(WorkflowExecutionError, miss, None)
+                raise miss
+
+            async def _wait_value():
+                return await download_info.value
+
+            waiter = asyncio.create_task(_wait_value())
+            diagnosis: dict[str, str] | None = None
+            try:
+                deadline = time.monotonic() + timeout_ms / 1000
+                while True:
+                    diagnosis = await self._export_diagnosis(baseline)
+                    if diagnosis is not None:
+                        # 浏览器把成功的下载也记成 HTTP 0。给下载事件留一点时间，
+                        # 避免把已经开始的文件当成失败。
+                        if diagnosis.get("action") == "fail" and not waiter.done():
+                            await asyncio.wait({waiter}, timeout=1.0)
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _pending = await asyncio.wait({waiter}, timeout=min(0.3, remaining))
+                    if waiter in done:
+                        break
+                if waiter.done() and not waiter.cancelled() and waiter.exception() is None:
+                    download = waiter.result()
+                    self._acknowledge_page_errors([
+                        item for item in self._page_errors[baseline:]
+                        if self._export_error_on_page(item)
+                        and str(item.get("failure") or "").find("ERR_ABORTED") >= 0
+                    ])
+                    await _close()
+                    return ("download", download)
+                if diagnosis is None and waiter.done() and not waiter.cancelled():
+                    caught = waiter.exception()
+                    if caught is not None:
+                        diagnosis = await self._export_diagnosis(
+                            baseline, timeout_error=str(caught),
+                        )
+                if diagnosis is None:
+                    diagnosis = await self._export_diagnosis(
+                        baseline,
+                        timeout_error=(
+                            f'Timeout {timeout_ms}ms exceeded while waiting for event "download"'
+                        ),
+                    )
+                if diagnosis is None:
+                    diagnosis = {
+                        "action": "fail",
+                        "reason": "导出失败: 等待下载超时，没有捕获到文件。",
+                    }
+                return ("miss", diagnosis)
+            finally:
+                if not waiter.done():
+                    waiter.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await waiter
+        finally:
+            await _close(asyncio.CancelledError, asyncio.CancelledError(), None)
+
+    async def _settle_export_miss(
+        self, step: dict, diagnosis: dict[str, str], baseline: int,
+    ) -> None:
+        """按诊断结果结束这次没拿到文件的导出。
+
+        Args:
+            step: 导出步骤，用来读 ``save_as`` 和 API 兜底。
+            diagnosis: :func:`diagnose_export_miss` 的结果。
+            baseline: 点击前的错误条数。被本次诊断消费的错误会标成已确认，
+                避免下一天的导出闸门再被它们拦住。
+
+        Returns:
+            None: API 兜底成功时返回。
+
+        Raises:
+            WorkflowSkipRepeatRound: 页面说明该日没有可导出的数据。
+            WorkflowPaused: 文档签名被网关拒绝。
+            WorkflowDateExportFailed: 这一天导出失败，日期循环可以继续。
+
+        Examples:
+            >>> diagnose_export_miss([], "无数据")["action"]
+            'skip'
+        """
+        action = diagnosis.get("action") or "fail"
+        reason = str(diagnosis.get("reason") or "导出失败")
+        fresh = [
+            item for item in self._page_errors[baseline:]
+            if self._export_error_on_page(item)
+        ]
+        logger.error("  {}", reason)
+        if action == "skip":
+            self._acknowledge_page_errors(fresh)
+            self._note_file("empty", reason=reason)
+            raise WorkflowSkipRepeatRound(reason)
+        if action == "gateway":
+            if self.page is not None:
+                self._poisoned_pages.add(self.page)
+            await self._pause_and_wait(reason)
+            self._acknowledge_page_errors(fresh)
+            raise WorkflowPaused(reason)
+        self._acknowledge_page_errors(fresh)
+        save_name = str(step.get("save_as") or "")
+        if await self._try_api_fallback(save_name, RuntimeError(reason)):
+            return
+        raise WorkflowDateExportFailed(reason)
+
     async def _do_export(self, step: dict) -> None:
-        """点击导出并使用站点提供的原始文件名保存到配置目录。"""
+        """点击导出并使用站点提供的原始文件名保存到配置目录。
+
+        等待下载时同时看当前页的请求结果和提示框。网关 400、HTTP 0 或
+        「暂无数据」一类提示出现后立刻结束，不再干等下载事件。
+        保存阶段的异常仍视为整步失败。
+
+        Args:
+            step: ``export`` 步骤。可用 ``timeout``、``selector``、``save_as``。
+
+        Returns:
+            None: 文件已保存，或 API 兜底成功。
+
+        Raises:
+            WorkflowExecutionError: 按钮缺失，或文件保存失败。
+            WorkflowDateExportFailed: 这一天没有下载到文件。
+            WorkflowSkipRepeatRound: 页面说明该日没有数据。
+            WorkflowPaused: 文档签名失效，或导出前查询一直不结束。
+
+        Examples:
+            >>> "skip" == diagnose_export_miss([], "暂无数据")["action"]
+            True
+        """
         selector = step.get("selector", "button:has-text('导出')")
         save_name = str(step.get("save_as") or "")
         timeout = step.get("timeout", 30000)
@@ -3265,15 +3804,15 @@ class WorkflowRunner:
         )
 
         logger.info("  点击导出: {}", selector)
+        baseline = len(self._page_errors)
+        kind, payload = await self._export_download(selector, int(timeout), baseline)
+        if kind == "miss":
+            await self._settle_export_miss(step, payload, baseline)
+            return
 
+        download = payload
         try:
-            async with self.page.expect_download(timeout=timeout) as download_info:
-                if not await self._low_profile_click(selector, timeout=timeout):
-                    # 缺少导出按钮可走显式配置的 API 兜底；探测异常不能绕过。
-                    raise TimeoutError(self._click_miss_message(selector))
-            download = await download_info.value
             original_name = download.suggested_filename
-
             # 浏览器导出按 save_as 重命名（扩展名以站点为准），没写则保留站点原名。
             save_path = self._export_path(save_name, original_name)
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3291,14 +3830,8 @@ class WorkflowRunner:
                 logger.success("  导出成功（已保留旧版本 {}）→ {}", result.archived_path, save_path)
             else:
                 logger.success("  导出成功 → {}", save_path)
-
         except Exception as exc:
             logger.error("  导出失败: {}", exc)
-            await self._pause_until_export_ready()
-            if isinstance(exc, WorkflowExecutionError):
-                raise
-            if await self._try_api_fallback(save_name, exc):
-                return
             raise WorkflowExecutionError(f"导出失败: {exc}") from exc
 
     async def _try_api_fallback(self, save_as: str, original_error: BaseException) -> bool:
@@ -3465,8 +3998,7 @@ class WorkflowRunner:
             index = len(self.pages) + index
         if 0 <= index < len(self.pages):
             self._current_page_idx = index
-            # 把该 page 带到前台
-            await self.pages[index].bring_to_front()
+            await self._bring_page_to_front(self.pages[index])
             logger.info("  切换到标签页 #{}", index)
         else:
             logger.warning("  无效的标签页索引: {}", index)
@@ -3486,14 +4018,22 @@ class WorkflowRunner:
         if page_to_close in self._protected_pages:
             logger.info("保留用户已有页面")
             return
+        # 关的是别的标签时，绑定页保持不变。关的是当前标签时，先选中旁边那一页再关。
+        if page_to_close is self.page:
+            survivor = self.pages[index - 1] if index > 0 else self.pages[index + 1]
+        else:
+            survivor = self.page
+        await self._bring_page_to_front(survivor)
         self.pages.pop(index)
         try:
             await page_to_close.close()
         except Exception as exc:
             logger.warning("  关闭标签页失败: {}", exc)
-        # 调整当前索引
-        if self._current_page_idx >= len(self.pages):
+        if survivor in self.pages:
+            self._current_page_idx = self.pages.index(survivor)
+        elif self._current_page_idx >= len(self.pages):
             self._current_page_idx = len(self.pages) - 1
+        await self._bring_page_to_front(self.page)
         logger.info("  已关闭标签页 #{}，剩余 {} 个", index, len(self.pages))
 
     async def _do_close_other_tabs(self, step: dict) -> None:
@@ -3519,6 +4059,7 @@ class WorkflowRunner:
         kept_page = self.pages[keep_idx]
         self.pages = [kept_page] + [p for p in self.pages if p != kept_page and p in self._protected_pages]
         self._current_page_idx = 0
+        await self._bring_page_to_front(kept_page)
         logger.info("  已关闭 {} 个其他标签页，保留 #{}", closed, keep_idx)
 
     async def _do_extract(self, step: dict) -> None:
@@ -4180,76 +4721,235 @@ class WorkflowRunner:
         self._note_file("saved", save_path)
         logger.success("  表格保存 → {}", save_path)
 
+    def _calendar_blocking_errors(self, baseline: int) -> list[dict]:
+        """这一轮翻周之后，当前页上会让日历读取失效的请求错误。
+
+        Args:
+            baseline: 本周开始前 ``_page_errors`` 的长度。
+
+        Returns:
+            list[dict]: 网关空 HTML 400，或日历查询 / 开关轮询自己的失败。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._calendar_blocking_errors(0)
+            []
+        """
+        found = []
+        for item in self._page_errors[baseline:]:
+            if item.get("_resolved") or not self._export_error_on_page(item):
+                continue
+            url = str(item.get("url") or "")
+            if (
+                self._is_gateway_form(item)
+                or "findTradeCalendar" in url
+                or "systemSwitch/getSwitch" in url
+            ):
+                found.append(item)
+        return found
+
+    async def _calendar_query_pending(self) -> bool:
+        """当前页是否还有交易日历查询在途。
+
+        Returns:
+            bool: ``findTradeCalendar`` 仍在飞时为 True。开关轮询不算。
+
+        Examples:
+            >>> WorkflowRunner._is_gateway_form({"status": 200})
+            False
+        """
+        for request in self._inflight_query_requests():
+            url = str(getattr(request, "url", "") or "")
+            if "findTradeCalendar" in url or "tradeCalendarOut" in url:
+                return True
+        return False
+
+    async def _pause_for_calendar_gateway(self, errors: list[dict]) -> None:
+        """日历查询被网关拒绝时暂停，禁止记成空周。
+
+        Args:
+            errors: 已经确认的网关或日历请求错误。
+
+        Returns:
+            None: 不会正常返回。
+
+        Raises:
+            WorkflowPaused: 用户取消，或没有继续回调。
+
+        Examples:
+            >>> "findTradeCalendar" in "tradeCalendarOut/findTradeCalendar"
+            True
+        """
+        if self.page is not None:
+            self._poisoned_pages.add(self.page)
+        described = "；".join(self._describe_page_errors(errors))[:500]
+        reason = (
+            "交易日历请求被网关拒绝（HTTP 400 空 HTML，当前文档的请求签名已失效）。"
+            f"{described}。"
+            "这一周不能记成没有交易事件。不要刷新当前文档，请回到门户重新进入业务页。"
+        )
+        logger.error("  {}", reason)
+        await self._pause_and_wait(reason)
+        raise WorkflowPaused(reason)
+
+    async def _ensure_calendar_settled(self, baseline: int, timeout_ms: int = 8000) -> None:
+        """等本周的日历查询结束；期间出现网关 400 就暂停。
+
+        周视图的日期格会先换，事件要等 ``findTradeCalendar`` 回来才画上。
+        查询还在飞或刚被网关拒绝时，空网格不是「没有交易事件」。
+
+        Args:
+            baseline: 本周开始前的错误条数。
+            timeout_ms: 最长等待，毫秒。查询一直不结束时到点返回，调用方再看错误。
+
+        Returns:
+            None: 查询已停，且这段时间没有网关拒绝。
+
+        Raises:
+            WorkflowPaused: 当前文档的日历或开关请求被网关拒绝。
+
+        Examples:
+            >>> WorkflowRunner._is_gateway_form({
+            ...     "status": 400, "resource_type": "xhr", "content_type": "text/html",
+            ...     "body_size": 6, "body_blank": True,
+            ... })
+            True
+        """
+        deadline = time.monotonic() + max(int(timeout_ms), 0) / 1000
+        quiet_since: float | None = None
+        while time.monotonic() < deadline:
+            await self._drain_response_captures()
+            blocking = self._calendar_blocking_errors(baseline)
+            if blocking:
+                await self._pause_for_calendar_gateway(blocking)
+            if await self._calendar_query_pending():
+                quiet_since = None
+            else:
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= 1.2:
+                    return
+            await asyncio.sleep(0.15)
+        await self._drain_response_captures()
+        blocking = self._calendar_blocking_errors(baseline)
+        if blocking:
+            await self._pause_for_calendar_gateway(blocking)
+
+    def _tracked_calendar_monday(self) -> date:
+        """当前认为周视图停在哪一周。
+
+        优先用上一周成功切过去的周一。还没切过时，按今天所在周，
+        和页面刚打开时默认显示的当前周一致。不再读日历 DOM。
+
+        Returns:
+            date: 该周周一。
+
+        Examples:
+            >>> WorkflowRunner._tracked_calendar_monday.__name__
+            '_tracked_calendar_monday'
+        """
+        shown = getattr(self, "_calendar_shown_monday", None)
+        if isinstance(shown, date):
+            return shown
+        today = date.today()
+        return today - timedelta(days=today.weekday())
+
+    def _calendar_payload_on_page(self, item: dict) -> bool:
+        """这条日历响应是不是当前绑定页的。
+
+        Args:
+            item: ``_calendar_payloads`` 里的一条。
+
+        Returns:
+            bool: 没有页面归属，或归属就是当前页时为 True。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._calendar_payload_on_page({"status": 200})
+            True
+        """
+        owner = item.get("_page")
+        page = self.page
+        return not (owner is not None and page is not None and owner is not page)
+
+    async def _await_calendar_payload(self, baseline: int, *, clicked: bool) -> dict | None:
+        """等到这一周的 findTradeCalendar 响应。
+
+        没点翻周时用已经捕获的最近一条。点过之后只认基线之后的新响应。
+        网关 400 在这里暂停，不返回给调用方去记空周。
+
+        Args:
+            baseline: 本周点击前已有的响应条数。
+            clicked: 这一周是否点过日期格。
+
+        Returns:
+            dict | None: 响应记录。超时且没有可用响应时为 None。
+
+        Raises:
+            WorkflowPaused: 当前文档的日历或开关请求被网关拒绝。
+
+        Examples:
+            >>> "findTradeCalendar" in "findTradeCalendar"
+            True
+        """
+        if not clicked:
+            prior = [item for item in self._calendar_payloads if self._calendar_payload_on_page(item)]
+            if prior:
+                return prior[-1]
+        deadline = time.monotonic() + float(getattr(self, "_calendar_payload_wait_s", 8))
+        watch = getattr(self, "_calendar_watch_baseline", 0)
+        while time.monotonic() < deadline:
+            await self._drain_response_captures()
+            blocking = self._calendar_blocking_errors(watch)
+            if blocking:
+                await self._pause_for_calendar_gateway(blocking)
+            fresh = [
+                item for item in self._calendar_payloads[baseline:]
+                if self._calendar_payload_on_page(item) and not item.get("ignored")
+            ]
+            if fresh:
+                return fresh[-1]
+            await asyncio.sleep(0.15)
+        return None
+
     async def _do_select_calendar_week(self, step: dict, *, target: date | None = None) -> None:
         """用页面自带的周选择器把周视图移到任务目标周。
 
-        2026-10-31 现场核对：站点 FullCalendar 没有 fc-prev/next 工具栏，
-        翻周只能点 .date-box 里的只读周选择输入框（el-date-editor--week），
-        在弹出面板里翻月后点目标日期。点击统一走 _low_profile_click，
-        几何只由页面内 JS 读取，避免触发前置网关拒绝。
+        只做和日清算相同的坐标点击：打开日期框、按已知月份差点翻月、点目标日。
+        不轮询面板脚本，也不读日历 DOM。事件由随后的 findTradeCalendar 响应提供。
         """
         target = target or self.target_date or date.today()
         monday = target - timedelta(days=target.weekday())
         selector = str(step.get("selector") or ".calendar-box")
-        shown = await self._shown_week_monday(selector)
+        shown = self._tracked_calendar_monday()
+        self._calendar_week_clicked = shown != monday
         if shown == monday:
             return
+        self._calendar_ignored_requests = {id(item) for item in list(self._inflight)}
+        await self._bring_page_to_front(self.page)
+        # 只做和日清算相同的坐标点击。月份差按已知周计算，不再轮询面板脚本。
         if not await self._low_profile_click(f"{selector} .date-box input", timeout=5000):
             if not await self._low_profile_click(".date-box input", timeout=5000):
                 raise WorkflowExecutionError("找不到周选择输入框（.date-box input）")
-        await asyncio.sleep(0.6)
-        state = None
-        for _ in range(24):
-            state = await self.page.evaluate(_WEEK_PICKER_PROBE_JS, {"day": monday.day})
-            if not isinstance(state, dict):
-                raise WorkflowExecutionError("周选择器面板没有弹出，无法翻周")
-            panel_ym = (state.get("year"), state.get("month"))
-            if panel_ym == (monday.year, monday.month):
-                break
-            if None in panel_ym:
-                raise WorkflowExecutionError("周选择器面板读不出年月，无法翻周")
-            going_back = panel_ym > (monday.year, monday.month)
-            arrow = ".el-icon-arrow-left" if going_back else ".el-icon-arrow-right"
-            index = int(state.get("prevIndex" if going_back else "nextIndex", -1))
-            if index < 0 or not await self._low_profile_click(
-                f".el-picker-panel .el-picker-panel__icon-btn{arrow}", timeout=3000, index=index,
-            ):
+        await asyncio.sleep(0.4)
+        delta = (monday.year - shown.year) * 12 + (monday.month - shown.month)
+        arrow = (
+            ".el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-left"
+            if delta < 0
+            else ".el-picker-panel .el-picker-panel__icon-btn.el-icon-arrow-right"
+        )
+        for _ in range(abs(delta)):
+            if not await self._low_profile_click(arrow, timeout=3000):
                 raise WorkflowExecutionError("周选择器翻月按钮不可用，无法翻周")
-            await asyncio.sleep(0.4)
-        else:
-            raise WorkflowExecutionError(f"周选择器无法翻到 {monday.isoformat()} 所在月份")
-        day_index = int(state.get("dayIndex", -1))
-        if day_index < 0 or not await self._low_profile_click(
-            ".el-picker-panel .el-date-table td", timeout=3000, index=day_index,
-        ):
+            await asyncio.sleep(0.35)
+        day_selector = (
+            ".el-picker-panel .el-date-table td.available"
+            f":not(.prev-month):not(.next-month):text-is('{monday.day}')"
+        )
+        if not await self._low_profile_click(day_selector, timeout=3000):
             raise WorkflowExecutionError(f"周选择器里找不到目标日期 {monday.isoformat()}")
-        try:
-            await self.page.wait_for_function(
-                """({selector, expected}) => {
-                    const week = document.querySelector(selector)?.querySelector('.fc-dayGridWeek-view');
-                    const dates = [...(week?.querySelectorAll('.fc-daygrid-day[data-date]') || [])]
-                        .map(el => el.getAttribute('data-date')).filter(Boolean).sort();
-                    return dates.length > 0 && dates[0] === expected;
-                }""",
-                arg={"selector": selector, "expected": monday.isoformat()}, timeout=10000,
-            )
-        except Exception as exc:
-            raise WorkflowExecutionError(f"周视图没有切换到 {monday.isoformat()} 所在周") from exc
-
-    async def _shown_week_monday(self, selector: str) -> date:
-        visible = await self.page.evaluate("""(selector) => {
-            const root = document.querySelector(selector);
-            const week = root && root.querySelector('.fc-dayGridWeek-view');
-            if (!week) return '';
-            const dates = [...week.querySelectorAll('.fc-daygrid-day[data-date]')]
-                .map(el => el.getAttribute('data-date')).filter(Boolean).sort();
-            return dates[0] || '';
-        }""", selector)
-        try:
-            shown = date.fromisoformat(str(visible))
-        except ValueError as exc:
-            raise WorkflowExecutionError("周视图未显示日期，无法定位目标周") from exc
-        return shown - timedelta(days=shown.weekday())
+        self._calendar_shown_monday = monday
+        self._calendar_week_clicked = True
 
     async def _do_extract_calendar_month_weeks(self, step: dict) -> None:
         """按月选、按周执行：一次运行内翻遍目标月的所有周并合并进月文件。
@@ -4267,8 +4967,17 @@ class WorkflowRunner:
         # 点“周”后页面上可能同时留着月视图日历盒。周选择器在周视图那一盒里，
         # 所以翻周用本步骤的 selector（.calendar-box:has(周视图)），不要点到月视图的输入框。
         week_selector = str(step.get("week_selector") or step.get("selector") or ".calendar-box")
-        extract_step = {**step, "action": "extract_calendar", "month_mode": "week"}
+        extract_step = {
+            **step,
+            "action": "extract_calendar",
+            "month_mode": "week",
+            "from_network": True,
+        }
         for monday in mondays:
+            # 这一周里新出现的网关 400 不能记成「没有交易事件」。
+            self._calendar_watch_baseline = len(self._page_errors)
+            self._calendar_payload_baseline = len(self._calendar_payloads)
+            await self._bring_page_to_front(self.page)
             await self._do_select_calendar_week({"selector": week_selector}, target=monday)
             await self._do_extract_calendar(extract_step, strict=False)
             await asyncio.sleep(0.8)
@@ -4297,24 +5006,60 @@ class WorkflowRunner:
             month_mode = "page"
 
         logger.info("  读取交易日历: {}", selector)
-        try:
-            raw = await self.page.evaluate(
-                _CALENDAR_EXTRACT_JS,
-                {"selector": selector, "includeOther": include_other},
+        network_view = ""
+        rows: list = []
+        if step.get("from_network"):
+            payload = await self._await_calendar_payload(
+                getattr(self, "_calendar_payload_baseline", 0),
+                clicked=bool(getattr(self, "_calendar_week_clicked", True)),
             )
-        except Exception as exc:
-            raise WorkflowExecutionError(f"交易日历读取失败: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise WorkflowExecutionError("交易日历读取失败: 页面返回结构异常")
-        rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
+            if payload is None and not getattr(self, "_calendar_week_clicked", True):
+                logger.warning("  没有捕获到 findTradeCalendar，退回读网格")
+            elif payload is None:
+                raise WorkflowExecutionError(
+                    "翻周后没有收到 findTradeCalendar 响应，不能记成没有交易事件"
+                )
+            elif int(payload.get("status") or 0) >= 400:
+                await self._pause_for_calendar_gateway([payload])
+            else:
+                parsed = calendar_rows_from_api(str(payload.get("text") or ""))
+                if parsed is None:
+                    raise WorkflowExecutionError(
+                        "findTradeCalendar 返回的不是 JSON，不能记成没有交易事件"
+                    )
+                rows = parsed
+                network_view = "周"
+        if not network_view:
+            try:
+                raw = await self.page.evaluate(
+                    _CALENDAR_EXTRACT_JS,
+                    {"selector": selector, "includeOther": include_other},
+                )
+            except Exception as exc:
+                raise WorkflowExecutionError(f"交易日历读取失败: {exc}") from exc
+            if not isinstance(raw, dict):
+                raise WorkflowExecutionError("交易日历读取失败: 页面返回结构异常")
+            rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
+            page_month_hint = str(raw.get("month") or "")
+            view_hint = str(raw.get("view") or "")
+        else:
+            page_month_hint = ""
+            view_hint = network_view
         if not rows:
+            await self._ensure_calendar_settled(
+                getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
+            )
             if not strict:
-                logger.info("  交易日历当前周无事件，跳过")
+                if step.get("from_network"):
+                    logger.info("  交易日历目标周没有交易事件，跳过")
+                    self._note_calendar_empty(step)
+                else:
+                    logger.info("  交易日历当前周无事件，跳过")
                 return
             # 不写空文件：没有日期通常意味着页面没加载完/账号没有日历权限。
             raise WorkflowExecutionError("交易日历读取失败: 页面上没有找到任何日期")
 
-        page_month = normalize_month(str(raw.get("month") or ""))
+        page_month = normalize_month(page_month_hint)
         target_month = (self.target_date or date.today()).strftime("%Y-%m")
         month = target_month if month_mode == "target" else (page_month or target_month)
 
@@ -4328,7 +5073,7 @@ class WorkflowRunner:
             if save_path.suffix.lower() != ".csv":
                 save_path = save_path.with_suffix(".csv")
             table = build_calendar_table(
-                rows, month=output_month, view=str(raw.get("view") or "月"),
+                rows, month=output_month, view=view_hint or "月",
                 include_empty_days=bool(include_empty_days),
                 captured_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             )
@@ -4348,12 +5093,42 @@ class WorkflowRunner:
             self._on_event({"event": "calendar_saved", "path": str(save_path),
                             "month": output_month, "rows": len(table) - 1})
             self._note_file("saved", save_path)
+            self._calendar_saved_paths.add(str(save_path))
         if not saved:
+            await self._ensure_calendar_settled(
+                getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
+            )
             if not strict:
                 logger.info("  交易日历目标周没有交易事件，跳过")
-                self._note_file("empty", reason="没有交易事件")
+                self._note_calendar_empty(step)
                 return
             raise WorkflowExecutionError("交易日历读取失败: 目标周没有交易事件")
+
+    def _note_calendar_empty(self, step: dict) -> None:
+        """这一周确实没有事件时记一笔空结果。
+
+        同一个月文件已经在本轮写过时不再改成空，避免后面的空周把前面的成功盖掉。
+
+        Args:
+            step: 日历提取步骤，用来还原文件名。
+
+        Returns:
+            None: 需要时发出 ``file_result``。
+
+        Examples:
+            >>> "没有交易事件" != ""
+            True
+        """
+        save_as = str(step.get("save_as") or "交易日历{month_iso}.csv")
+        anchor = self.query_month or self.target_date or date.today()
+        month = anchor.strftime("%Y-%m")
+        save_name = save_as.replace("{month_iso}", month).replace("{month}", month.replace("-", ""))
+        save_path = self._resolve_save_path(save_name, f"交易日历{month}.csv")
+        if save_path.suffix.lower() != ".csv":
+            save_path = save_path.with_suffix(".csv")
+        if str(save_path) in self._calendar_saved_paths:
+            return
+        self._note_file("empty", reason="没有交易事件")
 
     @staticmethod
     def _save_grid_as_xlsx(rows: list[list[str]], save_path):

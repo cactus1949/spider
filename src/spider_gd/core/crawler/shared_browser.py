@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import socket
 import subprocess
 import sys
@@ -516,6 +517,33 @@ class SharedBrowser:
             self._context = page.context
             self._pages = [page]
             self._current_page_idx = 0
+            await self._activate_bound_tab(page)
+
+    async def _activate_bound_tab(self, page: Any) -> None:
+        """把页面设成窗口里选中的标签。
+
+        关闭当前标签或新开业务页之后如果不激活，Chrome 标签栏会没有任何选中项。
+        后台标签的签名也容易被网关拒绝。
+
+        Args:
+            page: 要激活的页面。
+
+        Returns:
+            None: 没有 bring_to_front 或调用失败时只记警告。
+
+        Examples:
+            >>> SharedBrowser._activate_bound_tab.__name__
+            '_activate_bound_tab'
+        """
+        bring = getattr(page, "bring_to_front", None)
+        if not callable(bring):
+            return
+        try:
+            result = bring()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning("未能把绑定页带到前台: {}", exc)
 
     async def follow_active_page(self) -> list[dict[str, Any]]:
         """空闲时把绑定页改成专用浏览器里当前可见的网页标签，并返回页面列表。
@@ -531,12 +559,15 @@ class SharedBrowser:
             if self._execution_lock.locked() or not self.is_running:
                 return await self.list_pages()
             pages = await self.list_pages()
-            page = await self._foreground_http_page()
+            page, _focused = await self._foreground_http_page()
             if page is not None and self._pages != [page]:
                 self._context = page.context
                 self._pages = [page]
                 self._current_page_idx = 0
                 logger.info("已跟随浏览器当前标签页: {}", self._page_label(page))
+                # 只在改绑定时激活一次。页面列表会反复调用这里，
+                # 浏览器只是在后台时不能每次都把它抢到前台。
+                await self._activate_bound_tab(page)
             return pages
 
     async def reset_cookies_and_reload(self) -> dict[str, Any]:
@@ -579,7 +610,15 @@ class SharedBrowser:
             logger.info("已清 cookie 并刷新: {}（{}）", origin, cleared_by)
             return {"origin": origin, "url": page.url, "cleared_by": cleared_by}
 
-    async def _foreground_http_page(self) -> Any:
+    async def _foreground_http_page(self) -> tuple[Any, bool]:
+        """找出要绑定的网页标签。
+
+        第二个值表示这个标签当前是否已在窗口里获得焦点。
+        跟随逻辑只在绑定对象发生变化时把它带到前台。
+
+        Returns:
+            tuple[Any, bool]: 页面，以及它是否已有焦点。没有候选页时页面为 None。
+        """
         candidates = [
             page for page in self._page_ids
             if not page.is_closed() and str(getattr(page, "url", "")).startswith(("http://", "https://"))
@@ -590,7 +629,7 @@ class SharedBrowser:
             active_urls = await self._macos_active_tab_urls()
             native_matches = [page for page in candidates if page.url in active_urls]
             if len(native_matches) == 1:
-                return native_matches[0]
+                return native_matches[0], True
         states = await asyncio.gather(*(self._tab_focus(page) for page in candidates), return_exceptions=True)
         visible: list[Any] = []
         focused: list[Any] = []
@@ -603,9 +642,9 @@ class SharedBrowser:
             elif is_visible:
                 visible.append(page)
         if len(focused) == 1:
-            return focused[0]
+            return focused[0], True
         if len(visible) == 1 and not focused:
-            return visible[0]
+            return visible[0], False
         if not focused and not visible and len(candidates) > 1:
             # 浏览器在后台（最小化/被别的窗口盖住）时没有“当前标签”，
             # 各页的 hasFocus 全是 false。此时跟随最右侧（最新）的业务页：
@@ -621,8 +660,8 @@ class SharedBrowser:
                     page for page in candidates
                     if target and str(getattr(page, "url", "")).startswith(target)
                 ] or candidates
-                return scoped[-1]
-        return None
+                return scoped[-1], False
+        return None, False
 
     async def _macos_active_tab_urls(self) -> set[str]:
         script = (

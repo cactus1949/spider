@@ -57,6 +57,7 @@ def test_apply_catchup_storage_defaults_to_task_path_without_mutating_input():
     stored = apply_catchup_storage(cfg, tasks)
 
     assert stored["path_structure"] == "- [日前]"
+    assert stored["_structure_indicators"] == ["日前"]
     assert stored["path_template"] == "{YYYY-MM}"
     assert stored["path_folders"] == [{"name": "阳江", "indicators": ["日前"]}]
     assert stored["download_dir"] == "/data/task"

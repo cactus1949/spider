@@ -439,15 +439,16 @@ def apply_catchup_storage(
         or path_template is not None
         or path_folders is not None
     )
+    matched = match_task_storage(list(chosen.get("indicators") or []), tasks)
     if provided:
         chosen["path_structure"] = "" if path_structure is None else str(path_structure)
         chosen["path_template"] = "" if path_template is None else str(path_template)
         chosen["path_folders"] = list(path_folders or [])
         chosen["download_dir"] = explicit_dir
         chosen["download_dir_custom"] = bool(explicit_dir)
+        _remember_structure_indicators(chosen, matched)
         return chosen
 
-    matched = match_task_storage(list(chosen.get("indicators") or []), tasks)
     if matched is not None:
         chosen["path_structure"] = str(matched.get("path_structure") or "")
         chosen["path_template"] = str(matched.get("path_template") or "")
@@ -461,7 +462,45 @@ def apply_catchup_storage(
     if explicit_dir:
         chosen["download_dir"] = explicit_dir
         chosen["download_dir_custom"] = True
+    _remember_structure_indicators(chosen, matched)
     return chosen
+
+
+def _remember_structure_indicators(chosen: dict, matched: dict | None) -> None:
+    """记下结构所属任务的全部指标，供解析标签时不要误报失效。
+
+    Args:
+        chosen: 即将返回的补数配置。没有匹配任务时不写入。
+        matched: :func:`match_task_storage` 选中的任务。没有时为 None。
+
+    Returns:
+        None: 结果直接写进 ``chosen``。
+
+    Examples:
+        >>> task = {"indicators": ["日前", "实时"]}
+        >>> cfg = {}
+        >>> _remember_structure_indicators(cfg, task)
+        >>> cfg["_structure_indicators"]
+        ['日前', '实时']
+        >>> empty = {}
+        >>> _remember_structure_indicators(empty, None)
+        >>> empty
+        {}
+    """
+    if not isinstance(matched, dict):
+        return
+    raw = matched.get("indicators") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return
+    names = []
+    for item in raw:
+        text = str(item).strip()
+        if text and text not in names:
+            names.append(text)
+    if names:
+        chosen["_structure_indicators"] = names
 
 
 def catchup_download_dir(config: dict) -> str:

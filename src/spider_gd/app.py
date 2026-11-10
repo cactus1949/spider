@@ -2719,10 +2719,14 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             from spider_gd.core.path_structure import (
                 build_structure_dirs,
                 resolve_structure,
+                structure_indicator_scope,
                 structure_warnings,
             )
             from spider_gd.core.workflow_outputs import output_specs_or_fallback
 
+            task_indicators = structure_indicator_scope(
+                task_indicators, cfg.get("_structure_indicators"),
+            )
             outputs_map = {}
             for indicator in task_indicators:
                 wf = ctx.state_store.get_workflow_config(indicator)
@@ -2756,7 +2760,9 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 )
                 return
             task_cfg["path_folders"] = []
-            structure_issues = structure_warnings(result, outputs_map)
+            structure_issues = structure_warnings(
+                result, outputs_map, indicators=task_indicators,
+            )
             for line in structure_issues:
                 logger.warning("定时任务 {}：{}", task_id, line)
                 try:
@@ -3188,6 +3194,87 @@ def _alert_outbox_retry_job(ctx: AppContext):
     return _handler
 
 
+# 调度器对象 → 上次成功注册时的任务指纹。同一进程里连着保存相同调度时不再拆装。
+_TASK_SCHEDULE_SIGNATURES: dict[int, tuple] = {}
+
+
+def _task_schedule_signature(tasks: list[dict]) -> tuple:
+    """把会影响 cron 的字段收成可比较的指纹。
+
+    Args:
+        tasks: 已过滤出的启用任务。顺序不影响结果。
+
+    Returns:
+        tuple: 排序后的 ``(id, 名称, cron)``。
+
+    Examples:
+        >>> _task_schedule_signature([
+        ...     {"id": "b", "name": "乙", "repeat": "daily", "time": "08:00"},
+        ...     {"id": "a", "name": "甲", "repeat": "daily", "time": "09:30"},
+        ... ])
+        (('a', '甲', '30 9 * * *'), ('b', '乙', '0 8 * * *'))
+    """
+    rows = []
+    for task in tasks:
+        task_id = str(task.get("id") or task.get("name") or "")
+        rows.append((
+            task_id,
+            str(task.get("name") or task_id),
+            _repeat_to_cron(task) or "",
+        ))
+    return tuple(sorted(rows))
+
+
+def _remember_task_schedule(ctx: AppContext, tasks: list[dict]) -> None:
+    """记下这次注册对应的调度指纹。
+
+    Args:
+        ctx: 提供调度器对象，用来区分不同进程内的调度器。
+        tasks: 刚刚注册进去的启用任务。
+
+    Returns:
+        None: 指纹写在模块级表里。
+
+    Examples:
+        >>> _task_schedule_signature([])
+        ()
+    """
+    _TASK_SCHEDULE_SIGNATURES[id(ctx.scheduler)] = _task_schedule_signature(tasks)
+
+
+async def reload_task_jobs_if_changed(ctx: AppContext) -> bool:
+    """任务表没改到调度时，跳过拆除并重新注册。
+
+    保存界面会把每一条任务各 PUT 一次，每次都拆掉全部 ``task_*`` 再注册。
+    指纹相同就直接返回，避免同一秒里把调度器拆装多遍。
+
+    Args:
+        ctx: 应用上下文。
+
+    Returns:
+        bool: 真的重新注册了为 True。
+
+    Examples:
+        >>> _task_schedule_signature([
+        ...     {"id": "a", "name": "甲", "repeat": "daily", "time": "8:05"},
+        ... ])
+        (('a', '甲', '5 8 * * *'),)
+    """
+    tasks = _load_task_configs(ctx)
+    signature = _task_schedule_signature(tasks)
+    key = id(ctx.scheduler)
+    if _TASK_SCHEDULE_SIGNATURES.get(key) == signature:
+        logger.info("定时任务调度未变化，跳过重复注册")
+        return False
+    existing = await ctx.scheduler.list_jobs()
+    for job in existing:
+        if str(getattr(job, "job_id", "")).startswith("task_"):
+            await ctx.scheduler.remove_job(job.job_id)
+    await register_jobs(ctx)
+    _TASK_SCHEDULE_SIGNATURES[key] = signature
+    return True
+
+
 async def register_jobs(
     ctx: AppContext,
     *,
@@ -3281,6 +3368,7 @@ async def register_jobs(
     job_ids.append(await ctx.scheduler.add_job(spec, alert_retry_handler))
 
     logger.info("已注册调度任务：{}", job_ids)
+    _remember_task_schedule(ctx, task_configs)
     return job_ids
 
 
