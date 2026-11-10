@@ -43,6 +43,22 @@ def test_empty_dialog_skips_and_gateway_400_is_not_a_plain_timeout():
     assert "Timeout" not in gateway["reason"]
 
 
+def test_unrelated_http0_does_not_fail_the_export_while_download_is_still_open():
+    heartbeat = {
+        "status": 0,
+        "resource_type": "xhr",
+        "content_type": "",
+        "url": "https://pm.gd.csg.cn/pfjs/qctc/getSwitch",
+        "failure": "net::ERR_ABORTED",
+    }
+    assert diagnose_export_miss([heartbeat], "") is None
+    timed_out = diagnose_export_miss(
+        [heartbeat], "", timeout_error="Timeout 60000ms exceeded",
+    )
+    assert timed_out["action"] == "fail"
+    assert "HTTP 0" in timed_out["reason"]
+
+
 def test_http0_names_the_browser_failure_instead_of_only_the_download_timeout():
     found = diagnose_export_miss(
         [{

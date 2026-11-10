@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from tests.dom_probe_fakes import DomProbeFakePage
-from workflow_runner import WorkflowPaused, WorkflowRunner
+from workflow_runner import WorkflowExecutionError, WorkflowPaused, WorkflowRunner
 
 
 def _gateway() -> dict:
@@ -236,3 +238,97 @@ async def test_new_business_tab_is_brought_to_front(tmp_path):
 
     assert runner.page is popup
     assert popup.front == 1
+
+
+@pytest.mark.unit
+async def test_closing_another_tab_keeps_the_bound_page(tmp_path):
+    runner = WorkflowRunner({"name": "标签"}, download_dir=str(tmp_path))
+    bound = _Tab("https://pm.gd.csg.cn/pfjy/stc/index")
+    other = _Tab("https://pm.gd.csg.cn/portal/#/home")
+    runner.pages = [other, bound]
+    runner._current_page_idx = 1
+
+    await runner._do_close_tab({"index": 0})
+
+    assert other.closed is True
+    assert runner.page is bound
+    assert bound.front >= 1
+
+
+@pytest.mark.unit
+async def test_business_error_json_is_not_an_empty_week(tmp_path):
+    from calendar_data import calendar_rows_from_api
+
+    assert calendar_rows_from_api('{"code": 500, "data": null}') is None
+    assert calendar_rows_from_api('{"data":[{"tradeName":"周双边"}]}') is None
+    assert calendar_rows_from_api('{"data":[]}') == []
+    assert calendar_rows_from_api('{"data":[{"rq":"20260907","tradeName":"周双边"}]}')[0]["date"] == (
+        "2026-09-07"
+    )
+
+    runner, events = _calendar_runner(tmp_path)
+    runner._calendar_week_clicked = True
+    runner._calendar_payload_wait_s = 0.2
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": '{"code": 500, "message": "rejected"}',
+        "resource_type": "xhr",
+        "ignored": False,
+    })
+    with pytest.raises(WorkflowExecutionError, match="不是 JSON|不能记成没有交易事件"):
+        await runner._do_extract_calendar(
+            {"from_network": True, "month_mode": "week", "include_empty_days": False},
+            strict=False,
+        )
+    assert not any(event.get("status") == "empty" for event in events)
+
+
+@pytest.mark.unit
+async def test_inflight_calendar_response_is_not_the_new_week(tmp_path):
+    runner, events = _calendar_runner(tmp_path)
+    runner._calendar_week_clicked = True
+    runner._calendar_payload_wait_s = 0.2
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": '{"data":[{"tradeDate":"2026-09-01","tradeName":"旧周"}]}',
+        "resource_type": "xhr",
+        "ignored": True,
+    })
+    with pytest.raises(WorkflowExecutionError, match="没有收到 findTradeCalendar"):
+        await runner._do_extract_calendar(
+            {"from_network": True, "month_mode": "week", "include_empty_days": False},
+            strict=False,
+        )
+    assert not any(event.get("status") == "empty" for event in events)
+
+
+@pytest.mark.unit
+async def test_later_empty_week_does_not_overwrite_a_saved_month_file(tmp_path):
+    runner, events = _calendar_runner(tmp_path)
+    runner.query_month = date(2026, 9, 1)
+    runner._calendar_week_clicked = True
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": '{"data":[{"tradeDate":"2026-09-07","tradeName":"周双边","applyTime":"09-07 14:00"}]}',
+        "resource_type": "xhr",
+    })
+    step = {
+        "from_network": True,
+        "month_mode": "week",
+        "include_empty_days": False,
+        "save_as": "交易日历明细{month_iso}.csv",
+    }
+    await runner._do_extract_calendar(step, strict=False)
+    runner._calendar_payload_baseline = len(runner._calendar_payloads)
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": '{"data":[]}',
+        "resource_type": "xhr",
+    })
+    await runner._do_extract_calendar(step, strict=False)
+    assert any(event.get("status") == "saved" for event in events)
+    assert not any(event.get("status") == "empty" for event in events)

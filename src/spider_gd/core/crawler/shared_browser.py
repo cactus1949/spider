@@ -559,14 +559,14 @@ class SharedBrowser:
             if self._execution_lock.locked() or not self.is_running:
                 return await self.list_pages()
             pages = await self.list_pages()
-            page, needs_activate = await self._foreground_http_page()
+            page, _focused = await self._foreground_http_page()
             if page is not None and self._pages != [page]:
                 self._context = page.context
                 self._pages = [page]
                 self._current_page_idx = 0
                 logger.info("已跟随浏览器当前标签页: {}", self._page_label(page))
-                needs_activate = True
-            if page is not None and needs_activate:
+                # 只在改绑定时激活一次。页面列表会反复调用这里，
+                # 浏览器只是在后台时不能每次都把它抢到前台。
                 await self._activate_bound_tab(page)
             return pages
 
@@ -611,11 +611,13 @@ class SharedBrowser:
             return {"origin": origin, "url": page.url, "cleared_by": cleared_by}
 
     async def _foreground_http_page(self) -> tuple[Any, bool]:
-        """找出要绑定的网页标签，并说明要不要把它设成选中标签。
+        """找出要绑定的网页标签。
+
+        第二个值表示这个标签当前是否已在窗口里获得焦点。
+        跟随逻辑只在绑定对象发生变化时把它带到前台。
 
         Returns:
-            tuple[Any, bool]: 页面，以及标签栏当前没有选中它时是否要激活。
-            没有候选页时页面为 None。
+            tuple[Any, bool]: 页面，以及它是否已有焦点。没有候选页时页面为 None。
         """
         candidates = [
             page for page in self._page_ids
@@ -627,7 +629,7 @@ class SharedBrowser:
             active_urls = await self._macos_active_tab_urls()
             native_matches = [page for page in candidates if page.url in active_urls]
             if len(native_matches) == 1:
-                return native_matches[0], False
+                return native_matches[0], True
         states = await asyncio.gather(*(self._tab_focus(page) for page in candidates), return_exceptions=True)
         visible: list[Any] = []
         focused: list[Any] = []
@@ -640,9 +642,9 @@ class SharedBrowser:
             elif is_visible:
                 visible.append(page)
         if len(focused) == 1:
-            return focused[0], False
+            return focused[0], True
         if len(visible) == 1 and not focused:
-            return visible[0], True
+            return visible[0], False
         if not focused and not visible and len(candidates) > 1:
             # 浏览器在后台（最小化/被别的窗口盖住）时没有“当前标签”，
             # 各页的 hasFocus 全是 false。此时跟随最右侧（最新）的业务页：
@@ -658,7 +660,7 @@ class SharedBrowser:
                     page for page in candidates
                     if target and str(getattr(page, "url", "")).startswith(target)
                 ] or candidates
-                return scoped[-1], True
+                return scoped[-1], False
         return None, False
 
     async def _macos_active_tab_urls(self) -> set[str]:

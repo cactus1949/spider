@@ -373,10 +373,13 @@ def calendar_rows_from_api(text: str) -> list[dict[str, str]] | None:
         payload = json.loads(text or "")
     except json.JSONDecodeError:
         return None
+    if _api_business_error(payload):
+        return None
+    items = _unwrap_calendar_items(payload)
     rows: list[dict[str, str]] = []
-    for item in _unwrap_calendar_items(payload):
-        iso_date = _api_text(item, _API_DATE_KEYS)[:10]
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", iso_date):
+    for item in items:
+        iso_date = _api_date(_api_text(item, _API_DATE_KEYS))
+        if not iso_date:
             continue
         rows.append({
             "date": iso_date,
@@ -386,4 +389,57 @@ def calendar_rows_from_api(text: str) -> list[dict[str, str]] | None:
             "event_type": _api_text(item, _API_TYPE_KEYS),
             "status": _api_text(item, _API_STATUS_KEYS),
         })
+    # 有记录但一条日期都读不出来，不能当成这一周没有安排。
+    if items and not rows:
+        return None
     return rows
+
+
+def _api_date(value: str) -> str:
+    """把接口里的日期收成 ``YYYY-MM-DD``。
+
+    Args:
+        value: 原始字段。可以带时间，也可以是 ``YYYYMMDD``。
+
+    Returns:
+        str: 标准日期。认不出时为空字符串。
+
+    Examples:
+        >>> _api_date("2026-09-07 14:00:00")
+        '2026-09-07'
+        >>> _api_date("20260907")
+        '2026-09-07'
+        >>> _api_date("不是日期")
+        ''
+    """
+    text = str(value or "").strip().replace("/", "-").replace(".", "-")
+    compact = re.match(r"^(\d{4})(\d{2})(\d{2})(?:\D|$)", text)
+    if compact and "-" not in text[:8]:
+        return f"{compact.group(1)}-{compact.group(2)}-{compact.group(3)}"
+    head = text[:10]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", head):
+        return head
+    return ""
+
+
+def _api_business_error(payload: Any) -> bool:
+    """接口用业务码表示失败时，不能把空数据当成没有交易。
+
+    Args:
+        payload: JSON 对象。
+
+    Returns:
+        bool: ``code`` 大于等于 400 时为 True。没有这个字段时为 False。
+
+    Examples:
+        >>> _api_business_error({"code": 500, "data": None})
+        True
+        >>> _api_business_error({"code": 0, "data": []})
+        False
+    """
+    if not isinstance(payload, dict) or "code" not in payload:
+        return False
+    try:
+        return int(payload.get("code")) >= 400
+    except (TypeError, ValueError):
+        return False

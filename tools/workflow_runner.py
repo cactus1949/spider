@@ -375,6 +375,20 @@ def diagnose_export_miss(
         }
     if text:
         return {"action": "fail", "reason": f"导出没有产生文件。页面提示：{text[:300]}"}
+    if errors and not timeout_error:
+        # 下载还在等时，心跳或被取消的无关请求也会是 HTTP 0。
+        # 只有导出地址自己失败才提前结束；其余等到下载超时再写进原因。
+        kept = []
+        for item in errors:
+            try:
+                status = int(item.get("status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status != 0 or _looks_like_export_url(str(item.get("url") or "")):
+                kept.append(item)
+        errors = kept
+        if not errors:
+            return None
     if errors:
         statuses = []
         for item in errors:
@@ -401,6 +415,25 @@ def diagnose_export_miss(
             ),
         }
     return None
+
+
+def _looks_like_export_url(url: str) -> bool:
+    """这个地址像不像本次导出请求。
+
+    Args:
+        url: 请求地址，查询串不参与判断。
+
+    Returns:
+        bool: 路径里带有导出或下载字样时为 True。
+
+    Examples:
+        >>> _looks_like_export_url("https://pm.gd.csg.cn/pfjs/exportItems")
+        True
+        >>> _looks_like_export_url("https://pm.gd.csg.cn/pfjs/getSwitch")
+        False
+    """
+    path = url.split("?", 1)[0].lower()
+    return any(token in path for token in ("export", "download", "downfile"))
 
 
 class _PointerUnavailableError(RuntimeError):
@@ -658,6 +691,8 @@ class WorkflowRunner:
         self._calendar_watch_baseline = 0
         self._calendar_payload_baseline = 0
         self._calendar_week_clicked = False
+        self._calendar_ignored_requests: set[int] = set()
+        self._calendar_saved_paths: set[str] = set()
         self._console_errors: list[dict[str, Any]] = []
         self._page_exceptions: list[str] = []
         self._auth_traffic: list[dict[str, Any]] = []
@@ -1279,6 +1314,8 @@ class WorkflowRunner:
             "page_url": self._page_url(page),
             "_page": page,
             "at": time.strftime("%H:%M:%S"),
+            # 翻周点击之前就已经在飞的请求，不算这一周的新结果。
+            "ignored": id(request) in self._calendar_ignored_requests,
         })
         del self._calendar_payloads[:-30]
 
@@ -2264,6 +2301,7 @@ class WorkflowRunner:
             self._observe_page(new_page)
             await new_page.goto(url, wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(2)
+            await self._bring_page_to_front(new_page)
             logger.info("  在新标签页打开: {}", url)
         else:
             current = ""
@@ -3960,8 +3998,7 @@ class WorkflowRunner:
             index = len(self.pages) + index
         if 0 <= index < len(self.pages):
             self._current_page_idx = index
-            # 把该 page 带到前台
-            await self.pages[index].bring_to_front()
+            await self._bring_page_to_front(self.pages[index])
             logger.info("  切换到标签页 #{}", index)
         else:
             logger.warning("  无效的标签页索引: {}", index)
@@ -3981,8 +4018,11 @@ class WorkflowRunner:
         if page_to_close in self._protected_pages:
             logger.info("保留用户已有页面")
             return
-        survivor = self.pages[index - 1] if index > 0 else self.pages[index + 1]
-        # 先选中留下的标签再关，避免标签栏出现没有任何选中项的状态。
+        # 关的是别的标签时，绑定页保持不变。关的是当前标签时，先选中旁边那一页再关。
+        if page_to_close is self.page:
+            survivor = self.pages[index - 1] if index > 0 else self.pages[index + 1]
+        else:
+            survivor = self.page
         await self._bring_page_to_front(survivor)
         self.pages.pop(index)
         try:
@@ -4856,7 +4896,7 @@ class WorkflowRunner:
             prior = [item for item in self._calendar_payloads if self._calendar_payload_on_page(item)]
             if prior:
                 return prior[-1]
-        deadline = time.monotonic() + 8
+        deadline = time.monotonic() + float(getattr(self, "_calendar_payload_wait_s", 8))
         watch = getattr(self, "_calendar_watch_baseline", 0)
         while time.monotonic() < deadline:
             await self._drain_response_captures()
@@ -4865,7 +4905,7 @@ class WorkflowRunner:
                 await self._pause_for_calendar_gateway(blocking)
             fresh = [
                 item for item in self._calendar_payloads[baseline:]
-                if self._calendar_payload_on_page(item)
+                if self._calendar_payload_on_page(item) and not item.get("ignored")
             ]
             if fresh:
                 return fresh[-1]
@@ -4885,6 +4925,7 @@ class WorkflowRunner:
         self._calendar_week_clicked = shown != monday
         if shown == monday:
             return
+        self._calendar_ignored_requests = {id(item) for item in list(self._inflight)}
         await self._bring_page_to_front(self.page)
         # 只做和日清算相同的坐标点击。月份差按已知周计算，不再轮询面板脚本。
         if not await self._low_profile_click(f"{selector} .date-box input", timeout=5000):
@@ -5011,7 +5052,7 @@ class WorkflowRunner:
             if not strict:
                 if step.get("from_network"):
                     logger.info("  交易日历目标周没有交易事件，跳过")
-                    self._note_file("empty", reason="没有交易事件")
+                    self._note_calendar_empty(step)
                 else:
                     logger.info("  交易日历当前周无事件，跳过")
                 return
@@ -5052,15 +5093,42 @@ class WorkflowRunner:
             self._on_event({"event": "calendar_saved", "path": str(save_path),
                             "month": output_month, "rows": len(table) - 1})
             self._note_file("saved", save_path)
+            self._calendar_saved_paths.add(str(save_path))
         if not saved:
             await self._ensure_calendar_settled(
                 getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
             )
             if not strict:
                 logger.info("  交易日历目标周没有交易事件，跳过")
-                self._note_file("empty", reason="没有交易事件")
+                self._note_calendar_empty(step)
                 return
             raise WorkflowExecutionError("交易日历读取失败: 目标周没有交易事件")
+
+    def _note_calendar_empty(self, step: dict) -> None:
+        """这一周确实没有事件时记一笔空结果。
+
+        同一个月文件已经在本轮写过时不再改成空，避免后面的空周把前面的成功盖掉。
+
+        Args:
+            step: 日历提取步骤，用来还原文件名。
+
+        Returns:
+            None: 需要时发出 ``file_result``。
+
+        Examples:
+            >>> "没有交易事件" != ""
+            True
+        """
+        save_as = str(step.get("save_as") or "交易日历{month_iso}.csv")
+        anchor = self.query_month or self.target_date or date.today()
+        month = anchor.strftime("%Y-%m")
+        save_name = save_as.replace("{month_iso}", month).replace("{month}", month.replace("-", ""))
+        save_path = self._resolve_save_path(save_name, f"交易日历{month}.csv")
+        if save_path.suffix.lower() != ".csv":
+            save_path = save_path.with_suffix(".csv")
+        if str(save_path) in self._calendar_saved_paths:
+            return
+        self._note_file("empty", reason="没有交易事件")
 
     @staticmethod
     def _save_grid_as_xlsx(rows: list[list[str]], save_path):

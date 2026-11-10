@@ -461,6 +461,23 @@ async def test_follow_active_page_uses_newest_business_tab_when_all_unfocused():
     browser._tab_focus = focus  # type: ignore[method-assign]
     await browser.follow_active_page()
     assert browser.page is spot_new
+    spot_new.bring_to_front.assert_called()
+
+
+async def test_follow_active_page_does_not_raise_a_background_window_on_every_poll():
+    browser = _running_browser()
+    spot = _open_page("https://pm.gd.csg.cn/pfxh/stc/index")
+    browser._page_ids = {spot: "spot"}
+    browser._pages = [spot]
+    browser._context = spot.context
+
+    async def focus(_page: MagicMock) -> tuple[bool, bool]:
+        return False, False
+
+    browser._tab_focus = focus  # type: ignore[method-assign]
+    await browser.follow_active_page()
+    spot.bring_to_front.assert_not_called()
+    assert browser.page is spot
 
 
 async def test_follow_active_page_keeps_binding_when_newest_rule_is_off():
