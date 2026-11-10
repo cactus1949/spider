@@ -1073,6 +1073,31 @@ class WorkflowRunner:
                 continue
         return False
 
+    async def _account_marker_visible(self) -> bool:
+        """页面上是否已经有登录后才出现的账号标记。
+
+        门户 ``#/home`` 在已登录时往往不再显示「登 录」，但地址仍是公开首页，
+        不能靠菜单判断。用户名或「退出登录」才算已经进了会话。
+
+        Returns:
+            bool: 看到账号标记时为 True。
+
+        Examples:
+            >>> "退出登录" in "a:has-text('退出登录')"
+            True
+        """
+        for selector in (
+            GD_WORKBENCH_USER,
+            "text=退出登录",
+            "a:has-text('退出登录')",
+        ):
+            try:
+                if await self._dom_visible(selector, timeout=300):
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def exec_step(self, step: dict) -> None:
         """执行单个步骤并发出 start/done 事件。公开方法，供外部单步播放使用。"""
         await self._exec_step(step)
@@ -2188,7 +2213,9 @@ class WorkflowRunner:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
         await asyncio.sleep(3)  # 等 SPA 渲染完
         logger.info("  导航到: {}", url)
-        if self.config.get("type") == "login" and await self._login_stage_ok():
+        if self.config.get("type") == "login" and (
+            await self._login_stage_ok() or await self._account_marker_visible()
+        ):
             self._skip_remaining_login_steps = True
             logger.info("  已检测到完整登录状态，跳过后续登录表单步骤")
 
@@ -2503,10 +2530,13 @@ class WorkflowRunner:
             if (
                 self.config.get("type") == "login"
                 and "登 录" in selector
-                and await self._login_stage_ok()
+                and (
+                    await self._login_stage_ok()
+                    or await self._account_marker_visible()
+                )
             ):
                 self._skip_remaining_login_steps = True
-                logger.info("  登录按钮未出现，但登录阶段条件已满足，跳过后续登录表单步骤")
+                logger.info("  登录按钮未出现，页面已有登录标记，跳过后续登录表单步骤")
                 return
             logger.warning("  点击失败: {}", selector)
             if isinstance(exc, WorkflowExecutionError):
@@ -4595,6 +4625,156 @@ class WorkflowRunner:
         self._note_file("saved", save_path)
         logger.success("  表格保存 → {}", save_path)
 
+    def _calendar_blocking_errors(self, baseline: int) -> list[dict]:
+        """这一轮翻周之后，当前页上会让日历读取失效的请求错误。
+
+        Args:
+            baseline: 本周开始前 ``_page_errors`` 的长度。
+
+        Returns:
+            list[dict]: 网关空 HTML 400，或日历查询 / 开关轮询自己的失败。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._calendar_blocking_errors(0)
+            []
+        """
+        found = []
+        for item in self._page_errors[baseline:]:
+            if item.get("_resolved") or not self._export_error_on_page(item):
+                continue
+            url = str(item.get("url") or "")
+            if (
+                self._is_gateway_form(item)
+                or "findTradeCalendar" in url
+                or "systemSwitch/getSwitch" in url
+            ):
+                found.append(item)
+        return found
+
+    async def _calendar_query_pending(self) -> bool:
+        """当前页是否还有交易日历查询在途。
+
+        Returns:
+            bool: ``findTradeCalendar`` 仍在飞时为 True。开关轮询不算。
+
+        Examples:
+            >>> WorkflowRunner._is_gateway_form({"status": 200})
+            False
+        """
+        for request in self._inflight_query_requests():
+            url = str(getattr(request, "url", "") or "")
+            if "findTradeCalendar" in url or "tradeCalendarOut" in url:
+                return True
+        return False
+
+    async def _pause_for_calendar_gateway(self, errors: list[dict]) -> None:
+        """日历查询被网关拒绝时暂停，禁止记成空周。
+
+        Args:
+            errors: 已经确认的网关或日历请求错误。
+
+        Returns:
+            None: 不会正常返回。
+
+        Raises:
+            WorkflowPaused: 用户取消，或没有继续回调。
+
+        Examples:
+            >>> "findTradeCalendar" in "tradeCalendarOut/findTradeCalendar"
+            True
+        """
+        if self.page is not None:
+            self._poisoned_pages.add(self.page)
+        described = "；".join(self._describe_page_errors(errors))[:500]
+        reason = (
+            "交易日历请求被网关拒绝（HTTP 400 空 HTML，当前文档的请求签名已失效）。"
+            f"{described}。"
+            "这一周不能记成没有交易事件。不要刷新当前文档，请回到门户重新进入业务页。"
+        )
+        logger.error("  {}", reason)
+        await self._pause_and_wait(reason)
+        raise WorkflowPaused(reason)
+
+    async def _ensure_calendar_settled(self, baseline: int, timeout_ms: int = 8000) -> None:
+        """等本周的日历查询结束；期间出现网关 400 就暂停。
+
+        周视图的日期格会先换，事件要等 ``findTradeCalendar`` 回来才画上。
+        查询还在飞或刚被网关拒绝时，空网格不是「没有交易事件」。
+
+        Args:
+            baseline: 本周开始前的错误条数。
+            timeout_ms: 最长等待，毫秒。查询一直不结束时到点返回，调用方再看错误。
+
+        Returns:
+            None: 查询已停，且这段时间没有网关拒绝。
+
+        Raises:
+            WorkflowPaused: 当前文档的日历或开关请求被网关拒绝。
+
+        Examples:
+            >>> WorkflowRunner._is_gateway_form({
+            ...     "status": 400, "resource_type": "xhr", "content_type": "text/html",
+            ...     "body_size": 6, "body_blank": True,
+            ... })
+            True
+        """
+        deadline = time.monotonic() + max(int(timeout_ms), 0) / 1000
+        quiet_since: float | None = None
+        while time.monotonic() < deadline:
+            await self._drain_response_captures()
+            blocking = self._calendar_blocking_errors(baseline)
+            if blocking:
+                await self._pause_for_calendar_gateway(blocking)
+            if await self._calendar_query_pending():
+                quiet_since = None
+            else:
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= 1.2:
+                    return
+            await asyncio.sleep(0.15)
+        await self._drain_response_captures()
+        blocking = self._calendar_blocking_errors(baseline)
+        if blocking:
+            await self._pause_for_calendar_gateway(blocking)
+
+    async def _wait_calendar_week_shown(self, selector: str, monday: date) -> bool:
+        """等周视图切到目标周，途中网关拒绝就暂停。
+
+        不用 ``wait_for_function``。翻周后的日期格用和点击相同的页面脚本读取，
+        同时盯着日历查询有没有被网关拒绝。
+
+        Args:
+            selector: 周视图容器。
+            monday: 目标周的周一。
+
+        Returns:
+            bool: 日期格已经是这一周时为 True。超时仍未切到则为 False。
+
+        Raises:
+            WorkflowPaused: 翻周过程中当前文档被网关拒绝。
+
+        Examples:
+            >>> date(2026, 9, 7).weekday() == 0
+            True
+        """
+        deadline = time.monotonic() + 10
+        baseline = getattr(self, "_calendar_watch_baseline", 0)
+        while time.monotonic() < deadline:
+            await self._drain_response_captures()
+            blocking = self._calendar_blocking_errors(baseline)
+            if blocking:
+                await self._pause_for_calendar_gateway(blocking)
+            try:
+                shown = await self._shown_week_monday(selector)
+            except WorkflowExecutionError:
+                shown = None
+            if shown == monday:
+                return True
+            await asyncio.sleep(0.2)
+        return False
+
     async def _do_select_calendar_week(self, step: dict, *, target: date | None = None) -> None:
         """用页面自带的周选择器把周视图移到任务目标周。
 
@@ -4638,18 +4818,8 @@ class WorkflowRunner:
             ".el-picker-panel .el-date-table td", timeout=3000, index=day_index,
         ):
             raise WorkflowExecutionError(f"周选择器里找不到目标日期 {monday.isoformat()}")
-        try:
-            await self.page.wait_for_function(
-                """({selector, expected}) => {
-                    const week = document.querySelector(selector)?.querySelector('.fc-dayGridWeek-view');
-                    const dates = [...(week?.querySelectorAll('.fc-daygrid-day[data-date]') || [])]
-                        .map(el => el.getAttribute('data-date')).filter(Boolean).sort();
-                    return dates.length > 0 && dates[0] === expected;
-                }""",
-                arg={"selector": selector, "expected": monday.isoformat()}, timeout=10000,
-            )
-        except Exception as exc:
-            raise WorkflowExecutionError(f"周视图没有切换到 {monday.isoformat()} 所在周") from exc
+        if not await self._wait_calendar_week_shown(selector, monday):
+            raise WorkflowExecutionError(f"周视图没有切换到 {monday.isoformat()} 所在周")
 
     async def _shown_week_monday(self, selector: str) -> date:
         visible = await self.page.evaluate("""(selector) => {
@@ -4684,7 +4854,10 @@ class WorkflowRunner:
         week_selector = str(step.get("week_selector") or step.get("selector") or ".calendar-box")
         extract_step = {**step, "action": "extract_calendar", "month_mode": "week"}
         for monday in mondays:
+            # 这一周里新出现的网关 400 不能记成「没有交易事件」。
+            self._calendar_watch_baseline = len(self._page_errors)
             await self._do_select_calendar_week({"selector": week_selector}, target=monday)
+            await self._ensure_calendar_settled(self._calendar_watch_baseline)
             await self._do_extract_calendar(extract_step, strict=False)
             await asyncio.sleep(0.8)
 
@@ -4723,6 +4896,9 @@ class WorkflowRunner:
             raise WorkflowExecutionError("交易日历读取失败: 页面返回结构异常")
         rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
         if not rows:
+            await self._ensure_calendar_settled(
+                getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
+            )
             if not strict:
                 logger.info("  交易日历当前周无事件，跳过")
                 return
@@ -4764,6 +4940,9 @@ class WorkflowRunner:
                             "month": output_month, "rows": len(table) - 1})
             self._note_file("saved", save_path)
         if not saved:
+            await self._ensure_calendar_settled(
+                getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
+            )
             if not strict:
                 logger.info("  交易日历目标周没有交易事件，跳过")
                 self._note_file("empty", reason="没有交易事件")
