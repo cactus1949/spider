@@ -561,6 +561,8 @@ def captcha_self_check_rounds(step: dict) -> int:
     """读取验证码自检失败后，刷新两次再识别的轮数。
 
     没写 ``self_check_rounds``、写空、写了不能转成正整数时，都是 3。
+    旧字段 ``retry`` 仍然有效：没有 ``self_check_rounds`` 时，用它作为轮数，
+    这样现场已经写好的登录配置不会报错，也不会被静默丢掉。
     每一轮只在判定不合格之后进行，合格就不再刷新。
 
     Args:
@@ -578,10 +580,14 @@ def captcha_self_check_rounds(step: dict) -> int:
         3
         >>> captcha_self_check_rounds({"self_check_rounds": 0})
         3
+        >>> captcha_self_check_rounds({"retry": 5})
+        5
+        >>> captcha_self_check_rounds({"retry": 5, "self_check_rounds": 2})
+        2
     """
-    if "self_check_rounds" not in step:
-        return 3
-    raw = step.get("self_check_rounds")
+    raw = step.get("self_check_rounds", None)
+    if raw is None or raw == "":
+        raw = step.get("retry", None)
     if raw is None or raw == "":
         return 3
     try:
@@ -4348,6 +4354,17 @@ class WorkflowRunner:
             raise WorkflowExecutionError("captcha 不再提交登录；请把 submit_selector 改为后续独立 click 步骤，并移除 login_retry / submit_wait_ms")
         pre_refresh = captcha_refresh_count(step)
         rounds = captcha_self_check_rounds(step)
+        if "retry" in step and "self_check_rounds" in step:
+            logger.info(
+                "  captcha 步骤同时写了 retry 和 self_check_rounds，轮数使用 self_check_rounds={}",
+                rounds,
+            )
+        elif "retry" in step:
+            logger.info(
+                "  captcha 步骤的 retry={} 当作自检轮数；每一轮不合格会刷新两次。"
+                "以后请改用 self_check_rounds",
+                step.get("retry"),
+            )
 
         from spider_gd.core.crawler.captcha_solver import CaptchaSolver
         solver = CaptchaSolver()
@@ -4441,17 +4458,12 @@ class WorkflowRunner:
         before = await self._dom_attr(img_selector, "src")
         delay_s = captcha_refresh_delay_s(step)
         await self._trace_browser_action(f"captcha.refresh_{label}")
+        await asyncio.sleep(delay_s)
         clicked = await self._low_profile_click(img_selector, timeout=3000)
         if not clicked:
             logger.warning("  验证码图不可点击，跳过本次刷新")
-        await asyncio.sleep(delay_s)
         await self._stop_captcha_on_request_error()
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline:
-            current = await self._dom_attr(img_selector, "src")
-            if current and current != before:
-                break
-            await asyncio.sleep(0.15)
+        await self._wait_captcha_src(img_selector, before, delay_s)
         await self._wait_captcha_stable(img_selector)
         await self._trace_browser_action(f"captcha.refreshed_{label}")
 
@@ -4465,24 +4477,62 @@ class WorkflowRunner:
             await self._pause_and_wait(reason + "。请取消本轮，修复页面后重新运行此步骤。")
             raise WorkflowPaused(reason)
 
-    async def _wait_captcha_stable(self, img_selector: str, idle_ms: int = 400, timeout: int = 4000) -> None:
-        """等验证码图片不再变化再截图识别。
+    async def _wait_captcha_src(
+        self, img_selector: str, before: str | None, delay_s: float,
+    ) -> None:
+        """等验证码图片地址变化。每次查看至少隔开 0.8 秒，最多看 4 次。
 
-        站点每次刷新验证码都会换一张图并换一个服务端 key；连着点刷新后立刻截图，
-        可能拿到的是上一张图，但提交时用的是新 key → 服务端判验证码不匹配。
+        地址一直不变就停，不再按很短的间隔反复读页面。
+
+        Args:
+            img_selector: 验证码图片选择器。
+            before: 点击前的图片地址。
+            delay_s: 两次查看之间的秒数，不会低于 0.8。
+
+        Returns:
+            None: 看到新地址，或已经看过 4 次后返回。
+
+        Examples:
+            >>> captcha_refresh_delay_s({"refresh_interval_ms": 100}, random.Random(0)) >= 0.8
+            True
         """
-        deadline = time.monotonic() + max(timeout, 0) / 1000
-        last_src: str | None = None
-        last_change = time.monotonic()
-        while time.monotonic() < deadline:
-            src = await self._dom_attr(img_selector, "src")
-            value = src or ""
-            if value != last_src:
-                last_src = value
-                last_change = time.monotonic()
-            elif (time.monotonic() - last_change) * 1000 >= idle_ms:
+        gap = max(delay_s, 0.8)
+        for attempt in range(4):
+            await asyncio.sleep(gap)
+            current = await self._dom_attr(img_selector, "src")
+            if current and current != before:
                 return
-            await asyncio.sleep(0.1)
+            if attempt == 3:
+                logger.info("  验证码图片地址没有变化，停止查看")
+
+    async def _wait_captcha_stable(self, img_selector: str, idle_ms: int = 400, timeout: int = 4000) -> None:
+        """等验证码图片地址停住再截图。
+
+        最多读几次，两次之间至少隔 0.4 秒。地址不变就返回，
+        不再用 0.1 秒的间隔反复读页面。
+
+        Args:
+            img_selector: 验证码图片选择器。
+            idle_ms: 两次查看的间隔，小于 400 时按 400。
+            timeout: 用来限制最多看几次，不是紧密轮询的时长。
+
+        Returns:
+            None: 连续两次地址相同，或次数用完后返回。
+
+        Examples:
+            >>> max(400, 100) == 400
+            True
+        """
+        idle_s = max(idle_ms, 400) / 1000
+        # timeout 只保留给旧调用，不再按它折成很多次读取。
+        reads = 2 if timeout >= 0 else 2
+        previous: str | None = None
+        for _ in range(reads):
+            await asyncio.sleep(idle_s)
+            current = await self._dom_attr(img_selector, "src") or ""
+            if previous is not None and current == previous:
+                return
+            previous = current
 
     async def _captcha_image_bytes(self, img_selector: str) -> bytes:
         """优先解码已显示的 data 图片；其它情况仅使用 CDP 坐标截图。"""

@@ -70,6 +70,8 @@ def test_refresh_interval_is_rate_limited():
     assert captcha_self_check_rounds({"self_check_rounds": None}) == 3
     assert captcha_self_check_rounds({"self_check_rounds": "x"}) == 3
     assert captcha_self_check_rounds({"self_check_rounds": 1}) == 1
+    assert captcha_self_check_rounds({"retry": 5}) == 5
+    assert captcha_self_check_rounds({"retry": 5, "self_check_rounds": 2}) == 2
 
 
 @pytest.mark.unit
@@ -190,3 +192,43 @@ async def test_default_three_rounds_then_stop(monkeypatch, tmp_path: Path):
         })
     assert solver.calls == 4
     assert [item for item in page.clicked if "img" in item] == ["img.captcha"] * 6
+
+
+@pytest.mark.unit
+async def test_legacy_retry_is_the_round_count(monkeypatch, tmp_path: Path):
+    import spider_gd.core.crawler.captcha_solver as captcha_solver
+    from workflow_runner import WorkflowExecutionError
+
+    solver = _ScriptedSolver([CaptchaError("验证码自检未通过: 'zwe'")] * 3)
+    monkeypatch.setattr(captcha_solver, "CaptchaSolver", lambda: solver)
+
+    async def _no_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    page = _CaptchaPage()
+    with pytest.raises(WorkflowExecutionError, match="自检2轮"):
+        await _runner(tmp_path, page)._do_captcha({
+            "captcha_img": "img.captcha",
+            "captcha_input": "#code",
+            "retry": 2,
+        })
+    assert solver.calls == 3
+    assert [item for item in page.clicked if "img" in item] == ["img.captcha"] * 4
+
+
+@pytest.mark.unit
+async def test_unchanged_src_is_not_polled_tightly(monkeypatch, tmp_path: Path):
+    class _Stuck(_CaptchaPage):
+        def apply_click(self, selector: str, index: int | None) -> None:
+            self.clicked.append(selector)
+
+    async def _no_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    page = _Stuck()
+    runner = _runner(tmp_path, page)
+    await runner._refresh_captcha_image("img.captcha", {"refresh_interval_ms": 800}, "stuck")
+    attr_reads = [item for item in page.probes if item[0] == "attr"]
+    assert len(attr_reads) <= 8
