@@ -2458,10 +2458,14 @@ class WorkflowRunner:
                 continue
             if self._same_document_url(self._page_url(page), url):
                 matches.append(page)
-        if self.page in matches:
+        workbench = getattr(self, "_workbench_page", None)
+        if self.page in matches and (workbench is None or self.page is workbench):
             return False
-        protected = [page for page in matches if page in self._protected_pages]
-        chosen = protected[0] if protected else (matches[0] if matches else None)
+        if workbench in matches:
+            chosen = workbench
+        else:
+            protected = [page for page in matches if page in self._protected_pages]
+            chosen = protected[0] if protected else (matches[0] if matches else None)
         if chosen is None:
             return False
         self._bind_page(chosen)
@@ -2517,9 +2521,16 @@ class WorkflowRunner:
         """
         keep = self.page
         url = self._page_url(keep)
+        from workbench_tabs import is_workbench_url
+
+        # 只收重复的门户工作台。业务页留到本次指标结束再关，避免在 pfjy 上多做探测。
+        if not is_workbench_url(url):
+            return
+        workbench = getattr(self, "_workbench_page", None)
         duplicates = [
             page for page in self._iter_known_pages()
             if page is not keep
+            and page is not workbench
             and page not in self._protected_pages
             and self._page_is_open(page)
             and self._same_document_url(self._page_url(page), url)
