@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import date, timedelta
+import contextlib
+import inspect
 import re as _re
 import sys
+from copy import deepcopy
+from datetime import date, timedelta
 from pathlib import Path
 
 import yaml
@@ -640,6 +642,8 @@ class TaskRunner:
         self._login_done = False
         self._shared_session = None
         self._protected_pages: set = set()
+        self._kept_pages: set = set()
+        self._workbench_page = None
         self._summary = {"success": 0, "failed": 0, "skipped": 0}
 
         # 共享浏览器状态
@@ -734,9 +738,9 @@ class TaskRunner:
             self._wait_continue = session.wait_continue
             self._browser, self._context = session._browser, session.page.context
             self._shared_pages = [session.page]
-            self._protected_pages = set(self._context.pages)
             self._current_page_idx = 0
             session._active_runner = self
+            await self._prepare_browser()
             from task_retry import copy_resume_slots, slot_keys_for_item
 
             if self._slot_store is not None and self._exec_id and self._resume_from:
@@ -875,6 +879,8 @@ class TaskRunner:
                 self._record_failure(str(exc))
                 _emit("task_error", error=str(exc))
             finally:
+                with contextlib.suppress(Exception):
+                    await self._finish_indicator_pages()
                 session._active_runner = None
 
     def _use_station(self, station: dict, index: int, total: int) -> None:
@@ -949,18 +955,314 @@ class TaskRunner:
             })
 
     async def _cleanup_between_indicators(self):
-        if self._shared_session is None:
+        """一次指标结束后回到门户工作台，并关掉这次打开的业务页。"""
+        await self._finish_indicator_pages()
+
+    async def _prepare_browser(self) -> None:
+        """任务开始前只留一个可用的门户工作台。
+
+        重复的 ``portal/#/powerEnterprise`` 和上次留下的业务页关掉。
+        用户自己打开的其它页面留着。一个有菜单的工作台都没有时，不把业务页导航成门户。
+
+        Returns:
+            None: 绑定页改到工作台，或留给登录流程的空白/首页。
+
+        Examples:
+            >>> TaskRunner({"name": "t"})._workbench_page is None
+            True
+        """
+        from workbench_tabs import choose_workbench, page_role
+
+        context = self._context
+        if context is None:
+            self._kept_pages = set(self._shared_pages)
+            self._protected_pages = set(self._kept_pages)
             return
-        root = self._shared_session.page
-        for page in self._shared_pages:
-            if page is not root and page not in self._protected_pages and not page.is_closed():
-                await page.close()
-        self._shared_pages = [root]
+        pages = [
+            page for page in list(getattr(context, "pages", []) or [])
+            if self._page_open(page)
+        ]
+        workbenches = [page for page in pages if page_role(self._url(page)) == "workbench"]
+        scored = [(page, await self._workbench_score(page)) for page in workbenches]
+        chosen = choose_workbench(scored)
+        for page in pages:
+            role = page_role(self._url(page))
+            if page is chosen:
+                continue
+            if role == "business" or role == "workbench":
+                await self._close_page(page)
+        if chosen is None:
+            remaining = [
+                page for page in list(getattr(context, "pages", []) or [])
+                if self._page_open(page)
+            ]
+            portals = [page for page in remaining if "/portal" in self._url(page)]
+            blanks = [page for page in remaining if self._url(page) in ("", "about:blank")]
+            others = [page for page in remaining if page_role(self._url(page)) != "business"]
+            if portals:
+                chosen = portals[0]
+            elif blanks:
+                chosen = blanks[0]
+            elif others:
+                chosen = others[0]
+            else:
+                chosen = await self._open_fresh_page()
+        self._workbench_page = (
+            chosen if chosen is not None and page_role(self._url(chosen)) == "workbench" else None
+        )
+        live = [
+            page for page in list(getattr(context, "pages", []) or [])
+            if self._page_open(page)
+        ]
+        if chosen is not None and all(page is not chosen for page in live):
+            live.append(chosen)
+        self._kept_pages = set(live)
+        self._protected_pages = set(live)
+        if chosen is None:
+            return
+        self._bind_session_page(chosen)
+        await self._activate(chosen)
+        logger.info("任务开始前使用页面: {}", self._url(chosen))
+
+    async def _finish_indicator_pages(self) -> None:
+        """关掉这次执行打开的页面，回到任务开始前留下的工作台。
+
+        暂停期间不会走到这里。等人继续跑完、失败或取消后才关业务页。
+
+        Returns:
+            None: 绑定页回到工作台。没有可留的页面时保持原样。
+
+        Examples:
+            >>> TaskRunner({"name": "t"})._kept_pages == set()
+            True
+        """
+        from workbench_tabs import page_role
+
+        if not self._kept_pages or self._context is None:
+            return
+        candidates: list = []
+        pool = list(getattr(self._context, "pages", []) or []) + list(self._shared_pages)
+        for page in pool:
+            if any(page is item for item in candidates):
+                continue
+            candidates.append(page)
+        for page in candidates:
+            if page in self._kept_pages or not self._page_open(page):
+                continue
+            await self._close_page(page)
+        workbench = self._workbench_page
+        if workbench is not None and not self._page_open(workbench):
+            workbench = None
+            self._workbench_page = None
+        if workbench is None:
+            for page in self._kept_pages:
+                if self._page_open(page) and page_role(self._url(page)) == "workbench":
+                    workbench = page
+                    self._workbench_page = page
+                    break
+        target = workbench
+        if target is None:
+            for page in self._kept_pages:
+                if self._page_open(page):
+                    target = page
+                    break
+        if target is None:
+            return
+        self._bind_session_page(target)
+        await self._activate(target)
+
+    async def _workbench_score(self, page) -> int:
+        """给工作台打分：有结算菜单且已登录的优先。
+
+        Args:
+            page: 候选门户页。
+
+        Returns:
+            int: 3 表示菜单和登录标记都在，0 表示空壳。
+
+        Examples:
+            >>> TaskRunner._workbench_score.__name__
+            '_workbench_score'
+        """
+        menu = await self._probe_visible(page, "text=结算管理")
+        logged_in = await self._probe_visible(page, "text=退出登录")
+        if menu and logged_in:
+            return 3
+        if menu:
+            return 2
+        if logged_in:
+            return 1
+        return 0
+
+    async def _probe_visible(self, page, selector: str) -> bool:
+        """用现有的页面脚本看元素在不在，不创建元素句柄。
+
+        Args:
+            page: 要查看的标签。
+            selector: 与点击步骤相同的选择器。
+
+        Returns:
+            bool: 可见时为 True。读不到时为 False。
+
+        Examples:
+            >>> "text=结算管理".startswith("text=")
+            True
+        """
+        from dom_probe import DOM_PROBE_JS
+
+        evaluate = getattr(page, "evaluate", None)
+        if not callable(evaluate):
+            return False
+        try:
+            result = evaluate(DOM_PROBE_JS, {"op": "visible", "selector": selector})
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except Exception:
+            return False
+
+    async def _open_fresh_page(self):
+        """新开一个空白页，避免在业务文档上直接打开门户。
+
+        Returns:
+            object | None: 新页面。上下文不能开页时为 None。
+
+        Examples:
+            >>> callable(TaskRunner._open_fresh_page)
+            True
+        """
+        context = self._context
+        new_page = getattr(context, "new_page", None) if context is not None else None
+        if not callable(new_page):
+            return None
+        created = new_page()
+        if inspect.isawaitable(created):
+            created = await created
+        return created
+
+    def _bind_session_page(self, page) -> None:
+        """让任务和共享浏览器都绑定到这一页。
+
+        Args:
+            page: 要绑定的标签。
+
+        Returns:
+            None: 结果写在任务和会话上。
+
+        Examples:
+            >>> runner = TaskRunner({"name": "t"})
+            >>> page = object()
+            >>> runner._bind_session_page(page)
+            >>> runner._shared_pages == [page]
+            True
+        """
+        self._shared_pages = [page]
         self._current_page_idx = 0
+        context = getattr(page, "context", None)
+        if context is not None:
+            self._context = context
+        session = self._shared_session
+        if session is None:
+            return
+        bind = getattr(session, "_bind_page", None)
+        tracked = getattr(session, "_pages", None)
+        if callable(bind) and tracked is not None:
+            bind(page)
+            return
+        if tracked is not None:
+            session._pages = [page]
+            session._current_page_idx = 0
+
+    async def _activate(self, page) -> None:
+        """把留下的标签设成窗口里选中的那一个。
+
+        Args:
+            page: 要激活的页面。
+
+        Returns:
+            None: 没有这个方法时直接返回。
+
+        Examples:
+            >>> inspect.iscoroutinefunction(TaskRunner._activate)
+            True
+        """
+        bring = getattr(page, "bring_to_front", None)
+        if not callable(bring):
+            return
+        try:
+            result = bring()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning("未能把工作台带到前台: {}", exc)
+
+    @staticmethod
+    def _page_open(page) -> bool:
+        """页面是否还开着。
+
+        Args:
+            page: 标签页。
+
+        Returns:
+            bool: 没有关闭时为 True。
+
+        Examples:
+            >>> TaskRunner._page_open(None)
+            False
+        """
+        if page is None:
+            return False
+        try:
+            return not page.is_closed()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _url(page) -> str:
+        """读取页面地址。
+
+        Args:
+            page: 标签页。
+
+        Returns:
+            str: 地址。读不到时为空字符串。
+
+        Examples:
+            >>> TaskRunner._url(type("P", (), {"url": "https://pm.gd.csg.cn"})())
+            'https://pm.gd.csg.cn'
+        """
+        try:
+            return str(getattr(page, "url", "") or "")
+        except Exception:
+            return ""
+
+    async def _close_page(self, page) -> None:
+        """关掉一个标签。失败只记日志。
+
+        Args:
+            page: 要关闭的标签。
+
+        Returns:
+            None: 关闭结束后返回。
+
+        Examples:
+            >>> inspect.iscoroutinefunction(TaskRunner._close_page)
+            True
+        """
+        close = getattr(page, "close", None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.warning("关闭标签失败: {}", exc)
 
     async def _execute_bound_workflow(self, runner):
         runner._shared_session = self._shared_session
         runner._protected_pages = self._protected_pages
+        runner._workbench_page = self._workbench_page
         if self._shared_session is not None:
             self._shared_session._active_runner = runner
             self._context.on("page", runner._on_new_page)
@@ -1406,12 +1708,21 @@ class TaskRunner:
                         return
                 else:
                     raise WorkflowExecutionError("登录已失效，且任务没有配置登录流程")
-        page = session.page if session is not None else None
+        page = self._shared_pages[0] if self._shared_pages else None
+        from workbench_tabs import page_role
+
+        if page is None or not self._page_open(page) or page_role(self._url(page)) == "business":
+            page = await self._open_fresh_page()
         if page is None:
             raise WorkflowExecutionError("没有可复位的页面")
         url = str(self.config.get("workbench_url") or DEFAULT_WORKBENCH_URL)
         _emit("page_recovery", message=f"正在回到工作台：{url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        self._workbench_page = page
+        self._kept_pages.add(page)
+        self._protected_pages.add(page)
+        self._bind_session_page(page)
+        await self._activate(page)
         deadline = _time.monotonic() + 8
         while _time.monotonic() < deadline:
             current = ""
@@ -1513,6 +1824,10 @@ class TaskRunner:
                   phase="indicator", name=indicator_name, status="error",
                   message=str(exc), target_date=prepared["target_text"])
             return True, str(exc)
+        finally:
+            # 暂停还停在步骤里，这里还不会跑。继续、失败或取消之后才收回业务页。
+            with contextlib.suppress(Exception):
+                await self._finish_indicator_pages()
 
     def _on_new_page(self, new_page) -> None:
         logger.info("  检测到新标签页 #{}", len(self._shared_pages))

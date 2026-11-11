@@ -2310,6 +2310,8 @@ class WorkflowRunner:
             reload = bool(step.get("reload")) or step.get("skip_if_loaded") is False
             if not reload and self._same_document_url(current, url):
                 logger.info("  已在目标页面，跳过导航（避免重载换掉请求签名）: {}", current)
+            elif not reload and await self._reuse_open_document(url):
+                logger.info("  改用已经打开的同地址标签，不在当前文档上重开: {}", url)
             else:
                 await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 await asyncio.sleep(2)
@@ -2409,6 +2411,152 @@ class WorkflowRunner:
             result = func(*args)
         if inspect.isawaitable(result):
             await result
+
+    def _bind_page(self, page) -> None:
+        """把执行绑定到这个已经打开的页面。
+
+        Args:
+            page: 要作为当前页的标签。
+
+        Returns:
+            None: 页面进入 ``pages`` 并成为当前下标。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> page = object()
+            >>> runner._bind_page(page)
+            >>> runner.page is page
+            True
+        """
+        if page not in self.pages:
+            self.pages.append(page)
+        self._current_page_idx = self.pages.index(page)
+        self._observe_page(page)
+
+    async def _reuse_open_document(self, url: str) -> bool:
+        """当前文档不是目标地址时，改绑到已经打开的同一份地址。
+
+        在业务页上直接 ``goto`` 门户，会再造一份没有菜单的同地址文档，
+        原来那份带「结算管理」的工作台还留在旁边。
+
+        Args:
+            url: 步骤要打开的地址。
+
+        Returns:
+            bool: 已经改绑到现成标签时为 True。没有现成标签时为 False。
+
+        Examples:
+            >>> WorkflowRunner._same_document_url(
+            ...     "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+            ...     "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+            ... )
+            True
+        """
+        matches = []
+        for page in self._iter_known_pages():
+            if not self._page_is_open(page):
+                continue
+            if self._same_document_url(self._page_url(page), url):
+                matches.append(page)
+        workbench = getattr(self, "_workbench_page", None)
+        if self.page in matches and (workbench is None or self.page is workbench):
+            return False
+        if workbench in matches:
+            chosen = workbench
+        else:
+            protected = [page for page in matches if page in self._protected_pages]
+            chosen = protected[0] if protected else (matches[0] if matches else None)
+        if chosen is None:
+            return False
+        self._bind_page(chosen)
+        await self._bring_page_to_front(chosen)
+        return True
+
+    async def _adopt_tab_with_target(self, selector: str) -> bool:
+        """当前页没有目标时，改绑到同域里已经显示出该元素的标签。
+
+        Args:
+            selector: 要点的选择器。
+
+        Returns:
+            bool: 找到并改绑成功时为 True。
+
+        Examples:
+            >>> "结算管理" in "text=结算管理"
+            True
+        """
+        current = self.page
+        for page in self._iter_known_pages():
+            if page is current or not self._page_is_open(page):
+                continue
+            bound = self._page_url(current)
+            if bound and not self._same_origin(self._page_url(page), bound):
+                continue
+            self._bind_page(page)
+            try:
+                visible = await self._dom_visible(selector, timeout=300)
+            except Exception:
+                visible = False
+            if not visible:
+                continue
+            await self._bring_page_to_front(page)
+            logger.info("  目标在另一份标签上，已改绑: {}", self._page_url(page))
+            return True
+        if current is not None:
+            self._bind_page(current)
+        return False
+
+    async def _drop_duplicate_tabs_missing(self, selector: str) -> None:
+        """关掉同地址、且没有当前目标元素的非保护标签。
+
+        Args:
+            selector: 刚刚点到的元素。还显示着它的标签会留下。
+
+        Returns:
+            None: 当前绑定页保持不变。
+
+        Examples:
+            >>> WorkflowRunner._same_document_url("https://a/#/x", "https://a/#/x")
+            True
+        """
+        keep = self.page
+        url = self._page_url(keep)
+        from workbench_tabs import is_workbench_url
+
+        # 只收重复的门户工作台。业务页留到本次指标结束再关，避免在 pfjy 上多做探测。
+        if not is_workbench_url(url):
+            return
+        workbench = getattr(self, "_workbench_page", None)
+        duplicates = [
+            page for page in self._iter_known_pages()
+            if page is not keep
+            and page is not workbench
+            and page not in self._protected_pages
+            and self._page_is_open(page)
+            and self._same_document_url(self._page_url(page), url)
+        ]
+        for page in duplicates:
+            self._bind_page(page)
+            try:
+                visible = await self._dom_visible(selector, timeout=200)
+            except Exception:
+                visible = False
+            if visible:
+                continue
+            try:
+                close = getattr(page, "close", None)
+                if close is None:
+                    continue
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.warning("  关闭重复标签失败: {}", exc)
+                continue
+            self.pages = [item for item in self.pages if item is not page]
+            logger.info("  已关闭没有目标元素的重复标签: {}", url)
+        if keep is not None and self._page_is_open(keep):
+            self._bind_page(keep)
 
     async def _bring_page_to_front(self, page) -> None:
         """把绑定页设成窗口里选中的标签。
@@ -2603,11 +2751,13 @@ class WorkflowRunner:
             logger.warning("  click 缺少 selector")
             return
 
-        tabs_before = set(self.pages)
-        opener = self.page
+        tabs_before = set(self._iter_known_pages())
         await self._trace_browser_action("click.before")
         try:
-            if not await self._low_profile_click(selector, timeout=timeout):
+            clicked = await self._low_profile_click(selector, timeout=timeout)
+            if not clicked and await self._adopt_tab_with_target(selector):
+                clicked = await self._low_profile_click(selector, timeout=timeout)
+            if not clicked:
                 raise WorkflowExecutionError(self._click_miss_message(selector))
         except Exception as exc:
             if step.get("allow_empty") and step.get("no_data_selector"):
@@ -2631,6 +2781,8 @@ class WorkflowRunner:
                 raise
             raise WorkflowExecutionError(self._click_miss_message(selector)) from exc
         logger.info("  点击: {}", selector)
+        opener = self.page
+        await self._drop_duplicate_tabs_missing(selector)
         if self.config.get("type") == "login" and "立即登录" in str(selector):
             self._login_submit_seen = True
         await self._trace_browser_action("click.after")
@@ -4924,6 +5076,7 @@ class WorkflowRunner:
         shown = self._tracked_calendar_monday()
         self._calendar_week_clicked = shown != monday
         if shown == monday:
+            self._calendar_shown_monday = monday
             return
         self._calendar_ignored_requests = {id(item) for item in list(self._inflight)}
         await self._bring_page_to_front(self.page)
@@ -5027,7 +5180,7 @@ class WorkflowRunner:
                     raise WorkflowExecutionError(
                         "findTradeCalendar 返回的不是 JSON，不能记成没有交易事件"
                     )
-                rows = parsed
+                rows = self._limit_calendar_rows(parsed)
                 network_view = "周"
         if not network_view:
             try:
@@ -5103,6 +5256,45 @@ class WorkflowRunner:
                 self._note_calendar_empty(step)
                 return
             raise WorkflowExecutionError("交易日历读取失败: 目标周没有交易事件")
+
+    def _limit_calendar_rows(self, rows: list[dict]) -> list[dict]:
+        """只留下当前这一周、并且落在任务目标月里的事件。
+
+        接口一次会带回整月甚至相邻月。周明细按周执行，不能把目标周以外的日期
+        写进别的月份文件。目标月里、这一周跨出去的日期留给那个月自己的任务。
+
+        Args:
+            rows: 接口解析出的事件。
+
+        Returns:
+            list[dict]: 过滤后的事件。没有目标周时原样返回。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._calendar_shown_monday = date(2026, 8, 31)
+            >>> runner.query_month = date(2026, 9, 1)
+            >>> kept = runner._limit_calendar_rows([
+            ...     {"date": "2026-08-31"}, {"date": "2026-09-01"}, {"date": "2026-09-15"},
+            ... ])
+            >>> [item["date"] for item in kept]
+            ['2026-09-01']
+        """
+        monday = getattr(self, "_calendar_shown_monday", None)
+        if isinstance(monday, date):
+            start = monday.isoformat()
+            end = (monday + timedelta(days=6)).isoformat()
+            rows = [
+                item for item in rows
+                if start <= str(item.get("date") or "") <= end
+            ]
+        month = getattr(self, "query_month", None)
+        if isinstance(month, date):
+            prefix = month.strftime("%Y-%m")
+            rows = [
+                item for item in rows
+                if str(item.get("date") or "").startswith(prefix)
+            ]
+        return rows
 
     def _note_calendar_empty(self, step: dict) -> None:
         """这一周确实没有事件时记一笔空结果。
