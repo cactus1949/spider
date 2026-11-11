@@ -557,6 +557,42 @@ _CAPTCHA_REFRESH_MIN_MS = 800
 _CAPTCHA_REFRESH_MAX_MS = 1500
 
 
+def captcha_self_check_rounds(step: dict) -> int:
+    """读取验证码自检失败后，刷新两次再识别的轮数。
+
+    没写 ``self_check_rounds``、写空、写了不能转成正整数时，都是 3。
+    每一轮只在判定不合格之后进行，合格就不再刷新。
+
+    Args:
+        step (dict): captcha 步骤。
+
+    Returns:
+        int: 至少为 1 的轮数。缺省为 3。
+
+    Examples:
+        >>> captcha_self_check_rounds({})
+        3
+        >>> captcha_self_check_rounds({"self_check_rounds": 2})
+        2
+        >>> captcha_self_check_rounds({"self_check_rounds": "nope"})
+        3
+        >>> captcha_self_check_rounds({"self_check_rounds": 0})
+        3
+    """
+    if "self_check_rounds" not in step:
+        return 3
+    raw = step.get("self_check_rounds")
+    if raw is None or raw == "":
+        return 3
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return 3
+    if parsed < 1:
+        return 3
+    return parsed
+
+
 def captcha_refresh_count(step: dict) -> int:
     """读取验证码识别前要主动刷新的次数。
 
@@ -4294,11 +4330,12 @@ class WorkflowRunner:
         logger.info("  已勾选: {}", selector)
 
     async def _do_captcha(self, step: dict) -> None:
-        """识别 4 位验证码并填入；长度不对就换图重试，登录仍由后面的 click 提交。
+        """识别 4 位验证码并填入。不合格就刷新两次再认，登录仍由后面的 click 提交。
 
-        识别前可用 ``refresh_before``（旧名 ``pre_refresh``）先换几张图。
-        每次点击验证码图片都走低痕迹坐标点击，间隔默认在 800–1500 毫秒之间抖动，
-        并且不会低于 800 毫秒，避免瑞数把刷新当成脚本打回 HTTP 400。
+        去掉空白后必须是 4 位数字或英文字母。位数不对、汉字或其它字符都算错。
+        错一次就用低痕迹点击验证码图片刷新两次，等新图后再识别，这算一轮。
+        轮数读 ``self_check_rounds``，没写就是 3。识别前仍可用 ``refresh_before``。
+        点击间隔不会低于 800 毫秒，避免瑞数把刷新当成脚本打回 HTTP 400。
         """
         import sys as _sys
         _src = Path(__file__).resolve().parent.parent / "src"
@@ -4307,14 +4344,10 @@ class WorkflowRunner:
 
         img_selector = step.get("captcha_img", "img[src^='data:image']")
         input_selector = step.get("captcha_input", "#validateOnly_verifyCode")
-        retry = step.get("retry", 5)
-        try:
-            retry = max(1, int(retry))
-        except (TypeError, ValueError):
-            retry = 5
         if any(key in step for key in ("submit_selector", "login_retry", "submit_wait_ms")):
             raise WorkflowExecutionError("captcha 不再提交登录；请把 submit_selector 改为后续独立 click 步骤，并移除 login_retry / submit_wait_ms")
         pre_refresh = captcha_refresh_count(step)
+        rounds = captcha_self_check_rounds(step)
 
         from spider_gd.core.crawler.captcha_solver import CaptchaSolver
         solver = CaptchaSolver()
@@ -4327,44 +4360,56 @@ class WorkflowRunner:
                 await self._refresh_captcha_image(img_selector, step, f"before_{refresh_index + 1}")
             await asyncio.sleep(0.3)
 
-        _attempt = 0
-        while _attempt < retry:
+        async def _recognize_once(label: str) -> str | None:
             await self._stop_captcha_on_request_error()
-            _attempt += 1
             try:
                 code = await self._solve_captcha(img_selector, solver)
-                await self._stop_captcha_on_request_error()
-                logger.info("  验证码识别: {} (第 {} 次)", code, _attempt)
-                await self._trace_browser_action("captcha.before_fill")
-                # 返回普通数据并使用鼠标键盘，避免创建元素句柄触发预览初始化。
-                if not await self._low_profile_fill(input_selector, code):
-                    raise WorkflowExecutionError(f"验证码输入框未出现: {input_selector}")
-                await self._trace_browser_action("captcha.after_fill")
-                await self._stop_captcha_on_request_error()
-                logger.info("  验证码已填入；captcha 步骤结束，未提交登录")
-                return
-
             except CaptchaError as exc:
-                logger.warning("  验证码结果无效（第 {}/{} 次）: {}", _attempt, retry, exc)
-                if _attempt < retry:
-                    await self._refresh_captcha_image(img_selector, step, f"retry_{_attempt}")
-                    continue
+                logger.warning("  验证码自检未通过（{}）: {}", label, exc)
+                return None
             except WorkflowExecutionError:
                 raise
             except Exception as exc:
-                logger.warning("  验证码识别第 {}/{} 次失败: {}", _attempt, retry, exc)
-                if _attempt < retry:
-                    await self._refresh_captcha_image(img_selector, step, f"error_{_attempt}")
-                    continue
+                logger.warning("  验证码识别失败（{}）: {}", label, exc)
+                return None
+            await self._stop_captcha_on_request_error()
+            logger.info("  验证码识别: {} ({})", code, label)
+            return code
+
+        async def _fill_code(code: str) -> None:
+            await self._trace_browser_action("captcha.before_fill")
+            # 返回普通数据并使用鼠标键盘，避免创建元素句柄触发预览初始化。
+            if not await self._low_profile_fill(input_selector, code):
+                raise WorkflowExecutionError(f"验证码输入框未出现: {input_selector}")
+            await self._trace_browser_action("captcha.after_fill")
+            await self._stop_captcha_on_request_error()
+            logger.info("  验证码已填入；captcha 步骤结束，未提交登录")
+
+        code = await _recognize_once("首次")
+        if code:
+            await _fill_code(code)
+            return
+
+        for round_index in range(1, rounds + 1):
+            logger.info(
+                "  验证码不合格，第 {}/{} 轮：低痕迹点击刷新两次后再识别",
+                round_index, rounds,
+            )
+            await self._refresh_captcha_image(img_selector, step, f"check_{round_index}_1")
+            await self._refresh_captcha_image(img_selector, step, f"check_{round_index}_2")
+            code = await _recognize_once(f"第{round_index}轮")
+            if code:
+                await _fill_code(code)
+                return
 
         # 全部失败 → 暂停等人工输入
-        logger.error("  验证码识别全部 {} 次失败，暂停等待人工输入", retry)
+        logger.error("  验证码自检 {} 轮都不合格，暂停等待人工输入", rounds)
         screenshot = await self._capture_failure_screenshot("captcha_exhausted")
-        message = f"验证码自动识别失败（{retry}次），已保存现场截图，请手动输入验证码后点击继续"
+        message = f"验证码自动识别失败（自检{rounds}轮），已保存现场截图，请手动输入验证码后点击继续"
         self._emit(
             "captcha_failed",
-            error=f"验证码自动识别失败（{retry}次）",
-            attempts=retry,
+            error=f"验证码自动识别失败（自检{rounds}轮）",
+            attempts=rounds,
             screenshot=screenshot,
         )
         self._emit("waiting_input", message=message)
@@ -4372,7 +4417,7 @@ class WorkflowRunner:
             ok = await self._wait_continue()
             if ok:
                 return
-        raise WorkflowExecutionError(f"验证码自动识别失败（{retry}次）")
+        raise WorkflowExecutionError(f"验证码自动识别失败（自检{rounds}轮）")
 
     async def _refresh_captcha_image(self, img_selector: str, step: dict, label: str) -> None:
         """用低痕迹点击换一张验证码，并等到图片地址变化。
