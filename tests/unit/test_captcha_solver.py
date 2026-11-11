@@ -9,9 +9,17 @@ from spider_gd.core.crawler.exceptions import CaptchaError
 
 
 @pytest.mark.unit
-def test_recognize_filters_non_alnum():
-    solver = CaptchaSolver(ocr_fn=lambda _b: "  a1 b2!! ")
-    assert solver.recognize(b"img") == "a1b2"
+def test_recognize_strips_whitespace_and_keeps_case():
+    solver = CaptchaSolver(ocr_fn=lambda _b: "  Ab 12 ")
+    assert solver.recognize(b"img") == "Ab12"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["zwe", "验证码", "一二三四", "ab12!!", "ab12中", "ABCDE"])
+def test_recognize_rejects_length_han_and_other_chars(raw: str):
+    solver = CaptchaSolver(ocr_fn=lambda _b: raw)
+    with pytest.raises(CaptchaError, match="自检未通过"):
+        solver.recognize(b"img")
 
 
 @pytest.mark.unit
@@ -30,7 +38,7 @@ def test_recognize_empty_bytes_raises():
 @pytest.mark.unit
 def test_recognize_length_out_of_range_raises():
     solver = CaptchaSolver(ocr_fn=lambda _b: "12")  # 太短
-    with pytest.raises(CaptchaError, match="长度异常"):
+    with pytest.raises(CaptchaError, match="自检未通过"):
         solver.recognize(b"img")
 
 
@@ -38,7 +46,7 @@ def test_recognize_length_out_of_range_raises():
 def test_recognize_too_long_rejected():
     """超过 4 位的结果应被拒绝（该站点验证码固定 4 位）。"""
     solver = CaptchaSolver(ocr_fn=lambda _b: "AB123")  # 5 位
-    with pytest.raises(CaptchaError, match="长度异常"):
+    with pytest.raises(CaptchaError, match="自检未通过"):
         solver.recognize(b"img")
 
 
