@@ -269,8 +269,25 @@ def merge_calendar_rows(
     for row in existing_rows:
         if isinstance(row, dict):
             add({column: str(row.get(column, "") or "") for column in header})
+    captured_at_index = header.index("采集时间")
     for row in list(new_table)[1:]:
-        add(dict(zip(header, (str(value) for value in row), strict=False)))
+        values = {column: str(value) for column, value in zip(header, row, strict=False)}
+        iso_date = values.get("日期", "").strip()
+        key = (
+            iso_date,
+            values.get("交易名称", ""),
+            values.get("申报时间", ""),
+            values.get("交易时间范围", ""),
+        )
+        previous = merged.get(key)
+        if previous is not None:
+            fresh = [values.get(column, "") for column in header]
+            # 事件列没变时保留原采集时间，避免每周把整月文件再归档一份。
+            if fresh[:captured_at_index] == previous[:captured_at_index]:
+                fresh[captured_at_index] = previous[captured_at_index]
+            merged[key] = fresh
+            continue
+        add(values)
 
     ordered = sorted(merged.items(), key=lambda item: item[0][0])
     return [header] + [values for _, values in ordered]
@@ -375,24 +392,218 @@ def calendar_rows_from_api(text: str) -> list[dict[str, str]] | None:
         return None
     if _api_business_error(payload):
         return None
-    items = _unwrap_calendar_items(payload)
+    items = _expand_trade_records(_unwrap_calendar_items(payload))
     rows: list[dict[str, str]] = []
     for item in items:
-        iso_date = _api_date(_api_text(item, _API_DATE_KEYS))
-        if not iso_date:
-            continue
-        rows.append({
-            "date": iso_date,
-            "event": _api_text(item, _API_EVENT_KEYS),
-            "time_range": _api_text(item, _API_RANGE_KEYS),
-            "apply_time": _api_text(item, _API_APPLY_KEYS),
-            "event_type": _api_text(item, _API_TYPE_KEYS),
-            "status": _api_text(item, _API_STATUS_KEYS),
-        })
+        row = _row_from_trade_record(item)
+        if row is not None:
+            rows.append(row)
     # 有记录但一条日期都读不出来，不能当成这一周没有安排。
     if items and not rows:
         return None
     return rows
+
+
+_RECORD_MARKS = ("seqId", "seqName", "bdStartDate", "sbStartDate")
+_STATE_LABELS = {"1": "未开始", "2": "交易中", "3": "已结束"}
+
+
+def _scalar(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    """取第一个普通文本字段。列表和字典不当成交易名称。
+
+    Args:
+        item: 一条接口记录。
+        keys: 候选字段名。
+
+    Returns:
+        str: 找到的文本。没有时为空字符串。
+
+    Examples:
+        >>> _scalar({"seqName": "周双边", "tradeName": ["忽略"]}, ("seqName", "tradeName"))
+        '周双边'
+    """
+    lowered = {str(key).lower(): value for key, value in item.items()}
+    for key in keys:
+        value = item.get(key, lowered.get(key.lower()))
+        if isinstance(value, (list, dict)):
+            continue
+        text = str(value or "").strip()
+        if text and text.lower() not in {"none", "null"}:
+            return text
+    return ""
+
+
+def _is_trade_record(item: dict[str, Any]) -> bool:
+    """这条记录是不是一笔交易，而不是按天包着的外壳。
+
+    Args:
+        item: 接口对象。
+
+    Returns:
+        bool: 带有序列号或标的、申报时间时为 True。
+
+    Examples:
+        >>> _is_trade_record({"seqName": "周双边"})
+        True
+        >>> _is_trade_record({"date": "2026-10-01", "content": []})
+        False
+    """
+    return any(key in item for key in _RECORD_MARKS)
+
+
+def _expand_trade_records(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把「一天一个列表」拆成一笔交易一行。
+
+    现场 ``findTradeCalendar`` 的 ``data`` 是按申报日分组的列表，
+    真正的字段在内层 ``content`` 一类的数组里。直接把数组转成字符串，
+    就会整段写进交易名称。
+
+    Args:
+        items: 已经剥掉最外层 ``data`` 的对象。
+
+    Returns:
+        list[dict[str, Any]]: 每笔交易一条。外壳上的日期会补进没有日期的内层记录。
+
+    Examples:
+        >>> rows = _expand_trade_records([{
+        ...     "pdate": "2026-10-01",
+        ...     "content": [{"seqName": "周双边", "sbStartDate": "10-01 10:00"}],
+        ... }])
+        >>> rows[0]["date"]
+        '2026-10-01'
+        >>> rows[0]["seqName"]
+        '周双边'
+    """
+    expanded: list[dict[str, Any]] = []
+    for item in items:
+        children = [
+            child
+            for value in item.values()
+            if isinstance(value, list)
+            for child in value
+            if isinstance(child, dict) and _is_trade_record(child)
+        ]
+        if not children:
+            expanded.append(item)
+            continue
+        parent_date = _api_date(_scalar(item, _API_DATE_KEYS))
+        for child in children:
+            row = dict(child)
+            if parent_date and not _api_date(_scalar(row, _API_DATE_KEYS)):
+                row["date"] = parent_date
+            expanded.append(row)
+    return expanded
+
+
+def _join_range(start: str, end: str) -> str:
+    """把开始和结束拼成区间。
+
+    Args:
+        start: 开始文本。
+        end: 结束文本。
+
+    Returns:
+        str: ``开始 ~ 结束``。只有一边时返回那一边。
+
+    Examples:
+        >>> _join_range("10-01 10:00", "10-01 11:30")
+        '10-01 10:00 ~ 10-01 11:30'
+    """
+    if start and end:
+        return f"{start} ~ {end}"
+    return start or end
+
+
+def _trade_type(item: dict[str, Any], name: str) -> str:
+    """类型列：公测保留，灾备从名称识别，其余正式。
+
+    Args:
+        item: 交易记录。
+        name: 已经取好的交易名称。
+
+    Returns:
+        str: ``公测``、``灾备`` 或 ``正式``。没有标记时为空。
+
+    Examples:
+        >>> _trade_type({"isTrue": "0"}, "【公测】周双边")
+        '公测'
+        >>> _trade_type({"isTrue": "1"}, "周双边（灾备）")
+        '灾备'
+    """
+    flag = _scalar(item, ("isTrue",))
+    if flag == "0":
+        return "公测"
+    if "灾备" in name:
+        return "灾备"
+    if flag == "1":
+        return "正式"
+    return _scalar(item, ("event_type", "类型"))
+
+
+def _trade_status(item: dict[str, Any]) -> str:
+    """状态列。``1/2/3`` 对应未开始、交易中、已结束。
+
+    Args:
+        item: 交易记录。
+
+    Returns:
+        str: 中文状态。认不出时保留原文字。
+
+    Examples:
+        >>> _trade_status({"state": "3"})
+        '已结束'
+        >>> _trade_status({"state": "1"})
+        '未开始'
+    """
+    raw = _scalar(item, ("state", "status", "tradeStatus", "状态"))
+    return _STATE_LABELS.get(raw, _normalize_status(raw))
+
+
+def _row_from_trade_record(item: dict[str, Any]) -> dict[str, str] | None:
+    """把一笔交易收成日历行。
+
+    Args:
+        item: 已经展开的交易记录。
+
+    Returns:
+        dict[str, str] | None: 含日期和各列。没有日期时为 None。
+
+    Examples:
+        >>> row = _row_from_trade_record({
+        ...     "date": "2026-10-01",
+        ...     "seqName": "2026年10月周双边",
+        ...     "bdStartDate": "2026-10-03",
+        ...     "bdEndDate": "2026-10-31",
+        ...     "sbStartDate": "10-01 10:00",
+        ...     "sbEndDate": "10-01 11:30",
+        ...     "isTrue": "1",
+        ...     "state": "3",
+        ... })
+        >>> row["event"]
+        '2026年10月周双边'
+        >>> row["apply_time"]
+        '10-01 10:00 ~ 10-01 11:30'
+    """
+    iso_date = _api_date(_scalar(item, _API_DATE_KEYS))
+    if not iso_date:
+        return None
+    name = _scalar(item, ("seqName", "event", "tradeName", "title", "name", "交易名称"))
+    time_range = _join_range(
+        _scalar(item, ("bdStartDate",)),
+        _scalar(item, ("bdEndDate",)),
+    ) or _scalar(item, _API_RANGE_KEYS)
+    apply_time = _join_range(
+        _scalar(item, ("sbStartDate",)),
+        _scalar(item, ("sbEndDate",)),
+    ) or _scalar(item, _API_APPLY_KEYS)
+    return {
+        "date": iso_date,
+        "event": name,
+        "time_range": time_range,
+        "apply_time": apply_time,
+        "event_type": _trade_type(item, name),
+        "status": _trade_status(item),
+    }
 
 
 def _api_date(value: str) -> str:

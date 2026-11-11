@@ -82,3 +82,62 @@ async def test_navigate_can_still_force_reload(tmp_path, step):
     })
 
     page.goto.assert_awaited_once()
+
+
+async def test_navigate_reuses_the_open_portal_instead_of_reloading_the_business_tab(tmp_path):
+    runner = WorkflowRunner({"name": "回到门户"}, download_dir=str(tmp_path))
+    portal = _page("https://pm.gd.csg.cn/portal/#/powerEnterprise")
+    spot = _page("https://pm.gd.csg.cn/pfxh/stc/index")
+    runner.pages = [portal, spot]
+    runner._current_page_idx = 1
+    runner._protected_pages = {portal}
+
+    await runner._exec_step({
+        "action": "navigate",
+        "url": "https://pm.gd.csg.cn/portal/#/powerEnterprise",
+    })
+
+    spot.goto.assert_not_awaited()
+    portal.goto.assert_not_awaited()
+    assert runner.page is portal
+
+
+class _MenuTab:
+    def __init__(self, url: str, visible: set[str]) -> None:
+        self.url = url
+        self.visible = visible
+        self.closed = False
+        self.front = 0
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def bring_to_front(self) -> None:
+        self.front += 1
+
+
+async def test_click_binds_the_portal_tab_that_shows_the_menu(tmp_path):
+    runner = WorkflowRunner({"name": "日清算"}, download_dir=str(tmp_path))
+    good = _MenuTab("https://pm.gd.csg.cn/portal/#/powerEnterprise", {"text=结算管理"})
+    broken = _MenuTab("https://pm.gd.csg.cn/portal/#/powerEnterprise", set())
+    runner.pages = [good, broken]
+    runner._current_page_idx = 1
+    runner._protected_pages = {good}
+
+    async def visible(selector, timeout=0, index=None):
+        return selector in getattr(runner.page, "visible", set())
+
+    async def click(selector, timeout=3000, index=None):
+        return selector in getattr(runner.page, "visible", set())
+
+    runner._dom_visible = visible
+    runner._low_profile_click = click
+
+    await runner._do_click({"selector": "text=结算管理"})
+
+    assert runner.page is good
+    assert broken.closed is True
+    assert good.closed is False

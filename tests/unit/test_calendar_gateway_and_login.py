@@ -332,3 +332,41 @@ async def test_later_empty_week_does_not_overwrite_a_saved_month_file(tmp_path):
     await runner._do_extract_calendar(step, strict=False)
     assert any(event.get("status") == "saved" for event in events)
     assert not any(event.get("status") == "empty" for event in events)
+
+
+@pytest.mark.unit
+async def test_calendar_response_outside_the_target_week_is_not_written(tmp_path):
+    runner, _events = _calendar_runner(tmp_path)
+    runner.query_month = date(2026, 9, 1)
+    runner._calendar_shown_monday = date(2026, 8, 31)
+    runner._calendar_week_clicked = True
+    runner._calendar_payloads.append({
+        "status": 200,
+        "url": "https://pm.gd.csg.cn/pfjy/qctc/findTradeCalendar",
+        "text": (
+            '{"data":['
+            '{"pdate":"2026-08-20","content":[{"seqName":"八月交易","isTrue":"1","state":"3",'
+            '"sbStartDate":"08-20 10:00","sbEndDate":"08-20 11:00",'
+            '"bdStartDate":"2026-08-22","bdEndDate":"2026-08-31"}]},'
+            '{"pdate":"2026-09-01","content":[{"seqName":"九月交易","isTrue":"1","state":"3",'
+            '"sbStartDate":"09-01 10:00","sbEndDate":"09-01 11:00",'
+            '"bdStartDate":"2026-09-03","bdEndDate":"2026-09-30"}]}'
+            ']}'
+        ),
+        "resource_type": "xhr",
+    })
+    await runner._do_extract_calendar(
+        {
+            "from_network": True,
+            "month_mode": "week",
+            "include_empty_days": False,
+            "save_as": "交易日历明细{month_iso}.csv",
+        },
+        strict=False,
+    )
+    assert not (tmp_path / "交易日历明细2026-08.csv").exists()
+    saved = tmp_path / "交易日历明细2026-09.csv"
+    assert saved.read_bytes().startswith(b"\xef\xbb\xbf")
+    text = saved.read_text(encoding="utf-8-sig")
+    assert "九月交易" in text
+    assert "八月交易" not in text

@@ -264,3 +264,62 @@ async def test_extract_calendar_merge_accumulates(tmp_path):
     rows = list(csv.DictReader(output.open(encoding="utf-8-sig", newline="")))
     assert [row["交易名称"] for row in rows] == ["事件A", "事件B"]
     assert rows[0]["状态"] == "已结束"
+
+
+def test_find_trade_calendar_expands_one_row_per_record():
+    from calendar_data import calendar_rows_from_api
+
+    text = """
+    {"code":0,"data":[{"pdate":"2026-10-01","content":[
+      {"seqName":"2026年10月周双边","tradeName":"周双边协商交易",
+       "bdStartDate":"2026-10-03","bdEndDate":"2026-10-31",
+       "sbStartDate":"10-01 10:00","sbEndDate":"10-01 11:30",
+       "isTrue":"1","state":"3"},
+      {"seqName":"【公测】2026年度挂牌交易","tradeName":"挂牌交易",
+       "bdStartDate":"2026-10-03","bdEndDate":"2026-10-04",
+       "sbStartDate":"10-01 10:40","sbEndDate":"10-01 11:00",
+       "isTrue":"0","state":"3"}
+    ]}]}
+    """
+    rows = calendar_rows_from_api(text)
+    assert rows is not None
+    assert len(rows) == 2
+    assert rows[0]["event"] == "2026年10月周双边"
+    assert rows[0]["time_range"] == "2026-10-03 ~ 2026-10-31"
+    assert rows[0]["apply_time"] == "10-01 10:00 ~ 10-01 11:30"
+    assert rows[0]["event_type"] == "正式"
+    assert rows[0]["status"] == "已结束"
+    assert rows[1]["event_type"] == "公测"
+    assert "seqId" not in rows[0]["event"]
+
+
+def test_merge_keeps_capture_time_when_the_event_did_not_change():
+    existing = [{
+        "日期": "2026-10-01",
+        "星期": "周四",
+        "时段": "上午",
+        "交易名称": "周双边",
+        "交易时间范围": "2026-10-03 ~ 2026-10-31",
+        "申报时间": "10-01 10:00 ~ 10-01 11:30",
+        "类型": "正式",
+        "状态": "已结束",
+        "视图": "周",
+        "月份": "2026-10",
+        "采集时间": "2026-11-11 11:07:28",
+    }]
+    fresh = build_calendar_table(
+        [{
+            "date": "2026-10-01",
+            "event": "周双边",
+            "time_range": "2026-10-03 ~ 2026-10-31",
+            "apply_time": "10-01 10:00 ~ 10-01 11:30",
+            "event_type": "正式",
+            "status": "已结束",
+        }],
+        month="2026-10",
+        view="周",
+        include_empty_days=False,
+        captured_at="2026-11-11 11:09:09",
+    )
+    merged = merge_calendar_rows(existing, fresh)
+    assert merged[1][-1] == "2026-11-11 11:07:28"
