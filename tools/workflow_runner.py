@@ -557,6 +557,82 @@ _CAPTCHA_REFRESH_MIN_MS = 800
 _CAPTCHA_REFRESH_MAX_MS = 1500
 
 
+def login_wait_ms(step: dict, config: dict | None = None) -> int:
+    """登录提交后等待成功信号的毫秒数。
+
+    步骤或工作流没写 ``login_wait_ms``、写空或小于 1 秒时，用 30 秒。
+    成功信号是登录接口成功、新开的工作台页，或当前页离开登录页，谁先到算谁。
+
+    Args:
+        step: 点击「立即登录」的步骤。
+        config: 工作流配置。步骤没写时再看这里。
+
+    Returns:
+        int: 等待毫秒数。
+
+    Examples:
+        >>> login_wait_ms({})
+        30000
+        >>> login_wait_ms({"login_wait_ms": 12000})
+        12000
+        >>> login_wait_ms({}, {"login_wait_ms": 20000})
+        20000
+    """
+    raw = step.get("login_wait_ms")
+    if raw in (None, ""):
+        raw = (config or {}).get("login_wait_ms", 30000)
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return 30000
+    if parsed < 1000:
+        return 30000
+    return parsed
+
+
+def interpret_login_submit(status: int, content_type: str, text: str) -> dict[str, str] | None:
+    """判断 ``/sso-auth/login`` 的 JSON 是成功还是业务失败。
+
+    现场成功响应是 HTTP 200、``application/json``、``{"code":0,...}``。
+    ``code`` 不是 0 或 200 时视为登录失败，并带上 ``message`` / ``msg``。
+    没有 ``code`` 或不是 JSON 时不猜，交给页签信号。
+
+    Args:
+        status: HTTP 状态码。
+        content_type: 响应类型。
+        text: 响应正文，只用来读 code 和提示，不保留令牌。
+
+    Returns:
+        dict | None: ``outcome`` 为 ``success`` 或 ``failed``。无法判断时为 None。
+
+    Examples:
+        >>> interpret_login_submit(200, "application/json", '{"code":0}')
+        {'outcome': 'success', 'message': ''}
+        >>> interpret_login_submit(200, "application/json", '{"code":1,"message":"验证码错误"}')
+        {'outcome': 'failed', 'message': '验证码错误'}
+        >>> interpret_login_submit(400, "text/html", "\\r\\n") is None
+        True
+    """
+    if "json" not in str(content_type or "").lower():
+        return None
+    try:
+        payload = json.loads(text or "")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or "code" not in payload:
+        return None
+    code = payload.get("code")
+    message = ""
+    for key in ("message", "msg", "error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            message = value.strip()[:300]
+            break
+    if str(code) in {"0", "200"} and int(status) < 400:
+        return {"outcome": "success", "message": message}
+    return {"outcome": "failed", "message": message or f"登录接口返回 code={code}"}
+
+
 def captcha_self_check_rounds(step: dict) -> int:
     """读取验证码自检失败后，刷新两次再识别的轮数。
 
@@ -738,6 +814,8 @@ class WorkflowRunner:
         self._console_errors: list[dict[str, Any]] = []
         self._page_exceptions: list[str] = []
         self._auth_traffic: list[dict[str, Any]] = []
+        self._login_submit_verdicts: list[dict[str, Any]] = []
+        self._login_watch_at = 0.0
         self._failed_requests: list[str] = []
         # 被网关空 HTML 400 拒绝过的文档。同一份文档继续点只会继续 400，
         # 必须换新文档；执行器在这里停下来，不替用户重试。
@@ -1393,6 +1471,11 @@ class WorkflowRunner:
                         content_type=content_type, page=self._trace_url(self._page_url(origin_page)),
                         context=str(id(origin_page.context)))
             self._record_auth_traffic(request, response, status, url, content_type, None)
+            if (
+                str(getattr(request, "method", "")).upper() == "POST"
+                and "/sso-auth/login" in url.split("?", 1)[0]
+            ):
+                await self._remember_login_submit(response, status, content_type)
             if "findtradecalendar" in url.split("?", 1)[0].lower():
                 await self._remember_calendar_payload(response, request, status, url, content_type)
             if status < 400 or url.split("?", 1)[0].lower().endswith(self._STATIC_SUFFIXES):
@@ -1433,6 +1516,34 @@ class WorkflowRunner:
                 self._poisoned_pages.add(page)
         except Exception:
             pass
+
+    async def _remember_login_submit(self, response, status: int, content_type: str) -> None:
+        """记下登录提交接口的结论，不保存令牌或整段正文。
+
+        Args:
+            response: Playwright 响应。
+            status: HTTP 状态码。
+            content_type: 响应类型。
+
+        Returns:
+            None: 能判断时追加到 ``_login_submit_verdicts``。
+
+        Examples:
+            >>> interpret_login_submit(200, "application/json", '{"code":0}')["outcome"]
+            'success'
+        """
+        text = ""
+        try:
+            body = await asyncio.wait_for(response.body(), timeout=2)
+            text = body[:8000].decode("utf-8", "replace")
+        except Exception:
+            text = ""
+        verdict = interpret_login_submit(status, content_type, text)
+        if verdict is None:
+            return
+        verdict["at"] = time.monotonic()
+        self._login_submit_verdicts.append(verdict)
+        del self._login_submit_verdicts[:-10]
 
     def _record_auth_traffic(
         self, request, response, status: int, url: str,
@@ -2783,6 +2894,142 @@ class WorkflowRunner:
             raise WorkflowExecutionError(f"输入结果未确认：{selector}")
         return True
 
+    def _fresh_login_verdict(self) -> dict[str, str] | None:
+        """取本次点击之后到达的登录接口结论。
+
+        Returns:
+            dict | None: 最新一条。还没有时为 None。
+
+        Examples:
+            >>> runner = WorkflowRunner({"name": "n", "steps": []}, download_dir="/tmp")
+            >>> runner._fresh_login_verdict() is None
+            True
+        """
+        fresh = [
+            item for item in self._login_submit_verdicts
+            if float(item.get("at") or 0) >= self._login_watch_at
+        ]
+        if not fresh:
+            return None
+        return fresh[-1]
+
+    def _login_landing_page(self):
+        """找这次登录新开的工作台，或已经离开登录页的当前页。
+
+        任务开始前就在的工作台不算这次登录成功。
+
+        Returns:
+            object | None: 可以绑定的页面。还没有时为 None。
+
+        Examples:
+            >>> from workbench_tabs import is_workbench_url
+            >>> is_workbench_url("https://pm.gd.csg.cn/portal/#/powerEnterprise")
+            True
+        """
+        from workbench_tabs import is_workbench_url
+
+        before = getattr(self, "_login_pages_before", set())
+        for page in self._iter_known_pages():
+            if page in before or not self._page_is_open(page):
+                continue
+            if is_workbench_url(self._page_url(page)):
+                return page
+        current = self.page
+        url = self._page_url(current)
+        previous = getattr(self, "_login_url_before", "")
+        if url and url != previous and not is_public_portal_url(url):
+            return current
+        return None
+
+    async def _adopt_login_workbench(self, page) -> None:
+        """绑定并激活登录后的工作台，关掉不受保护的重复工作台。
+
+        Args:
+            page: 要绑定的工作台标签。
+
+        Returns:
+            None: 绑定完成后返回。
+
+        Examples:
+            >>> WorkflowRunner._adopt_login_workbench.__name__
+            '_adopt_login_workbench'
+        """
+        from workbench_tabs import is_workbench_url
+
+        self._bind_page(page)
+        self._workbench_page = page
+        await self._bring_page_to_front(page)
+        session = getattr(self, "_shared_session", None)
+        bind = getattr(session, "_bind_page", None) if session is not None else None
+        if callable(bind) and getattr(page, "context", None) is not None:
+            bind(page)
+        for other in list(self._iter_known_pages()):
+            if other is page or other in self._protected_pages or not self._page_is_open(other):
+                continue
+            if not is_workbench_url(self._page_url(other)):
+                continue
+            close = getattr(other, "close", None)
+            if not callable(close):
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.warning("  关闭重复工作台失败: {}", exc)
+                continue
+            self.pages = [item for item in self.pages if item is not other]
+        self._bind_page(page)
+        logger.info("  已绑定登录后的工作台: {}", self._page_url(page))
+
+    async def _await_login_landing(self, step: dict) -> None:
+        """等登录成功信号，而不是固定睡几秒再查一次。
+
+        登录接口 ``POST /portal/xhr/sso-auth/login`` 返回 JSON ``code`` 为 0、
+        新开 ``portal/#/powerEnterprise``，或当前页离开登录页，三者谁先出现算成功。
+        接口明确失败就立刻说明原因。都没有时，到 ``login_wait_ms``（默认 30 秒）再暂停。
+
+        Args:
+            step: 点击步骤，可带 ``login_wait_ms``。
+
+        Returns:
+            None: 已经绑到工作台，或当前页已经离开登录页。
+
+        Raises:
+            WorkflowPaused: 接口报登录失败，或超时仍停在登录页。
+
+        Examples:
+            >>> login_wait_ms({})
+            30000
+        """
+        timeout_ms = login_wait_ms(step, self.config)
+        deadline = time.monotonic() + timeout_ms / 1000
+        logger.info("  等待登录成功信号，最多 {}ms", timeout_ms)
+        while True:
+            await self._drain_response_captures()
+            verdict = self._fresh_login_verdict()
+            if verdict and verdict.get("outcome") == "failed":
+                reason = verdict.get("message") or "登录接口返回失败"
+                await self._pause_login_error(f"登录未成功：{reason}")
+                return
+            landing = self._login_landing_page()
+            if landing is not None:
+                await self._adopt_login_workbench(landing)
+                return
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.8)
+        checked = self._page_url(self.page) or "未知页面"
+        verdict = self._fresh_login_verdict()
+        if verdict and verdict.get("outcome") == "success":
+            await self._pause_login_error(
+                f"登录接口已成功，但 {timeout_ms}ms 内没有打开工作台（检查页：{checked}）"
+            )
+            return
+        await self._pause_login_error(
+            f"登录提交后 {timeout_ms}ms 内没有进入工作台（检查页：{checked}）"
+        )
+
     async def _do_click(self, step: dict) -> None:
         """点击元素。如果 expect=new_tab，等待新标签页打开。"""
         selector = step.get("selector", "")
@@ -2794,6 +3041,14 @@ class WorkflowRunner:
             return
 
         tabs_before = set(self._iter_known_pages())
+        watch_login = (
+            self.config.get("type") == "login" and "立即登录" in str(selector)
+        )
+        if watch_login:
+            self._login_watch_at = time.monotonic()
+            self._login_submit_verdicts.clear()
+            self._login_pages_before = set(self._iter_known_pages())
+            self._login_url_before = self._page_url(self.page)
         await self._trace_browser_action("click.before")
         try:
             clicked = await self._low_profile_click(selector, timeout=timeout)
@@ -2825,8 +3080,9 @@ class WorkflowRunner:
         logger.info("  点击: {}", selector)
         opener = self.page
         await self._drop_duplicate_tabs_missing(selector)
-        if self.config.get("type") == "login" and "立即登录" in str(selector):
+        if watch_login:
             self._login_submit_seen = True
+            await self._await_login_landing(step)
         await self._trace_browser_action("click.after")
 
         if expect == "new_tab":

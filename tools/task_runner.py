@@ -1317,6 +1317,12 @@ class TaskRunner:
             # 同步 WorkflowRunner 修改过的 pages
             self._shared_pages = runner.pages
             self._current_page_idx = runner._current_page_idx
+            landed = getattr(runner, "_workbench_page", None)
+            if landed is not None and self._page_open(landed):
+                self._workbench_page = landed
+                self._kept_pages.add(landed)
+                self._protected_pages.add(landed)
+                self._bind_session_page(landed)
             if runner.failed:
                 reason = runner.failure_reason or "登录工作流失败"
                 self._record_failure(reason)
