@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><title>文件详情</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+<aside class="side">
+  <div class="brand"><div class="mark">电</div><div><b>广东电力</b><small>数据采集</small></div></div>
+  <nav class="nav">
+    <div class="sec">个人</div>
+    <a href="personal.html">我的取数</a>
+    <div class="sec">系统</div>
+    <a class="on" href="system.html">系统采集</a>
+    <a href="alerts.html">预警</a>
+  </nav>
+  <div class="foot"><b>公有 · 11月13日</b><span>09:34 写入</span></div>
+</aside>
+<div>
+  <header class="top">
+    <div class="crumb">系统采集 / 现货分时分类型 / <b>2026-11-12</b></div>
+    <div class="topr"><span class="pill">同一文件名，两个目录</span></div>
+  </header>
+  <main class="main">
+    <div class="split">
+      <section class="card sheet">
+        <div class="kicker">实时 · 部分到位</div>
+        <h1 style="font-size:22px">现货分时分类型出清电量2026-11-12.xlsx</h1>
+        <div class="rule"></div>
+        <div class="dim">现货分时分类型出清电量\实时\ · 10319 字节 · 09:34:11</div>
+        <div class="dim" style="margin-top:4px">SHA256 5c285f3e336eda8cc194a73505724cbedf8ed0290e37ae2eec3bc0f1c1f21c13</div>
+        <div class="note">8 个 sheet 结构相同。下面是「实时（风电）」。24 行都只有时刻，电量和开机台数为空。燃煤、燃气、太阳能、核电、独立储能、抽蓄、全部，一样。</div>
+        <table class="mini" style="margin-top:8px">
+          <thead><tr><th>时刻</th><th>电量(MWh)</th><th>开机台数(台)</th></tr></thead>
+          <tbody>
+            <tr><td>0:00</td><td class="empty">空</td><td class="empty">空</td></tr>
+            <tr><td>1:00</td><td class="empty">空</td><td class="empty">空</td></tr>
+            <tr><td>2:00</td><td class="empty">空</td><td class="empty">空</td></tr>
+            <tr><td>3:00</td><td class="empty">空</td><td class="empty">空</td></tr>
+            <tr><td class="dim">… 共 24 行</td><td class="empty">全空</td><td class="empty">全空</td></tr>
+          </tbody>
+        </table>
+        <div class="note">versions 是空数组。诊断包里没有上一版，看不出哪一行曾经从空变成有数。下午重取如果哈希变了，才记版本。</div>
+      </section>
+      <section class="card sheet">
+        <div class="kicker">对照 · 日前 · 已到位</div>
+        <h1 style="font-size:20px">同名文件在「日前」目录</h1>
+        <div class="rule"></div>
+        <div class="dim">11468 字节 · 09:34:03</div>
+        <div class="dim" style="margin-top:4px">SHA256 8e13a339a07a30d2177fa21baee5062e988d012759435bdb616c0480bccf1a42</div>
+        <table class="mini" style="margin-top:10px">
+          <thead><tr><th>时刻</th><th>电量(MWh)</th><th>开机台数</th></tr></thead>
+          <tbody>
+            <tr><td>0:00</td><td class="have">5890.404</td><td class="have">113</td></tr>
+            <tr><td>1:00</td><td class="have">5918.724</td><td class="have">108</td></tr>
+            <tr><td class="dim">其余 22 个时刻</td><td class="have">电量都有</td><td class="have">台数都有</td></tr>
+          </tbody>
+        </table>
+        <div class="note">另外 7 个日前类型 sheet 也是 24 小时都有电量。所以不是导出坏了，是实时这侧还没有数。</div>
+        <div class="note">公有这次「稳定发送未启用，跳过发送」。这个文件没有上传记录。若下午重取后哈希变了，系统类要再问一次是否上传。</div>
+        <div class="note">交易日历明细2026-11.csv 才有真实版本链：09:41:22、09:41:28、09:41:32，体积 15423 → 18714 → 20180 字节。行差未逐行比过。</div>
+      </section>
+    </div>
+  </main>
+</div>
+</div>
+</body>
+</html>

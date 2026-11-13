@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><title>预警</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+<aside class="side">
+  <div class="brand"><div class="mark">电</div><div><b>广东电力</b><small>数据采集</small></div></div>
+  <nav class="nav">
+    <div class="sec">个人</div>
+    <a href="personal.html">我的取数</a>
+    <div class="sec">系统</div>
+    <a href="system.html">系统采集</a>
+    <a class="on" href="alerts.html">预警</a>
+  </nav>
+  <div class="foot"><b>只报警该到却没有的</b><span>空但未到披露期不报</span></div>
+</aside>
+<div>
+  <header class="top">
+    <div class="crumb">预警 / <b>11月13日</b></div>
+    <div class="topr"><span class="pill">延迟没填的，先不报</span></div>
+  </header>
+  <main class="main">
+    <div class="split">
+      <section class="card sheet">
+        <div class="kicker">今天</div>
+        <h1>只有运行日报要人看</h1>
+        <div class="rule"></div>
+        <div class="ind">
+          <div>
+            <b>运行日报 · 业务日 11月13日</b>
+            <div class="meta">存下来的是《广东电力现货市场2025年11月运行日报（11.13）.pdf》，1084605 字节，09:43:01。目标年是 2026。</div>
+          </div>
+          <span class="tag bad">预警</span>
+        </div>
+        <div class="ind">
+          <div>
+            <b>实时分时分类型 · 11月12日电量全空</b>
+            <div class="meta">披露延迟还没填。不能判断是未到披露期，还是应到未到。先不报。</div>
+          </div>
+          <span class="tag ask">不预警</span>
+        </div>
+        <div class="ind">
+          <div>
+            <b>信息披露实际 · 5 个 sheet 只有表头</b>
+            <div class="meta">同上。场站任务当天只取到 11月5日～8日，更近的日期没进计划。</div>
+          </div>
+          <span class="tag ask">不预警</span>
+        </div>
+        <div class="ind">
+          <div>
+            <b>11月11日 日清算、月结算概览</b>
+            <div class="meta">采集失败：点不到「结算管理」，工作台有多个同地址标签。这是技术故障，不是披露问题。11月13日这两项已经重新下到。</div>
+          </div>
+          <span class="tag wait">已过去</span>
+        </div>
+        <div class="note">11月13日 09:31 公有任务曾因「业务页面存在待处理弹窗」暂停，09:32 继续后跑完。当前没有未关闭的暂停。</div>
+      </section>
+      <section class="card sheet">
+        <div class="kicker">披露延迟 · 没确认的留空</div>
+        <h1 style="font-size:22px">任务里的区间 ≠ 披露规则</h1>
+        <div class="rule"></div>
+        <table class="mini">
+          <thead><tr><th>指标</th><th>任务现在这样取</th><th>披露延迟</th></tr></thead>
+          <tbody>
+            <tr><td>实时节点电价</td><td>运行日前 2 天<br><span class="dim">11-11 取 11-09；11-13 取 11-11</span></td><td><span class="tag ask">待确认</span></td></tr>
+            <tr><td>日前节点电价</td><td>运行日前 1 天<br><span class="dim">两次都取到有电价的文件</span></td><td><span class="tag ask">待确认</span></td></tr>
+            <tr><td>实时分时分类型</td><td>随完整采集取前 1 天<br><span class="dim">11-12 的电量是空的</span></td><td><span class="tag ask">未设置</span></td></tr>
+            <tr><td>信息披露实际</td><td>公有取前 1 天，得到空表头</td><td><span class="tag ask">未设置</span></td></tr>
+            <tr><td>场站信息披露实际</td><td>运行日前 8～5 天</td><td><span class="tag ask">待确认</span></td></tr>
+            <tr><td>月结算概览</td><td>11月13日仍在取 10 月，且有数</td><td><span class="tag ask">待确认</span></td></tr>
+          </tbody>
+        </table>
+        <div class="note">填上「D 日应已有 D-n」之后，到点仍空才进预警。没填之前，空只标部分到位。</div>
+      </section>
+    </div>
+  </main>
+</div>
+</div>
+</body>
+</html>

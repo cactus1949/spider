@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><title>状态机</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="board">
+  <div class="brand" style="padding:0 0 8px"><div class="mark">电</div><div><b style="color:#142232">状态怎么判</b><small>用 11月13日公有包里打开过的文件</small></div></div>
+  <h1>先看披露规则，再决定报不报警</h1>
+  <p style="margin:6px 0 0;color:#3c5164">个人取数不走这张图。系统采集才走。规则空着时，不允许把「空」直接打成预警。</p>
+  <div class="lanes">
+    <div class="ln">文件没下来</div>
+    <div class="node bad">采集失败<small>11月11日点不到「结算管理」；09:31 工作台弹窗暂停后再继续</small></div>
+    <div class="ln">文件名不对</div>
+    <div class="node bad">预警 · 采错<small>运行日报目标 2026-11-13，存成 2025年11月运行日报（11.13）.pdf</small></div>
+    <div class="ln">规则说还没到</div>
+    <div class="node wait">未到披露期<small>空是正常的，不预警。现场还没有一条被确认的延迟天数，所以今天没有格子走这条</small></div>
+    <div class="ln">规则说该有，却空</div>
+    <div class="node bad">应到未到 · 预警<small>延迟一旦填上，到点仍空才进这里。今天没有用未确认的延迟去报警</small></div>
+    <div class="ln">下到了，但不齐</div>
+    <div class="node part">部分到位<small>实时分类型 8 sheet × 24 小时电量为空；分日出清实时两列为空；预测信息 4 个 sheet 只有表头；市场用电 3 行只有名称</small></div>
+    <div class="ln">数都在</div>
+    <div class="node ok">已到位<small>日前分类型 24 小时都有；日前节点电价有数；月结算概览 10 月上网电量 48233244.57</small></div>
+    <div class="ln">单元格是 0</div>
+    <div class="node wait">不叫空<small>日清算概况 11 行全 0；发电侧统一结算价 24 小时是字符 0。待确认是未发布还是真为 0</small></div>
+    <div class="ln">同一文件又变了</div>
+    <div class="node upd">数据更新<small>交易日历明细2026-11.csv 在 09:41 三次变哈希，15423 → 18714 → 20180 字节。分类型实时文件没有旧版，行级「从空变有」还没发生</small></div>
+    <div class="ln">系统类变了之后</div>
+    <div class="node upd">问是否重新上传<small>公有这次稳定发送未启用，跳过发送。个人取数不上传</small></div>
+    <div class="ln">部分到位之后</div>
+    <div class="node part">下午重取这一份<small>只重取不齐的文件。哈希不变就保持；哈希变了记版本。实时分类型现在还没有旧版可比</small></div>
+  </div>
+</div>
+</body>
+</html>
