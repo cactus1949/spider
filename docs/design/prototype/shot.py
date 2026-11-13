@@ -7,11 +7,9 @@ OUT = ROOT.parent / "images"
 OUT.mkdir(parents=True, exist_ok=True)
 PAGES = {
     "personal.html": "personal.png",
-    "personal-edit.html": "personal-edit.png",
     "system.html": "system.png",
-    "file-detail.html": "file-detail.png",
-    "alerts.html": "alerts.png",
-    "state.html": "state-machine.png",
+    "drawer.html": "drawer.png",
+    "plan.html": "plan.png",
 }
 
 def main() -> None:
@@ -21,7 +19,7 @@ def main() -> None:
         for name, filename in PAGES.items():
             page.goto((ROOT / name).as_uri(), wait_until="load")
             page.evaluate("() => document.fonts.ready")
-            page.wait_for_timeout(120)
+            page.wait_for_timeout(80)
             target = OUT / filename
             page.screenshot(path=str(target), type="png")
             print(filename, target.stat().st_size)

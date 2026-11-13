@@ -1,116 +1,86 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8"><title>系统采集</title>
+<meta charset="utf-8"><title>采集</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <div class="app">
-<aside class="side">
-  <div class="brand"><div class="mark">电</div><div><b>广东电力</b><small>数据采集</small></div></div>
-  <nav class="nav">
-    <div class="sec">个人</div>
-    <a href="personal.html">我的取数</a>
-    <a href="personal-edit.html">取数方案</a>
-    <div class="sec">系统</div>
-    <a class="on" href="system.html">系统采集</a>
-    <a href="alerts.html">预警 <span class="tag bad" style="margin-left:8px">1</span></a>
-  </nav>
-  <div class="foot"><b>公有数据</b><span>稳定发送未启用</span></div>
-</aside>
-<div>
-  <header class="top">
-    <div class="crumb">系统采集 / <b>11月13日 09:30 公有</b></div>
-    <div class="topr"><span class="pill">打开过的 xlsx 才写空行</span><span class="chip">tsk_b6b56f73159c</span></div>
-  </header>
-  <main class="main">
-    <section class="card sheet" style="height:auto">
-      <div style="display:flex;justify-content:space-between;align-items:flex-end">
-        <div>
-          <div class="kicker">公有 · 09:31 弹窗暂停，09:32 继续后跑完 · 未上传</div>
-          <h1>1 条要处理，4 处内容不齐先不报警</h1>
+  <aside class="side">
+    <div class="mark">电</div>
+    <a class="nav" href="personal.html">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>
+      取数
+    </a>
+    <a class="nav on" href="system.html">
+      <svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
+      采集
+    </a>
+  </aside>
+  <div>
+    <header class="top">
+      <div><span class="who">公有</span><span class="date">11月13日</span></div>
+      <button class="btn">上传</button>
+    </header>
+    <div class="stage">
+      <section class="card">
+        <div class="legend">
+          <span><i class="sw ok"></i>已到位</span>
+          <span><i class="sw part"></i>部分到位</span>
+          <span><i class="sw miss"></i>缺失</span>
+          <span><i class="sw hatch"></i>未披露</span>
+          <span><i class="sw upd"></i>更新</span>
         </div>
-        <div style="text-align:right" class="dim">目录 公有数据下载\2026-11\2026-11-13\</div>
-      </div>
-      <div class="rule"></div>
-      <table>
-        <thead><tr><th>指标</th><th>这次的业务日</th><th>状态</th><th>依据（现场文件）</th></tr></thead>
-        <tbody>
-          <tr>
-            <td>运行日报</td><td>11-11、11-12、11-13</td>
-            <td><span class="tag bad">采错年份</span></td>
-            <td class="dim">11-11、11-12 是 2026 年 pdf。11-13 存成《广东电力现货市场2025年11月运行日报（11.13）.pdf》</td>
-          </tr>
-          <tr>
-            <td>现货分时分类型 · 实时</td><td>11-12</td>
-            <td><span class="tag part">部分到位</span></td>
-            <td class="dim">8 个类型 sheet，各 24 小时只有时刻，电量和开机台数为空。日前同结构是满的</td>
-          </tr>
-          <tr>
-            <td>现货分日出清量价</td><td>11-12</td>
-            <td><span class="tag part">部分到位</span></td>
-            <td class="dim">日前申报均价 388.8、出清均价 384.33、电量 1569332.662。实时两列为空</td>
-          </tr>
-          <tr>
-            <td>信息披露查询预测信息</td><td>11-12</td>
-            <td><span class="tag part">部分到位</span></td>
-            <td class="dim">4 个 sheet 只有表头：日前阻塞断面、储能机组指定模式清单、日前出清机组详情、节点详情</td>
-          </tr>
-          <tr>
-            <td>信息披露查询实际信息</td><td>11-12</td>
-            <td><span class="tag ask">待确认</span></td>
-            <td class="dim">5 个 sheet 都只有表头，文件 9210 字节。是未到披露期还是应到未到，规则还没设</td>
-          </tr>
-          <tr>
-            <td>市场用电信息</td><td>11-12</td>
-            <td><span class="tag part">部分到位</span></td>
-            <td class="dim">「市场用电需求」有数。「市场实际用电」「日前统一结算价」「实时统一结算价」只有名称</td>
-          </tr>
-          <tr>
-            <td>实时节点电价</td><td>11-11</td>
-            <td><span class="tag ok">已到位</span></td>
-            <td class="dim">任务配的是运行日前 2 天。1146278 字节，节点行有电价。11-12 这次没采，按现区间不算缺</td>
-          </tr>
-          <tr>
-            <td>日前节点电价</td><td>11-12</td>
-            <td><span class="tag ok">已到位</span></td>
-            <td class="dim">运行日前 1 天。1062012 字节，节点电价有数</td>
-          </tr>
-          <tr>
-            <td>现货分时分类型 · 日前</td><td>11-12</td>
-            <td><span class="tag ok">已到位</span></td>
-            <td class="dim">8 个类型、每类 24 小时电量和开机台数都有</td>
-          </tr>
-          <tr>
-            <td>月结算概览</td><td>2026-10</td>
-            <td><span class="tag ok">已到位</span></td>
-            <td class="dim">机组总上网电量 48233244.57 兆瓦时，均价 459.657</td>
-          </tr>
-          <tr>
-            <td>日清算概况</td><td>11-12</td>
-            <td><span class="tag ask">待确认</span></td>
-            <td class="dim">11 行结算指标数值全是 0。是未发布还是真为 0，打不开平台对不上</td>
-          </tr>
-          <tr>
-            <td>统一结算价（发电侧）</td><td>11-12</td>
-            <td><span class="tag ask">待确认</span></td>
-            <td class="dim">24 个时刻两个电价都是字符 0，单元格不是空的</td>
-          </tr>
-          <tr>
-            <td>交易日历 · 11月</td><td>2026-11</td>
-            <td><span class="tag upd">数据更新</span></td>
-            <td class="dim">09:41:22 / 09:41:28 / 09:41:32 三次，15423 → 18714 → 20180 字节</td>
-          </tr>
-          <tr>
-            <td>上传</td><td>这次公有</td>
-            <td><span class="tag wait">未上传</span></td>
-            <td class="dim">日志：稳定发送未启用，跳过发送。包在 _stable_delivery\公有_tsk_b6b56f73159c.zip</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-  </main>
+        <div class="grid" id="g" style="grid-template-columns: 148px repeat(6, 1fr)"></div>
+      </section>
+    </div>
+  </div>
 </div>
-</div>
+<script>
+const heads = ["10月","11/9","11/10","11/11","11/12","11/13"];
+const rows = [
+  ["实时节点电价", "   ohh"],
+  ["日前节点电价", "    oh"],
+  ["分时分类型·日前", "    o "],
+  ["分时分类型·实时", "    p "],
+  ["分日出清量价", "    p "],
+  ["披露预测", "    p "],
+  ["披露实际", "    p "],
+  ["市场用电", "    p "],
+  ["日清算概况", "    p "],
+  ["统一结算价", "    p "],
+  ["月结算概览", "o     "],
+  ["运行日报", "   oom"],
+  ["交易日历", "     u"]
+];
+const g = document.getElementById("g");
+const lab0 = document.createElement("div");
+g.appendChild(lab0);
+heads.forEach(h => { const d = document.createElement("div"); d.className = "h"; d.textContent = h; g.appendChild(d); });
+rows.forEach(([name, pat]) => {
+  const lab = document.createElement("div");
+  lab.className = "lab";
+  lab.textContent = name;
+  g.appendChild(lab);
+  pat.split("").forEach(ch => {
+    const w = document.createElement("div");
+    w.className = "cellw";
+    if (ch !== " ") {
+      const i = document.createElement("i");
+      const map = {o:"ok", p:"part", h:"hatch", m:"miss", u:"ok upd"};
+      i.className = "c " + map[ch];
+      if (ch === "m") {
+        i.classList.add("on");
+        const pop = document.createElement("div");
+        pop.className = "pop";
+        pop.innerHTML = '<button class="btn sm">重取</button>';
+        w.appendChild(i);
+        w.appendChild(pop);
+      } else w.appendChild(i);
+    }
+    g.appendChild(w);
+  });
+});
+</script>
 </body>
 </html>

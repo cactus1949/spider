@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><title>抽屉</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="mark">电</div>
+    <a class="nav" href="personal.html">
+      <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>
+      取数
+    </a>
+    <a class="nav on" href="system.html">
+      <svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
+      采集
+    </a>
+  </aside>
+  <div class="work">
+    <div>
+      <header class="top">
+        <div><span class="who">公有</span><span class="date">11月13日</span></div>
+      </header>
+      <div class="stage">
+        <section class="card" style="padding:18px 18px 16px">
+          <div class="grid" id="g" style="grid-template-columns: 132px repeat(6, 1fr)"></div>
+        </section>
+      </div>
+    </div>
+    <aside class="drawer">
+      <h2>分时分类型 · 实时</h2>
+      <div class="sub">11/12</div>
+      <table>
+        <thead><tr><th></th><th style="text-align:right">有</th><th style="text-align:right">空</th></tr></thead>
+        <tbody id="tb"></tbody>
+      </table>
+      <table>
+        <thead><tr><th></th><th style="text-align:right">实时</th><th style="text-align:right">日前</th></tr></thead>
+        <tbody>
+          <tr><td>字节</td><td class="n">10319</td><td class="n">11468</td></tr>
+          <tr><td>有</td><td class="z">0</td><td class="n">24</td></tr>
+          <tr><td>空</td><td class="z">24</td><td class="n">0</td></tr>
+        </tbody>
+      </table>
+      <div class="hash">SHA256<b>5c285f3e336eda8c<br>c194a73505724cbe<br>df8ed0290e37ae2e<br>ec3bc0f1c1f21c13</b></div>
+      <button class="btn" style="margin-top:16px; align-self:flex-start">重取</button>
+    </aside>
+  </div>
+</div>
+<script>
+const heads = ["10月","11/9","11/10","11/11","11/12","11/13"];
+const rows = [
+  ["实时节点电价", "   ohh"],
+  ["日前节点电价", "    oh"],
+  ["分时分类型·日前", "    o "],
+  ["分时分类型·实时", "    P "],
+  ["分日出清量价", "    p "],
+  ["披露预测", "    p "],
+  ["披露实际", "    p "],
+  ["市场用电", "    p "],
+  ["日清算概况", "    p "],
+  ["统一结算价", "    p "],
+  ["月结算概览", "o     "],
+  ["运行日报", "   oom"],
+  ["交易日历", "     u"]
+];
+const g = document.getElementById("g");
+g.appendChild(document.createElement("div"));
+heads.forEach(h => { const d = document.createElement("div"); d.className = "h"; d.textContent = h; g.appendChild(d); });
+rows.forEach(([name, pat]) => {
+  const lab = document.createElement("div");
+  lab.className = "lab";
+  lab.textContent = name;
+  g.appendChild(lab);
+  pat.split("").forEach(ch => {
+    const w = document.createElement("div");
+    w.className = "cellw";
+    const key = ch.toLowerCase();
+    if (key !== " ") {
+      const i = document.createElement("i");
+      const map = {o:"ok", p:"part", h:"hatch", m:"miss", u:"ok upd"};
+      i.className = "c " + map[key];
+      if (ch === "P") i.classList.add("on");
+      w.appendChild(i);
+    }
+    g.appendChild(w);
+  });
+});
+const names = ["全部","燃煤","燃气","风电","太阳能","核电","独立储能","抽蓄"];
+const tb = document.getElementById("tb");
+names.forEach(n => {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `<td>${n}</td><td class="n">0</td><td class="z">24</td>`;
+  tb.appendChild(tr);
+});
+</script>
+</body>
+</html>
