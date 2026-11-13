@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>补数据 · 改版</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body style="background:#e7ebef">
+  <div class="badge-page">改版示意</div>
+  <div class="modal-frame">
+    <div class="modal-h">补采一次 <span class="muted" style="font-weight:400">不改变每天 08:00 的定时任务</span></div>
+    <div class="modal-b">
+      <div class="panel">
+        <div class="block">
+          <strong>要补的数据</strong>
+          <div class="choice">
+            <span class="on">日前出清电量</span>
+            <span class="on">实时出清电量</span>
+            <span class="on">运行日报</span>
+            <span>交易日历</span>
+          </div>
+        </div>
+        <div class="block">
+          <strong>补哪几天</strong>
+          <div class="choice">
+            <span>昨天</span>
+            <span class="on">11-12</span>
+            <span class="on">11-13</span>
+            <span>11-14</span>
+          </div>
+          <div class="muted" style="margin-top:8px">交易日历按月，本次不补。</div>
+        </div>
+        <div class="block">
+          <strong>文件将放到</strong>
+          <div class="path" style="margin-top:6px">下载目录 / 现货 / 2026-11 / 对应日期</div>
+          <div class="adv">改这次的存放位置 ▾</div>
+        </div>
+        <div class="block">
+          <strong>将生成 6 个文件</strong>
+          <div class="muted" style="margin-top:6px">日前出清电量 × 2 天，实时出清电量 × 2 天，运行日报 × 2 天。示例：现货分时分类型出清电量-日前-20261112.xlsx</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">取消</button>
+      <button class="btn primary">开始补采</button>
+    </div>
+  </div>
+</body>
+</html>

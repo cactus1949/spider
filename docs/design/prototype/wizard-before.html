@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>任务配置 · 现状</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body class="before" style="background:#eef0ee">
+  <div class="badge-page">现状还原</div>
+  <div class="modal-frame">
+    <div class="modal-h">新建采集任务</div>
+    <div class="modal-b">
+      <div class="steps">
+        <div class="step done">基本信息</div>
+        <div class="step on">采集范围</div>
+        <div class="step">存储结构</div>
+      </div>
+      <div class="note">D = 运行当天，M = 运行当月。修改仅影响当前任务，不会更改指标配置；补数据时选择的日期会覆盖任务范围。</div>
+      <div class="panel">
+        <div class="block">
+          <div class="row" style="justify-content:space-between">
+            <div><span class="tag">按日</span> 现货交易-完整采集（含披露中心）</div>
+            <strong>D-1 ~ D-1</strong>
+          </div>
+          <div class="slider"><i style="left:38%"></i><i style="left:42%"></i></div>
+          <div class="help">昨天。D 是运行当天。</div>
+        </div>
+        <div class="block">
+          <div class="row" style="justify-content:space-between">
+            <div><span class="tag">按日</span> 运行日报</div>
+            <strong>D-1 ~ D</strong>
+          </div>
+          <div class="slider"><i style="left:38%"></i><i style="left:50%"></i></div>
+          <div class="help">昨天至今天。D 是运行当天。</div>
+        </div>
+        <div class="block">
+          <div class="row" style="justify-content:space-between">
+            <div><span class="tag">按月</span> 交易日历</div>
+            <strong>M-1 ~ M-1</strong>
+          </div>
+          <div class="help">上月。M 是运行当天所在的月份，每个月查一次整月。</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">取消</button>
+      <button class="btn">上一步</button>
+      <button class="btn primary">下一步</button>
+    </div>
+  </div>
+</body>
+</html>

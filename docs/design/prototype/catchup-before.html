@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>补数据 · 现状</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body class="before" style="background:#eef0ee">
+  <div class="badge-page">现状还原</div>
+  <div class="modal-frame">
+    <div class="modal-h">补数据</div>
+    <div class="modal-b">
+      <div class="steps">
+        <div class="step done">基本信息</div>
+        <div class="step on">采集范围</div>
+        <div class="step">存储结构</div>
+      </div>
+      <div class="note">仅执行一次，不会修改定时任务。接下来再选补数时间和下载路径。</div>
+      <div class="note">时间留空时使用该指标的默认采集范围，具体日期见下方预览。这一步不会改任务卡片上的区间。</div>
+      <div class="panel">
+        <div class="block">
+          <div class="row" style="justify-content:space-between">
+            <div>现货交易-完整采集（含披露中心）</div>
+            <span class="muted">留空使用默认日期</span>
+          </div>
+        </div>
+        <div class="block">
+          <div class="row" style="justify-content:space-between">
+            <div>运行日报</div>
+            <span>2026-11-12、2026-11-13</span>
+          </div>
+        </div>
+        <div class="muted" style="margin-top:8px">按月指标会查询所选月份的整月数据。</div>
+        <div style="margin-top:14px;font-weight:650">本次补数预览</div>
+        <div class="help" style="margin-top:6px">现货交易-完整采集：默认 D-1；运行日报：2026-11-12、2026-11-13</div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">上一步</button>
+      <button class="btn primary">下一步</button>
+    </div>
+  </div>
+</body>
+</html>

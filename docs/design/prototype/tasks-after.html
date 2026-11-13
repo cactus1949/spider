@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>任务列表 · 改版</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body>
+  <div class="badge-page">改版示意</div>
+  <div class="app">
+    <aside class="sider">
+      <div class="mark">采</div>
+      <div class="nav on">任务</div>
+      <div class="nav">文件</div>
+      <div class="nav">记录</div>
+      <div class="nav">指标</div>
+    </aside>
+    <main class="main">
+      <div class="top">
+        <div>
+          <h1>采集任务</h1>
+          <div class="sub">2 个任务 · 明天 08:00 将采集昨天的数据</div>
+        </div>
+        <div class="row">
+          <input class="q" placeholder="搜索任务" style="width:220px" />
+          <button class="btn">补采一次</button>
+          <button class="btn primary">新建采集</button>
+        </div>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <div class="row" style="justify-content:space-between">
+            <h2>现货出清电量采集</h2>
+            <span class="ok">每天 08:00 运行</span>
+          </div>
+          <div class="meta" style="margin-top:12px">
+            <div class="k">采什么</div><div>日前出清电量、实时出清电量、运行日报</div>
+            <div class="k">什么时候</div><div>每次采集昨天</div>
+            <div class="k">存到哪</div><div class="path">下载目录 / 现货 / 2026-11 / 13</div>
+            <div class="k">下次</div><div>2026-11-14 08:00</div>
+          </div>
+          <div class="foot">
+            <span class="muted">上次成功 · 今天 08:01 · 3 个文件</span>
+            <div class="row">
+              <button class="btn">编辑</button>
+              <button class="btn primary">现在采集</button>
+            </div>
+          </div>
+        </article>
+        <article class="card">
+          <div class="row" style="justify-content:space-between">
+            <h2>结算日清算</h2>
+            <span class="muted">已停用</span>
+          </div>
+          <div class="meta" style="margin-top:12px">
+            <div class="k">采什么</div><div>日清算概览</div>
+            <div class="k">什么时候</div><div>工作日 09:00，采集昨天</div>
+            <div class="k">存到哪</div><div class="path">下载目录 / 结算 / 2026-11-13</div>
+            <div class="k">下次</div><div>启用后才会执行</div>
+          </div>
+          <div class="foot">
+            <span class="muted">上次失败 · 11-12 · 未进入工作台</span>
+            <div class="row">
+              <button class="btn">编辑</button>
+              <button class="btn">启用</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>任务配置 · 改版</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body style="background:#e7ebef">
+  <div class="badge-page">改版示意</div>
+  <div class="modal-frame">
+    <div class="modal-h">新建采集 · 现货出清电量采集</div>
+    <div class="modal-b">
+      <div class="steps">
+        <div class="step done">1 采什么</div>
+        <div class="step on">2 什么时候</div>
+        <div class="step">3 存到哪</div>
+      </div>
+      <div class="panel">
+        <div class="block">
+          <strong>日前 / 实时出清电量</strong>
+          <div class="muted">若今天 08:00 运行，将采集 2026-11-13</div>
+          <div class="choice">
+            <span class="on">昨天</span>
+            <span>今天</span>
+            <span>最近 7 天</span>
+            <span>自定义</span>
+          </div>
+        </div>
+        <div class="block">
+          <strong>运行日报</strong>
+          <div class="muted">若今天 08:00 运行，将采集 2026-11-12 和 2026-11-13</div>
+          <div class="choice">
+            <span>昨天</span>
+            <span class="on">昨天和今天</span>
+            <span>只采今天</span>
+          </div>
+        </div>
+        <div class="block">
+          <strong>交易日历</strong>
+          <div class="muted">每月 1 次，查询整月。下次将查询 2026-10</div>
+          <div class="choice">
+            <span class="on">上个月</span>
+            <span>本月</span>
+          </div>
+        </div>
+        <div class="adv">高级：失败后再试 3 次 ▾</div>
+      </div>
+    </div>
+    <div class="modal-f">
+      <button class="btn">上一步</button>
+      <button class="btn primary">下一步：存到哪</button>
+    </div>
+  </div>
+</body>
+</html>

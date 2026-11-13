@@ -1,0 +1,104 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  width: 1280px;
+  min-height: 800px;
+  font-family: "Source Han Sans SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  color: #1c2430;
+  background: #f3f5f7;
+}
+.app {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  min-height: 800px;
+}
+.sider {
+  background: #0e3a5d;
+  color: #d5deE6;
+  padding: 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.mark {
+  width: 36px; height: 36px; border-radius: 8px;
+  background: #1a5080; color: #fff;
+  display: grid; place-items: center; font-weight: 700; margin-bottom: 12px;
+}
+.nav {
+  width: 56px; height: 52px; border-radius: 8px;
+  display: grid; place-items: center; font-size: 11px; text-align: center; line-height: 1.2;
+  color: #c5d2de;
+}
+.nav.on { background: #1a5080; color: #fff; }
+.main { padding: 20px 28px 32px; }
+.top {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;
+}
+h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: 0.2px; }
+.sub { color: #5e6976; font-size: 13px; margin-top: 4px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.btn {
+  height: 32px; padding: 0 14px; border-radius: 4px; border: 1px solid #cfd6de;
+  background: #fff; color: #1c2430; font-size: 13px;
+}
+.btn.primary { background: #0e3a5d; color: #fff; border-color: #0e3a5d; }
+.btn.ghost { background: transparent; }
+input.q, .field input, .field select {
+  height: 32px; border: 1px solid #d5dbe2; border-radius: 4px; padding: 0 10px; font-size: 13px; background: #fff;
+}
+.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.card {
+  background: #fff; border: 1px solid #e3e6ea; border-radius: 6px; padding: 16px 18px;
+}
+.card h2 { margin: 0 0 10px; font-size: 16px; }
+.meta { display: grid; grid-template-columns: 72px 1fr; gap: 6px 8px; font-size: 13px; color: #3d4754; }
+.k { color: #5e6976; }
+.foot {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid #eef1f4;
+}
+.ok { color: #1f7a4d; font-size: 13px; }
+.muted { color: #5e6976; font-size: 12px; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 2px; background: #e8eef4; color: #0e3a5d; font-size: 12px; }
+.steps { display: flex; gap: 0; margin: 8px 0 18px; }
+.step {
+  flex: 1; text-align: center; font-size: 13px; padding: 8px 0; color: #5e6976;
+  border-bottom: 2px solid #e3e6ea;
+}
+.step.on { color: #0e3a5d; border-color: #0e3a5d; font-weight: 650; }
+.step.done { color: #1f7a4d; border-color: #1f7a4d; }
+.panel { background: #fff; border: 1px solid #e3e6ea; border-radius: 6px; padding: 16px 18px; }
+.block { padding: 12px 0; border-bottom: 1px solid #eef1f4; }
+.block:last-child { border-bottom: 0; }
+.choice { display: flex; gap: 8px; margin-top: 8px; }
+.choice span {
+  border: 1px solid #d5dbe2; border-radius: 4px; padding: 6px 10px; font-size: 13px; background: #fff;
+}
+.choice span.on { border-color: #0e3a5d; background: #e8eef4; color: #0e3a5d; }
+.path { font-family: ui-monospace, monospace; font-size: 13px; color: #1c2430; }
+.adv { color: #5e6976; font-size: 13px; margin-top: 12px; }
+.before { background: #f7f8f6; }
+.before .sider { background: #1a1d21; }
+.before .nav.on { background: #2c3138; }
+.before .btn.primary { background: #1677ff; border-color: #1677ff; }
+.before .ok { color: #10b981; }
+.note {
+  background: #f5f7fa; color: #5a6068; font-size: 13px; padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; line-height: 1.6;
+}
+.slider {
+  height: 6px; background: #e6e8eb; border-radius: 99px; position: relative; margin: 18px 8px 8px;
+}
+.slider i {
+  position: absolute; top: -5px; width: 14px; height: 14px; border-radius: 50%; background: #1677ff;
+}
+.help { font-size: 12px; color: #8a8f95; }
+.modal-frame { width: 980px; margin: 24px auto; background: #fff; border-radius: 8px; box-shadow: 0 8px 28px rgba(16,24,40,.12); overflow: hidden; }
+.modal-h { padding: 16px 20px; border-bottom: 1px solid #f0f1f2; font-weight: 650; }
+.modal-b { padding: 16px 20px 8px; }
+.modal-f { padding: 12px 20px 16px; display: flex; justify-content: flex-end; gap: 8px; }
+.badge-page {
+  position: absolute; left: 88px; top: 8px; font-size: 11px; color: #8a7340; letter-spacing: 1px;
+}
+body { position: relative; }

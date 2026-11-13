@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>任务列表 · 现状</title>
+  <link rel="stylesheet" href="base.css" />
+</head>
+<body class="before">
+  <div class="badge-page">现状还原</div>
+  <div class="app">
+    <aside class="sider">
+      <div class="mark">采</div>
+      <div class="nav on">任务<br>配置</div>
+      <div class="nav">文件<br>中心</div>
+      <div class="nav">执行<br>日志</div>
+      <div class="nav">指标<br>配置</div>
+      <div class="nav">录制<br>工坊</div>
+    </aside>
+    <main class="main">
+      <div class="top">
+        <input class="q" style="width:360px" value="" placeholder="搜索任务名称、指标或备注" />
+        <div class="row">
+          <button class="btn">导入</button>
+          <button class="btn">导出全部</button>
+          <button class="btn">补数据</button>
+          <button class="btn primary">新增任务</button>
+        </div>
+      </div>
+      <div class="cards">
+        <article class="card">
+          <h2>现货出清电量采集</h2>
+          <div class="meta">
+            <div class="k">调度</div><div>每天 08:00</div>
+            <div class="k">日期</div><div>现货交易-完整采集（含披露中心）：D-1 ~ D-1；运行日报：D-1 ~ D</div>
+            <div class="k">存储</div><div>自定义结构（YAML）</div>
+            <div class="k">下次执行</div><div>2026-11-14 08:00</div>
+          </div>
+          <div class="foot">
+            <span class="ok">已启用</span>
+            <button class="btn primary">立即执行</button>
+          </div>
+        </article>
+        <article class="card">
+          <h2>结算日清算</h2>
+          <div class="meta">
+            <div class="k">调度</div><div>每周 周一至周五 09:00</div>
+            <div class="k">日期</div><div>结算管理-日清算概览导出：D-1 ~ D-1</div>
+            <div class="k">存储</div><div>{YYYY-MM}/{YYYY-MM-DD}</div>
+            <div class="k">下次执行</div><div>已禁用</div>
+          </div>
+          <div class="foot">
+            <span class="muted">已禁用</span>
+            <button class="btn primary">立即执行</button>
+          </div>
+        </article>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
