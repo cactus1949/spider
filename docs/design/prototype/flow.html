@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>关键流程</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="board">
+    <div class="board-h">
+      <div>
+        <div class="brand" style="padding:0 0 8px">
+          <div class="mark">电</div>
+          <div><b style="color:#142232">广东电力数据采集</b><small>关键流程</small></div>
+        </div>
+        <h1>交易员每天只回答一个问题</h1>
+        <p>数据到位了没有。计划、登录和路径都退到这个问题后面。</p>
+      </div>
+      <span class="pill">示例数据 · 2026-11-13</span>
+    </div>
+    <div class="flow">
+      <section class="lane">
+        <div class="name">每天早上 · 巡检</div>
+        <div class="nodes">
+          <div class="node">打开软件<small>蕴阳海风场</small></div>
+          <span class="arrow">→</span>
+          <div class="node ask">看一句话<small>昨天还有几项没到位</small></div>
+          <span class="arrow">→</span>
+          <div class="node ask">齐了吗</div>
+          <span class="arrow">→</span>
+          <div class="fork">
+            <div class="node go">齐了就离开<small>7 项都在格子里</small></div>
+            <div class="node stop">没齐就看原因<small>是被拦住，还是更早的洞</small></div>
+          </div>
+        </div>
+      </section>
+      <section class="lane">
+        <div class="name">被拦住 · 验证码或公告</div>
+        <div class="nodes">
+          <div class="node stop">08:06 暂停<small>今天这次没跑完</small></div>
+          <span class="arrow">→</span>
+          <div class="node do">看右侧页面<small>验证码，或公告弹窗</small></div>
+          <span class="arrow">→</span>
+          <div class="node">填验证码<small>公告则只点关闭</small></div>
+          <span class="arrow">→</span>
+          <div class="node do">继续采集<small>不改 08:00 的计划</small></div>
+          <span class="arrow">→</span>
+          <div class="node go">格子变绿<small>11月12日两项入库</small></div>
+        </div>
+      </section>
+      <section class="lane">
+        <div class="name">更早的缺数 · 从格子进入</div>
+        <div class="nodes">
+          <div class="node">点琥珀色格子<small>例如 11月8日实际</small></div>
+          <span class="arrow">→</span>
+          <div class="node">确认文件和位置<small>日清算概览-20261108</small></div>
+          <span class="arrow">→</span>
+          <div class="node ask">登录还停着吗<small>停着就先去填验证码</small></div>
+          <span class="arrow">→</span>
+          <div class="node do">开始补采<small>只补这一天</small></div>
+          <span class="arrow">→</span>
+          <div class="node go">回到看板</div>
+        </div>
+      </section>
+      <section class="lane">
+        <div class="name">第一次使用 · 以及月初</div>
+        <div class="nodes">
+          <div class="node">确认四件事<small>登录、场站、数据、位置</small></div>
+          <span class="arrow">→</span>
+          <div class="node go">进入到位看板<small>明天 08:00 自己跑</small></div>
+          <span class="arrow" style="margin-left:28px">月初</span>
+          <div class="node ask">月结算单那一格<small>11月单未到是正常的</small></div>
+          <span class="arrow">→</span>
+          <div class="node">到了窗口再取<small>和补采同一条路</small></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

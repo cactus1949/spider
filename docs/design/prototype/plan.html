@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>采集计划</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="mark">电</div>
+        <div><b>广东电力</b><small>数据采集</small></div>
+      </div>
+      <nav class="nav">
+        <a href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z"/></svg>
+          到位<span class="badge">1</span>
+        </a>
+        <a href="catchup.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+          补采
+        </a>
+        <a class="on" href="plan.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg>
+          计划
+        </a>
+        <a href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+          记录
+        </a>
+      </nav>
+      <div class="side-foot">
+        <div class="st">蕴阳海风场</div>
+        <div class="sub"><i class="dot warn"></i>登录停在验证码</div>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb"><a href="home.html" style="color:inherit;text-decoration:none">到位</a> <span class="sep">/</span> <b>采集计划</b></div>
+        <div class="top-right">
+          <span class="pill">示例数据</span>
+          <span class="station"><i class="dot"></i>蕴阳海风场</span>
+          <span class="who"><span class="avatar">张</span>张敏</span>
+        </div>
+      </header>
+      <main class="main">
+        <div class="plan">
+          <section class="card plist">
+            <h2>这个场站</h2>
+            <div class="plan-item on">
+              <b>每日采集</b>
+              <span>每天 08:00 · 7 项</span>
+            </div>
+            <div class="plan-item">
+              <b>月初结算单</b>
+              <span>每月 3 日起检查上月</span>
+            </div>
+            <button class="btn" style="width:100%;margin-top:8px">新建计划</button>
+          </section>
+          <section class="card editor">
+            <div class="headrow">
+              <div>
+                <div class="kicker">编辑计划</div>
+                <h1>每日采集</h1>
+              </div>
+              <div class="switch"><i class="sw"><i></i></i>开着</div>
+            </div>
+            <p class="sub" style="margin:6px 0 0;color:#3c5164;font-size:13px">计划只决定自动跑的时间和范围。每天早上先看到位看板。</p>
+            <div class="sec">
+              <div class="sh"><b>采哪些</b><span>7 项都开着</span></div>
+              <div class="line"><b>日前交易结果</b><span>采运行日当天 · 明天将采 11月14日</span></div>
+              <div class="line"><b>实际运行结果</b><span>采前一天 · 明天将采 11月13日</span></div>
+              <div class="line"><b>信息披露</b><span>采前一天 · 明天将采 11月13日</span></div>
+              <div class="line"><b>日清算</b><span>采前一天 · 明天将采 11月13日</span></div>
+              <div class="line"><b>运行日报</b><span>采前一天 · 明天将采 11月13日</span></div>
+              <div class="line"><b>交易日历</b><span>每月 1 日，采当月</span></div>
+              <div class="line"><b>月结算单</b><span>每月 3 日起，取上月</span></div>
+            </div>
+            <div class="sec">
+              <div class="sh"><b>什么时候跑</b><span>含周末，现货每天都有</span></div>
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <div class="days"><i>一</i><i>二</i><i>三</i><i>四</i><i>五</i><i>六</i><i>日</i></div>
+                <div class="timebig">08:00</div>
+              </div>
+            </div>
+            <div class="sec">
+              <div class="sh"><b>明天将写入</b><span>11月14日早上，若数据已出</span></div>
+              <div class="line"><b>现货分时分类型出清电量-日前-20261114.xlsx</b><span>日前</span></div>
+              <div class="line"><b>现货分时分类型出清电量-实时-20261113.xlsx</b><span>实际</span></div>
+              <div class="line"><b>信息披露-20261113.xlsx</b><span>披露</span></div>
+              <div class="line"><b>日清算概览-20261113.xlsx</b><span>日清算</span></div>
+              <div class="line"><b>2026年11月运行日报（11.13）.pdf</b><span>运行日报</span></div>
+            </div>
+            <div class="sec">
+              <div class="sh"><b>存到哪</b><span>按场站、月份、日期分开放</span></div>
+              <div class="path" style="margin-top:0">
+                <div>
+                  <div class="k">明天的文件会在</div>
+                  <b>D:\电力交易数据\蕴阳海风场\2026-11\13\</b>
+                </div>
+                <button class="btn">调整文件夹</button>
+              </div>
+            </div>
+            <div class="footer-bar">
+              <span style="color:#6b7d8d;font-size:12px">失败后再试 3 次，登录和证书错误不重试</span>
+              <button class="btn primary">保存计划</button>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

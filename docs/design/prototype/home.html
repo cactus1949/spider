@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>数据到位</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="mark">电</div>
+        <div><b>广东电力</b><small>数据采集</small></div>
+      </div>
+      <nav class="nav">
+        <a class="on" href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z"/></svg>
+          到位
+          <span class="badge">1</span>
+        </a>
+        <a href="catchup.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+          补采
+        </a>
+        <a href="plan.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg>
+          计划
+        </a>
+        <a href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M8 13h8M8 17h5"/></svg>
+          记录
+        </a>
+      </nav>
+      <div class="side-foot">
+        <div class="st">蕴阳海风场</div>
+        <div class="sub"><i class="dot warn"></i>登录停在验证码</div>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb">数据到位 <span class="sep">/</span> <b>早间巡检</b></div>
+        <div class="top-right">
+          <span class="pill">示例数据</span>
+          <span class="station"><i class="dot"></i>蕴阳海风场</span>
+          <span class="who"><span class="avatar">张</span>张敏 · 11月13日 周五</span>
+        </div>
+      </header>
+      <main class="main">
+        <div class="home">
+          <div class="col">
+            <section class="card matrix">
+              <div class="card-h">
+                <h2>日数据 · 10月31日 至 11月13日</h2>
+                <div class="legend"><span><i class="g"></i>已到位</span><span><i class="a"></i>可补</span><span><i class="n"></i>还没到发布时间</span></div>
+              </div>
+              <div class="grid" id="mx"></div>
+            </section>
+            <section class="months">
+              <div class="m"><div class="k">10月结算单</div><div class="v"><span class="tag ok">已到位</span><em>11月3日入库</em></div></div>
+              <div class="m"><div class="k">11月结算单</div><div class="v"><span class="tag wait">未到窗口</span><em>12月上旬</em></div></div>
+              <div class="m"><div class="k">11月交易日历</div><div class="v"><span class="tag ok">已到位</span><em>10月31日更新</em></div></div>
+              <div class="m"><div class="k">10月交易日历</div><div class="v"><span class="tag ok">已到位</span><em>10月8日更新</em></div></div>
+            </section>
+            <section class="card files">
+              <div class="card-h" style="margin-bottom:4px"><h2>今天 08:03 已入库</h2><span class="legend">3 个文件</span></div>
+              <div class="file">
+                <div class="ext xls">XLS</div>
+                <div><b>现货分时分类型出清电量-日前-20261113.xlsx</b><span>日前交易结果 · 业务日期 11月13日</span></div>
+                <div class="when">186 KB</div>
+              </div>
+              <div class="file">
+                <div class="ext xls">XLS</div>
+                <div><b>信息披露-20261112.xlsx</b><span>信息披露 · 业务日期 11月12日</span></div>
+                <div class="when">94 KB</div>
+              </div>
+              <div class="file">
+                <div class="ext pdf">PDF</div>
+                <div><b>2026年11月运行日报（11.12）.pdf</b><span>运行日报 · 业务日期 11月12日</span></div>
+                <div class="when">1.2 MB</div>
+              </div>
+            </section>
+          </div>
+          <aside class="rail">
+            <div class="kicker">早间巡检</div>
+            <h1>昨天还有<br><span class="n">2</span> 项没到位</h1>
+            <div class="goldrule"></div>
+            <p class="lead">业务日期 11月12日。日前、信息披露、运行日报已经在库里。</p>
+            <div class="gap-list">
+              <div class="gap"><i class="c miss"></i><div><b>实际运行结果</b><span>现货实时出清 · 11月12日</span></div></div>
+              <div class="gap"><i class="c miss"></i><div><b>日清算</b><span>日清算概览 · 11月12日</span></div></div>
+            </div>
+            <div class="pause">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+              <div><b>08:06 停在验证码</b>这两项还没采，是因为登录被拦住，不是计划没开。</div>
+            </div>
+            <a class="btn primary block lg" href="attention.html">去填写验证码</a>
+            <div class="older">
+              <div class="lbl">更早的缺数</div>
+              <a class="row" href="catchup.html">11月8日 实际运行结果<span>补</span></a>
+              <a class="row" href="catchup.html">11月7日 日清算<span>补</span></a>
+            </div>
+            <div class="next">
+              <div><b>下一次自动采集</b><span>每天 08:00 · 含周末</span></div>
+              <div style="text-align:right"><div class="clock">明天</div><em>08:00</em></div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </div>
+  <script>
+    const days = [
+      ["10/31","六",1],["11/1","日",1],["11/2","一"],["11/3","二"],["11/4","三"],
+      ["11/5","四"],["11/6","五"],["11/7","六",1],["11/8","日",1],["11/9","一"],
+      ["11/10","二"],["11/11","三"],["11/12","昨天",2],["11/13","今天",3]
+    ];
+    const rows = [
+      ["日前交易结果","前一晚发布", "oooooooooooooo"],
+      ["实际运行结果","次日早上", "ooooooooxoooxn"],
+      ["信息披露","次日早上", "ooooooooooooon"],
+      ["日清算","次日早上", "oooooooxooooxn"],
+      ["运行日报","次日早上", "ooooooooooooon"]
+    ];
+    const mx = document.getElementById("mx");
+    days.forEach((d) => {
+      const el = document.createElement("div");
+      el.className = "h" + (d[2]===1?" wk": d[2]===2?" yest": d[2]===3?" tod":"");
+      el.innerHTML = "<b>"+d[0]+"</b><span>"+d[1]+"</span>";
+      mx.appendChild(el);
+    });
+    // header needs a label cell first — rebuild properly
+    mx.innerHTML = "";
+    const lab = document.createElement("div");
+    lab.className = "lab";
+    mx.appendChild(lab);
+    days.forEach((d) => {
+      const el = document.createElement("div");
+      el.className = "h" + (d[2]===1?" wk": d[2]===2?" yest": d[2]===3?" tod":"");
+      el.innerHTML = "<b>"+d[0]+"</b><span>"+d[1]+"</span>";
+      mx.appendChild(el);
+    });
+    rows.forEach((r, ri) => {
+      const l = document.createElement("div");
+      l.className = "lab";
+      l.innerHTML = "<b>"+r[0]+"</b><span>"+r[1]+"</span>";
+      mx.appendChild(l);
+      r[2].split("").forEach((ch, i) => {
+        const w = document.createElement("div");
+        w.className = "cellw" + (i===12?" yest":"") + (i===12 && ri===rows.length-1?" last":"");
+        const c = document.createElement("i");
+        c.className = "c " + (ch==="o"?"ok": ch==="x"?"miss":"soon");
+        w.appendChild(c);
+        mx.appendChild(w);
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>视觉规范</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="board">
+    <div class="board-h">
+      <div>
+        <div class="brand" style="padding:0 0 8px">
+          <div class="mark">电</div>
+          <div><b style="color:#142232">广东电力数据采集</b><small>视觉规范</small></div>
+        </div>
+        <h1>稳，但要让数据先被看见</h1>
+        <p>国网、南网新一代业务系统的语气：海军蓝、细金线、白卡片、状态用颜色而不是说明文字。思源黑体（Noto Sans SC）。</p>
+      </div>
+      <span class="pill">规范稿</span>
+    </div>
+    <div class="spec-grid">
+      <section class="card" style="padding:14px 16px">
+        <div class="card-h"><h2>色彩</h2><span class="legend">主色少，状态色只给数据</span></div>
+        <div class="swatches">
+          <div class="swatch"><div class="chip" style="background:#0e5cad"></div><div class="meta"><b>行动</b><span>#0E5CAD</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#0c2340"></div><div class="meta"><b>品牌底</b><span>#0C2340</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#b8904e"></div><div class="meta"><b>金线</b><span>#B8904E</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#e7eef4"></div><div class="meta"><b>画布</b><span>#E7EEF4</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#142232"></div><div class="meta"><b>正文</b><span>#142232</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#0d7a46"></div><div class="meta"><b>到位</b><span>#0D7A46</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#c05621"></div><div class="meta"><b>可补</b><span>#C05621</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#b42318"></div><div class="meta"><b>要人处理</b><span>#B42318</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#6b7d8d"></div><div class="meta"><b>次要</b><span>#6B7D8D</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#fff;border-bottom:1px solid #e3ebf2"></div><div class="meta"><b>卡片</b><span>#FFFFFF</span></div></div>
+        </div>
+        <div class="card-h" style="margin-top:14px"><h2>字体</h2><span class="legend">思源黑体 · 只四级</span></div>
+        <div class="type-row">
+          <div class="t1">昨天还有 2 项没到位</div>
+          <div class="t2">日数据 · 10月31日 至 11月13日</div>
+          <div class="t3">实际运行结果还没有入库，是因为 08:06 停在验证码。</div>
+          <div class="t4">业务日期 11月12日 · 周四 · 12px 辅助</div>
+        </div>
+      </section>
+      <section class="card" style="padding:14px 16px">
+        <div class="card-h"><h2>组件</h2></div>
+        <div class="comp">
+          <button class="btn primary">去填写验证码</button>
+          <button class="btn">改这次的位置</button>
+          <span class="tag ok">已到位</span>
+          <span class="tag wait">未到窗口</span>
+          <span class="pill">示例数据</span>
+        </div>
+        <div class="comp" style="margin-top:10px">
+          <i class="c ok"></i><i class="c miss"></i><i class="c soon"></i>
+          <span style="font-size:12px;color:#6b7d8d">到位 / 可补 / 未出</span>
+        </div>
+        <div class="file" style="margin-top:8px">
+          <div class="ext xls">XLS</div>
+          <div><b>日清算概览-20261112.xlsx</b><span>日清算 · 业务日期 11月12日</span></div>
+          <div class="when">待补</div>
+        </div>
+        <div class="card-h" style="margin-top:12px"><h2>间距</h2><span class="legend">4 的倍数</span></div>
+        <div class="spacebar">
+          <div><i style="height:8px"></i><span>8</span></div>
+          <div><i style="height:12px"></i><span>12</span></div>
+          <div><i style="height:16px"></i><span>16</span></div>
+          <div><i style="height:20px"></i><span>20</span></div>
+          <div><i style="height:24px"></i><span>24</span></div>
+        </div>
+        <div class="card-h" style="margin-top:12px"><h2>图标</h2><span class="legend">线性 1.75 · 18px</span></div>
+        <div class="icons">
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z"/></svg>到位</div>
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>补采</div>
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg>计划</div>
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3 5 6v6c0 5 3.5 7.5 7 9 3.5-1.5 7-4 7-9V6z"/></svg>证书</div>
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>时刻</div>
+          <div><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.5L10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z"/></svg>位置</div>
+        </div>
+      </section>
+    </div>
+    <p style="margin:12px 2px 0;color:#6b7d8d;font-size:12px">圆角：按钮 8、卡片 14。阴影只一层，不叠厚重投影。一屏一个主按钮。金线只用在标题下，不做大面积金色。窗口 1440×900。</p>
+  </div>
+</body>
+</html>

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>补采</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="mark">电</div>
+        <div><b>广东电力</b><small>数据采集</small></div>
+      </div>
+      <nav class="nav">
+        <a href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 4h7v7H4zM13 4h7v7h-7zM13 13h7v7h-7zM4 13h7v7H4z"/></svg>
+          到位<span class="badge">1</span>
+        </a>
+        <a class="on" href="catchup.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+          补采
+        </a>
+        <a href="plan.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg>
+          计划
+        </a>
+        <a href="home.html">
+          <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+          记录
+        </a>
+      </nav>
+      <div class="side-foot">
+        <div class="st">蕴阳海风场</div>
+        <div class="sub"><i class="dot warn"></i>登录停在验证码</div>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb">到位 <span class="sep">/</span> 缺数格 <span class="sep">/</span> <b>补采 11月12日</b></div>
+        <div class="top-right">
+          <span class="pill">示例数据</span>
+          <span class="station"><i class="dot"></i>蕴阳海风场</span>
+          <span class="who"><span class="avatar">张</span>张敏</span>
+        </div>
+      </header>
+      <main class="main">
+        <div class="catch">
+          <section class="card sheet">
+            <div class="kicker">从看板上的缺数格进入</div>
+            <h1>补上 11月12日 的日清算</h1>
+            <div class="goldrule"></div>
+            <p class="sub">同一天的实际运行结果也缺着，已一并勾上。不会改每天 08:00 的计划。</p>
+            <div class="pick">
+              <div class="item">
+                <i class="box"></i>
+                <div class="ext xls">XLS</div>
+                <div>
+                  <b>日清算概览-20261112.xlsx</b>
+                  <div class="meta">日清算 · 业务日期 2026-11-12 · 上次成功是 11月11日</div>
+                </div>
+                <div class="meta">约 240 KB</div>
+              </div>
+              <div class="item">
+                <i class="box"></i>
+                <div class="ext xls">XLS</div>
+                <div>
+                  <b>现货分时分类型出清电量-实时-20261112.xlsx</b>
+                  <div class="meta">实际运行结果 · 业务日期 2026-11-12 · 上次成功是 11月11日</div>
+                </div>
+                <div class="meta">约 180 KB</div>
+              </div>
+            </div>
+            <div class="path">
+              <div>
+                <div class="k">这两个文件将写到</div>
+                <b>D:\电力交易数据\蕴阳海风场\2026-11\12\</b>
+              </div>
+              <button class="btn">改这次的位置</button>
+            </div>
+            <div class="note">11月7日的日清算、11月8日的实际运行结果还缺着。这次只补 11月12日，补完可从看板继续点那两格。</div>
+            <div class="files" style="padding:14px 0 0; box-shadow:none; border:0">
+              <div class="card-h"><h2>这一天已经在库里的</h2></div>
+              <div class="file">
+                <div class="ext xls">XLS</div>
+                <div><b>信息披露-20261112.xlsx</b><span>今天 08:03 入库，不用再下</span></div>
+                <div class="when">已到位</div>
+              </div>
+              <div class="file">
+                <div class="ext pdf">PDF</div>
+                <div><b>2026年11月运行日报（11.12）.pdf</b><span>今天 08:04 入库，不用再下</span></div>
+                <div class="when">已到位</div>
+              </div>
+            </div>
+          </section>
+          <aside class="rail compact">
+            <div class="kicker">先做哪一步</div>
+            <h1 style="font-size:26px">先填验证码<br>再补这一天</h1>
+            <div class="goldrule"></div>
+            <p class="lead">交易中心 08:06 起要求验证码。先填完，再补这两项，一次就过。</p>
+            <div class="pause" style="margin-top:14px">
+              <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <div><b>登录还没完成</b>证书已插入。差的是页面上的验证码。</div>
+            </div>
+            <a class="btn primary block lg" href="attention.html">去填写验证码</a>
+            <button class="btn block" style="margin-top:8px">我已登录，开始补采</button>
+            <div class="next">
+              <div>
+                <b>补完后看板会变成</b>
+                <span>11月12日这两格打勾</span>
+              </div>
+              <div style="display:flex;gap:6px">
+                <i class="c ok"></i><i class="c ok"></i>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>
