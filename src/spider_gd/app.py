@@ -2694,6 +2694,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             "path_template": cfg.get("path_template", ""),
             "path_folders": cfg.get("path_folders") or [],
             "path_structure": cfg.get("path_structure", ""),
+            "custom_filenames": cfg.get("custom_filenames") or {},
         }
 
         # 使用任务配置的下载目录，否则用系统默认；任务可自定义日期分层模板

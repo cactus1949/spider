@@ -868,6 +868,61 @@ body {
   white-space: nowrap;
 }
 
+.sp-file-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sp-file-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sp-file-custom {
+  color: #1677ff;
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-file > .sp-actions {
+  opacity: 1;
+}
+
+.sp-edit {
+  padding-inline: 4px;
+}
+
+.sp-name-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.sp-name-error {
+  margin-top: 6px;
+  color: #ff4d4f;
+  font-size: 12px;
+}
+
+.sp-name-preview {
+  margin-top: 6px;
+  color: #1677ff;
+  font-size: 12px;
+}
+
+.sp-name-help {
+  margin-top: 12px;
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
 .sp-file-source {
   flex-shrink: 0;
   color: #a0a6ad;

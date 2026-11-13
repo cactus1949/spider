@@ -394,6 +394,7 @@ def apply_catchup_storage(
     path_structure: str | None = None,
     download_dir: str | None = None,
     storage_overridden: bool = False,
+    custom_filenames: object = None,
 ) -> dict:
     """把这次补数的落盘路径写进配置。
 
@@ -411,6 +412,7 @@ def apply_catchup_storage(
         path_structure (str | None): 存储结构文本。None 表示请求没带。
         download_dir (str | None): 本次下载根目录。非空时覆盖任务目录；空表示不单独指定。
         storage_overridden (bool): 为 True 时，即使路径字段为空也不回退到任务。
+        custom_filenames: 这次补数的自定义文件名。None 表示沿用匹配任务；传了对象就用这次的。
 
     Returns:
         dict: 带上 path_structure / path_template / path_folders，以及可能的下载目录。
@@ -448,6 +450,7 @@ def apply_catchup_storage(
         chosen["path_folders"] = list(path_folders or [])
         chosen["download_dir"] = explicit_dir
         chosen["download_dir_custom"] = bool(explicit_dir)
+        _apply_catchup_custom_filenames(chosen, custom_filenames, matched)
         _remember_structure_indicators(chosen, matched)
         return chosen
 
@@ -464,8 +467,37 @@ def apply_catchup_storage(
     if explicit_dir:
         chosen["download_dir"] = explicit_dir
         chosen["download_dir_custom"] = True
+    _apply_catchup_custom_filenames(chosen, custom_filenames, matched)
     _remember_structure_indicators(chosen, matched)
     return chosen
+
+
+def _catchup_custom_filenames(raw: object, matched: dict | None) -> dict:
+    """补数没单独传自定义命名时，沿用匹配任务里的。
+
+    Args:
+        raw: 请求里的自定义命名。None 表示没传。
+        matched: 用来默认存储的任务。没有时为 None。
+
+    Returns:
+        dict: 规范化后的自定义命名。
+
+    Examples:
+        >>> _catchup_custom_filenames(None, {"custom_filenames": {}})
+        {}
+    """
+    from spider_gd.core.custom_filename import normalize_custom_filenames
+
+    if raw is None and isinstance(matched, dict):
+        raw = matched.get("custom_filenames")
+    return normalize_custom_filenames(raw)
+
+
+def _apply_catchup_custom_filenames(chosen: dict, raw: object, matched: dict | None) -> None:
+    """没有自定义命名时不往配置里塞空字段，避免旧调用对不上。"""
+    names = _catchup_custom_filenames(raw, matched)
+    if raw is not None or names:
+        chosen["custom_filenames"] = names
 
 
 def _remember_structure_indicators(chosen: dict, matched: dict | None) -> None:
@@ -630,6 +662,11 @@ class TaskRunner:
             }
             for indicator, mapping in (output_dirs or {}).items()
         }
+        from spider_gd.core.custom_filename import normalize_custom_filenames
+
+        self.custom_filenames = normalize_custom_filenames(
+            task_config.get("custom_filenames"),
+        )
 
         self._on_event: callable = lambda e: None
         self._wait_continue: callable = None
@@ -1390,6 +1427,12 @@ class TaskRunner:
         output_dir_map = output_slot_dirs(
             source_cfg, cfg, self.output_dirs.get(indicator_name, {}), indicator_name,
         )
+        from spider_gd.core.custom_filename import templates_for_indicator
+
+        custom_names = output_slot_dirs(
+            source_cfg, cfg, templates_for_indicator(self.custom_filenames, indicator_name),
+            indicator_name,
+        )
         output_repeat_dates = output_slot_dirs(source_cfg, cfg, own_dates, indicator_name)
         if query_month:
             target_text = query_month
@@ -1415,6 +1458,7 @@ class TaskRunner:
             output_repeat_dates=output_repeat_dates,
             target_date=runner_target if isinstance(runner_target, date) else None,
             query_month=query_month,
+            custom_filenames=custom_names,
         )
         return {
             "cfg": cfg,
@@ -1424,6 +1468,7 @@ class TaskRunner:
             "query_month": query_month,
             "output_dirs": output_dir_map,
             "output_repeat_dates": output_repeat_dates,
+            "custom_filenames": custom_names,
             "target_text": target_text,
             "running_message": running_message,
             "needs_login": cfg.get("needs_login", True),
@@ -1803,6 +1848,7 @@ class TaskRunner:
             query_month=prepared["query_month"],
             output_dirs=prepared["output_dirs"],
             output_repeat_dates=prepared["output_repeat_dates"],
+            custom_filenames=prepared["custom_filenames"],
         )
         # 注入共享浏览器状态
         runner.browser = self._browser

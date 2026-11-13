@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS task_configs (
     path_template TEXT NOT NULL DEFAULT '',
     path_folders TEXT NOT NULL DEFAULT '',
     path_structure TEXT NOT NULL DEFAULT '',
+    custom_filenames TEXT NOT NULL DEFAULT '',
     upload_profile_id TEXT NOT NULL DEFAULT '',
     auto_upload INTEGER NOT NULL DEFAULT 0,
     indicator_retry INTEGER NOT NULL DEFAULT 3,
@@ -249,6 +250,7 @@ class TaskStateStore:
             ("path_template", "TEXT NOT NULL DEFAULT ''"),
             ("path_folders", "TEXT NOT NULL DEFAULT ''"),
             ("path_structure", "TEXT NOT NULL DEFAULT ''"),
+            ("custom_filenames", "TEXT NOT NULL DEFAULT ''"),
             ("upload_profile_id", "TEXT NOT NULL DEFAULT ''"),
             ("auto_upload", "INTEGER NOT NULL DEFAULT 0"),
             ("indicator_retry", "INTEGER NOT NULL DEFAULT 3"),
@@ -332,6 +334,7 @@ class TaskStateStore:
                         weekdays=?, backfill_days=?, cover_days=?,
                         enabled=?, remark=?, download_dir=?, download_dir_custom=?, indicator_windows=?,
                         output_windows=?, path_template=?, path_folders=?, path_structure=?,
+                        custom_filenames=?,
                         upload_profile_id=?, auto_upload=?, indicator_retry=?, updated_at=?
                     WHERE id=?""",
                     (
@@ -344,6 +347,7 @@ class TaskStateStore:
                         cfg.get("download_dir", ""), int(bool(cfg.get("download_dir_custom", False))), windows_json,
                         output_windows_json, cfg.get("path_template", ""), folders_json,
                         cfg.get("path_structure", ""),
+                        _custom_filenames_json(cfg.get("custom_filenames")),
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
@@ -359,8 +363,10 @@ class TaskStateStore:
                         (id, name, login, indicators, repeat, time, weekdays,
                          backfill_days, cover_days, enabled, remark, download_dir, download_dir_custom,
                          indicator_windows, output_windows, path_template, path_folders, path_structure,
+                         custom_filenames,
                          upload_profile_id, auto_upload, indicator_retry, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, """
+                    "?, ?, ?, ?, ?, ?)""",
                     (
                         cfg["id"], cfg["name"], cfg.get("login", ""),
                         json.dumps(cfg.get("indicators", [])),
@@ -371,6 +377,7 @@ class TaskStateStore:
                         cfg.get("download_dir", ""), int(bool(cfg.get("download_dir_custom", False))), windows_json,
                         output_windows_json, cfg.get("path_template", ""), folders_json,
                         cfg.get("path_structure", ""),
+                        _custom_filenames_json(cfg.get("custom_filenames")),
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
@@ -1589,11 +1596,28 @@ def _task_config_row(row: sqlite3.Row) -> dict:
         "path_template": _col("path_template", ""),
         "path_folders": _parse_path_folders(_col("path_folders", "")),
         "path_structure": _col("path_structure", ""),
+        "custom_filenames": _parse_custom_filenames(_col("custom_filenames", "")),
         "upload_profile_id": _col("upload_profile_id", "") or "",
         "auto_upload": bool(_col("auto_upload", 0)),
         "indicator_retry": _indicator_retry_value(_col("indicator_retry", 3)),
         "created_at": _col("created_at", 0), "updated_at": _col("updated_at", 0),
     }
+
+
+def _custom_filenames_json(raw: object) -> str:
+    """把自定义命名收成 JSON。旧配置没有这个字段时存空对象。"""
+    import json
+
+    from spider_gd.core.custom_filename import normalize_custom_filenames
+
+    return json.dumps(normalize_custom_filenames(raw), ensure_ascii=False)
+
+
+def _parse_custom_filenames(raw: object) -> dict:
+    """读出任务上的自定义命名。列不存在或内容损坏时返回空字典。"""
+    from spider_gd.core.custom_filename import normalize_custom_filenames
+
+    return normalize_custom_filenames(raw)
 
 
 def _indicator_retry_value(raw) -> int:

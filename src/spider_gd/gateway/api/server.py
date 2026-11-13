@@ -204,6 +204,7 @@ class CatchupRunRequest(BaseModel):
     path_template: str | None = None
     path_folders: list[dict[str, Any]] | None = None
     path_structure: str | None = None
+    custom_filenames: dict[str, Any] | None = None
     # 为真时即使路径为空，也不再回退到定时任务的存储配置
     storage_overridden: bool = False
     headless: str = "false"
@@ -1531,6 +1532,7 @@ def create_app(
                     "path_template": cfg.get("path_template", ""),
                     "path_folders": cfg.get("path_folders") or [],
                     "path_structure": cfg.get("path_structure", ""),
+                    "custom_filenames": cfg.get("custom_filenames") or {},
                     "indicator_windows": cfg.get("indicator_windows") or {},
                     "output_windows": cfg.get("output_windows") or {},
                     "upload_profile_id": cfg.get("upload_profile_id", ""),
@@ -1577,6 +1579,7 @@ def create_app(
                     "path_template": f.get("path_template", ""),
                     "path_folders": f.get("path_folders") or [],
                     "path_structure": f.get("path_structure", ""),
+                    "custom_filenames": f.get("custom_filenames") or {},
                     "indicator_windows": f.get("indicator_windows") or {},
                     "output_windows": f.get("output_windows") or {},
                     "upload_profile_id": f.get("upload_profile_id", ""),
@@ -1797,6 +1800,9 @@ def create_app(
                     "path_template": db_cfg.get("path_template", cfg.get("path_template", "")),
                     "path_folders": db_cfg.get("path_folders") or cfg.get("path_folders") or [],
                     "path_structure": db_cfg.get("path_structure", cfg.get("path_structure", "")),
+                    "custom_filenames": (
+                        db_cfg.get("custom_filenames") or cfg.get("custom_filenames") or {}
+                    ),
                     "download_dir": db_cfg.get("download_dir", cfg.get("download_dir", "")),
                     "download_dir_custom": db_cfg.get("download_dir_custom", False),
                     "upload_profile_id": db_cfg.get("upload_profile_id", ""),
@@ -3879,6 +3885,7 @@ def create_app(
             path_structure=body.path_structure,
             download_dir=body.download_dir,
             storage_overridden=body.storage_overridden,
+            custom_filenames=body.custom_filenames,
         )
         return await run_task_stream(
             "catchup",
