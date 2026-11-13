@@ -241,22 +241,48 @@ def calendar_csv_text(table: Sequence[Sequence[str]]) -> str:
     return output.getvalue()
 
 
+def legacy_packed_event(name: str) -> bool:
+    """交易名称是不是整段接口数组原样塞进去的旧格式。
+
+    Args:
+        name: ``交易名称`` 单元格。
+
+    Returns:
+        bool: 去掉空白后以 ``[{`` 开头时为 True。
+
+    Examples:
+        >>> legacy_packed_event('  [{"seqName": "周双边"}]')
+        True
+        >>> legacy_packed_event("周双边")
+        False
+    """
+    return str(name or "").lstrip().startswith("[{")
+
+
 def merge_calendar_rows(
     existing_rows: Iterable[dict[str, Any]],
     new_table: Sequence[Sequence[str]],
+    replace_dates: Iterable[str] | None = None,
 ) -> list[list[str]]:
     """把新抓到的行合并进已有 CSV 行。
 
     - 以 ``日期 + 交易名称 + 申报时间 + 交易时间范围`` 为键，同一事件重抓时用新值覆盖；
+    - ``交易名称`` 以 ``[{`` 开头的旧格式行直接丢掉；
+    - ``replace_dates`` 里的日期以本次接口为准，旧行不保留、也不补回；
     - 旧文件是 9 列版本时，缺少的列按空串补齐；
     - 按日期稳定排序，同一天保持原顺序。
     """
     header = list(CALENDAR_COLUMNS)
+    replaced = {str(item).strip() for item in (replace_dates or []) if str(item).strip()}
     merged: OrderedDict[tuple[str, str, str, str], list[str]] = OrderedDict()
 
-    def add(values: dict[str, str]) -> None:
+    def add(values: dict[str, str], *, from_existing: bool) -> None:
         iso_date = values.get("日期", "").strip()
         if not iso_date:
+            return
+        if from_existing and (
+            legacy_packed_event(values.get("交易名称", "")) or iso_date in replaced
+        ):
             return
         key = (
             iso_date,
@@ -268,7 +294,10 @@ def merge_calendar_rows(
 
     for row in existing_rows:
         if isinstance(row, dict):
-            add({column: str(row.get(column, "") or "") for column in header})
+            add(
+                {column: str(row.get(column, "") or "") for column in header},
+                from_existing=True,
+            )
     captured_at_index = header.index("采集时间")
     for row in list(new_table)[1:]:
         values = {column: str(value) for column, value in zip(header, row, strict=False)}
@@ -287,7 +316,7 @@ def merge_calendar_rows(
                 fresh[captured_at_index] = previous[captured_at_index]
             merged[key] = fresh
             continue
-        add(values)
+        add(values, from_existing=False)
 
     ordered = sorted(merged.items(), key=lambda item: item[0][0])
     return [header] + [values for _, values in ordered]

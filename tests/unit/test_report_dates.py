@@ -1,4 +1,4 @@
-"""运行日报标题日期识别。"""
+"""运行日报标题日期识别和查询词。"""
 
 from __future__ import annotations
 
@@ -57,3 +57,39 @@ def test_select_report_notices_deduplicates():
     ]
     picked = select_report_notices(notices, date(2026, 10, 27))
     assert [item["noticeId"] for item in picked] == [1]
+
+
+@pytest.mark.unit
+def test_report_search_query_includes_the_year():
+    from spider_gd.core.report_dates import report_file_has_year, report_search_query
+    from task_runner import apply_target_date_to_workflow
+    from workflow_runner import WorkflowRunner
+
+    assert report_search_query(date(2026, 11, 13)) == "2026年11月运行日报（11.13）"
+    cfg = {
+        "name": "运行日报",
+        "steps": [{"action": "fill", "selector": "#noticeTitle", "value": "{target}"}],
+    }
+    rewritten = apply_target_date_to_workflow(cfg, date(2026, 11, 13))
+    assert rewritten["steps"][0]["value"] == "2026年11月运行日报（11.13）"
+    other = apply_target_date_to_workflow(
+        {"name": "窗口测试", "steps": [{"action": "fill", "value": "{target}"}]},
+        date(2026, 11, 13),
+    )
+    assert other["steps"][0]["value"] == "11.13"
+
+    runner = WorkflowRunner(
+        {"name": "运行日报", "steps": []}, download_dir="/tmp", target_date=date(2026, 11, 13),
+    )
+    assert runner._report_query_fill("{target}") == "2026年11月运行日报（11.13）"
+    assert runner._report_query_fill("11.13") == "2026年11月运行日报（11.13）"
+    plain = WorkflowRunner(
+        {"name": "窗口测试", "steps": []}, download_dir="/tmp", target_date=date(2026, 11, 13),
+    )
+    assert plain._report_query_fill("{target}") == ""
+
+    assert report_file_has_year("广东电力现货市场2026年11月运行日报（11.13）.pdf", b"", 2026)
+    assert not report_file_has_year("广东电力现货市场2025年11月运行日报（11.13）.pdf", b"", 2026)
+    titled = b"/Title (2026\xe5\xb9\xb4\xe6\x97\xa5\xe6\x8a\xa5)"
+    assert report_file_has_year("11.13.pdf", titled, 2026)
+    assert not report_file_has_year("11.13.pdf", b"/Title (2025 report)", 2026)

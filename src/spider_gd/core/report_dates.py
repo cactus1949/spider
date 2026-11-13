@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
+from pathlib import Path
 
 __all__ = [
     "dates_in_report_title",
+    "is_report_workflow",
+    "report_file_has_year",
+    "report_fill_value",
     "report_matches_date",
+    "report_search_query",
     "select_report_notices",
 ]
 
@@ -104,6 +109,120 @@ def report_matches_date(title: str, publish_time: str, target: date) -> bool:
         return target in dates
     published = _date_from_text(publish_time)
     return published == target
+
+
+def is_report_workflow(name: str) -> bool:
+    """这个工作流是不是运行日报。
+
+    Args:
+        name: 工作流名或任务里的指标名。
+
+    Returns:
+        bool: 名称里含有「运行日报」时为 True。
+
+    Examples:
+        >>> is_report_workflow("运行日报")
+        True
+        >>> is_report_workflow("交易日历")
+        False
+    """
+    return "运行日报" in str(name or "")
+
+
+def report_search_query(target: date) -> str:
+    """运行日报查询词，带年份，避免只填「11.13」点到上一年。
+
+    Args:
+        target: 要查的业务日期。
+
+    Returns:
+        str: 例如 ``2026年11月运行日报（11.13）``。
+
+    Examples:
+        >>> report_search_query(date(2026, 11, 13))
+        '2026年11月运行日报（11.13）'
+        >>> report_search_query(date(2026, 11, 5))
+        '2026年11月运行日报（11.05）'
+    """
+    return (
+        f"{target.year}年{target.month}月运行日报"
+        f"（{target.month}.{target.day:02d}）"
+    )
+
+
+def report_fill_value(value: str, target: date) -> str | None:
+    """运行日报的日期填空换成带年份的查询词。
+
+    不是日期占位符、也不是目标日的 ``月.日`` 简写时返回 None，调用方原样填写。
+
+    Args:
+        value: 步骤里的填空。
+        target: 这一轮的业务日期。
+
+    Returns:
+        str | None: 查询词。不该改时为 None。
+
+    Examples:
+        >>> report_fill_value("{target}", date(2026, 11, 13))
+        '2026年11月运行日报（11.13）'
+        >>> report_fill_value("11.13", date(2026, 11, 13))
+        '2026年11月运行日报（11.13）'
+        >>> report_fill_value("其他", date(2026, 11, 13)) is None
+        True
+    """
+    text = str(value or "").strip()
+    short = f"{target.month}.{target.day:02d}"
+    if text in {"{target}", "target", "today", short}:
+        return report_search_query(target)
+    if text == "yesterday":
+        return report_search_query(target - timedelta(days=1))
+    matched = re.fullmatch(r"-(\d+)d", text)
+    if matched:
+        return report_search_query(target - timedelta(days=int(matched.group(1))))
+    return None
+
+
+def report_file_has_year(filename: str, payload: bytes, year: int) -> bool:
+    """原文件名或 PDF 标题里是否有目标年份。
+
+    Args:
+        filename: 站点给出的原始文件名。
+        payload: 文件内容。文件名没有年份时再看 PDF 标题。
+        year: 目标年份。
+
+    Returns:
+        bool: 对得上时为 True。
+
+    Examples:
+        >>> report_file_has_year("2026年11月运行日报（11.13）.pdf", b"", 2026)
+        True
+        >>> report_file_has_year("11.13.pdf", b"/Title (2025 report)", 2026)
+        False
+    """
+    if str(year) in Path(str(filename or "")).name:
+        return True
+    return str(year) in _pdf_title(payload or b"")
+
+
+def _pdf_title(payload: bytes) -> str:
+    """读取 PDF 信息字典里的标题。读不到时为空字符串。"""
+    match = re.search(br"/Title\s*\((.*?)\)", payload, re.S)
+    if match:
+        raw = match.group(1)
+        return raw.decode("utf-8", "replace").replace("\\(", "(").replace("\\)", ")")
+    hex_title = re.search(br"/Title\s*<([0-9A-Fa-f\s]+)>", payload)
+    if not hex_title:
+        return ""
+    digits = re.sub(br"\s+", b"", hex_title.group(1))
+    if len(digits) < 4 or len(digits) % 2:
+        return ""
+    try:
+        blob = bytes.fromhex(digits.decode("ascii"))
+    except ValueError:
+        return ""
+    if blob.startswith(b"\xfe\xff"):
+        return blob[2:].decode("utf-16-be", "replace")
+    return blob.decode("utf-8", "replace")
 
 
 def select_report_notices(
