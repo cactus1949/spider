@@ -8,6 +8,7 @@ import { workflowPath } from './workflowTree'
 import { formatDOffset, formatMOffset, formatWOffset } from './DateWindowSlider'
 import { OutputName, OutputPanel } from './OutputPanel'
 import StoragePathModal, { type PathFolder } from './StoragePathModal'
+import type { CustomFileNames } from './customFilename'
 import { TASK_EDITOR_STEPS } from './taskEditorSteps'
 import TaskUploadFields from './TaskUploadFields'
 
@@ -24,6 +25,7 @@ export interface CatchupTaskHint {
   pathTemplate?: string
   pathFolders?: PathFolder[]
   pathStructure?: string
+  customFilenames?: CustomFileNames
   /** 任务单独指定的下载目录；空表示用全局设置 */
   downloadDir?: string
 }
@@ -42,6 +44,7 @@ export interface CatchupSelection {
   pathTemplate: string
   pathFolders: PathFolder[]
   pathStructure: string
+  customFilenames: CustomFileNames
 }
 
 interface StorageOverride {
@@ -50,6 +53,8 @@ interface StorageOverride {
   structure: string
   /** null 表示下载目录仍跟随任务 / 设置 */
   downloadDir: string | null
+  namesEdited?: boolean
+  customFilenames?: CustomFileNames
 }
 
 type OutputMode = 'follow' | 'own' | 'skip'
@@ -215,11 +220,15 @@ export default function CatchupModal({
       template: task?.pathTemplate || '',
       folders: task?.pathFolders || [],
       structure: task?.pathStructure || '',
+      customFilenames: task?.customFilenames || {},
       downloadDir: (task?.downloadDir || '').trim() || settingsDir
     }
   }, [indicators, tasks, settingsDir])
   const downloadDir = override?.downloadDir ?? suggested.downloadDir
   const modalStructure = override?.structureEdited ? override.structure : suggested.structure
+  const customFilenames = override?.namesEdited
+    ? (override.customFilenames || {})
+    : suggested.customFilenames
 
   useEffect(() => {
     if (step !== 2) structureBaseline.current = null
@@ -296,7 +305,9 @@ export default function CatchupModal({
     setOverride((prev) => ({
       structureEdited: prev?.structureEdited ?? false,
       structure: prev?.structure ?? '',
-      downloadDir: dir
+      downloadDir: dir,
+      namesEdited: prev?.namesEdited,
+      customFilenames: prev?.customFilenames
     }))
   }
 
@@ -361,7 +372,8 @@ export default function CatchupModal({
       downloadDir,
       pathTemplate: structureEdited ? '' : suggested.template,
       pathFolders: structureEdited ? [] : suggested.folders,
-      pathStructure: structureEdited ? (override?.structure || '') : suggested.structure
+      pathStructure: structureEdited ? (override?.structure || '') : suggested.structure,
+      customFilenames
     })
   }
 
@@ -642,6 +654,16 @@ export default function CatchupModal({
                 indicators={indicators}
                 workflows={workflows}
                 indicatorWindows={{}}
+                customNames={customFilenames}
+                onCustomNamesChange={(names) => {
+                  setOverride((prev) => ({
+                    structureEdited: prev?.structureEdited ?? false,
+                    structure: prev?.structure ?? modalStructure,
+                    downloadDir: prev?.downloadDir ?? null,
+                    namesEdited: true,
+                    customFilenames: names
+                  }))
+                }}
                 onChange={(next, blocked) => {
                   setStructureBlocked(blocked)
                   if (structureBaseline.current === null) {
@@ -654,7 +676,9 @@ export default function CatchupModal({
                   setOverride((prev) => ({
                     structureEdited: true,
                     structure: next,
-                    downloadDir: prev?.downloadDir ?? null
+                    downloadDir: prev?.downloadDir ?? null,
+                    namesEdited: prev?.namesEdited,
+                    customFilenames: prev?.customFilenames
                   }))
                 }}
               />

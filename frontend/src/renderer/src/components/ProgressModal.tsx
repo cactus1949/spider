@@ -37,6 +37,7 @@ export interface CatchupRun {
   pathTemplate?: string
   pathFolders?: { name: string; indicators: string[] }[]
   pathStructure?: string
+  customFilenames?: Record<string, { enabled: boolean; template: string }>
 }
 
 interface IndicatorRow {
@@ -181,6 +182,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               path_template: catchup.pathTemplate || '',
               path_folders: catchup.pathFolders || [],
               path_structure: catchup.pathStructure || '',
+              custom_filenames: catchup.customFilenames || {},
               // 对话框里看到的路径就是这次要用的，空结构也不再回退到任务
               storage_overridden: true
             }

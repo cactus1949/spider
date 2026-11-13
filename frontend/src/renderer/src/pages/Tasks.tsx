@@ -39,6 +39,7 @@ import StoragePathModal, {
   LEGACY_PATH_TEMPLATE,
   type PathFolder
 } from '../components/StoragePathModal'
+import type { CustomFileNames } from '../components/customFilename'
 import { workflowPath } from '../components/workflowTree'
 import ProgressModal, { type CatchupRun } from '../components/ProgressModal'
 import TaskUploadFields from '../components/TaskUploadFields'
@@ -78,6 +79,7 @@ interface AutoTask {
   pathTemplate?: string
   pathFolders?: PathFolder[]
   pathStructure?: string
+  customFilenames?: CustomFileNames
   downloadDir?: string
   uploadProfileId?: string
   autoUpload?: boolean
@@ -180,6 +182,7 @@ async function loadTasksFromApi(): Promise<AutoTask[]> {
         pathTemplate: c.path_template || '',
         pathFolders: Array.isArray(c.path_folders) ? c.path_folders as PathFolder[] : [],
         pathStructure: typeof c.path_structure === 'string' ? c.path_structure : '',
+        customFilenames: parseCustomFilenames(c.custom_filenames),
         uploadProfileId: typeof c.upload_profile_id === 'string' ? c.upload_profile_id : '',
         autoUpload: Boolean(c.auto_upload),
         indicatorRetry: Number(c.indicator_retry ?? 3),
@@ -213,6 +216,7 @@ async function saveTaskConfigs(tasks: AutoTask[]): Promise<void> {
         path_template: t.pathTemplate || '',
         path_folders: t.pathFolders || [],
         path_structure: t.pathStructure || '',
+        custom_filenames: t.customFilenames || {},
         upload_profile_id: t.uploadProfileId || '',
         auto_upload: Boolean(t.autoUpload),
         indicator_retry: t.indicatorRetry ?? 3,
@@ -229,6 +233,29 @@ async function deleteTaskConfig(id: string): Promise<void> {
   try {
     await api.deleteTaskConfig(id)
   } catch { /* ignore */ }
+}
+
+function parseCustomFilenames(raw: unknown): CustomFileNames {
+  let value = raw
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return {}
+    }
+  }
+  if (!value || typeof value !== 'object') return {}
+  const result: CustomFileNames = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (!item || typeof item !== 'object') continue
+    const template = String((item as { template?: unknown }).template || '').trim()
+    if (!template) continue
+    result[key] = {
+      enabled: Boolean((item as { enabled?: unknown }).enabled),
+      template
+    }
+  }
+  return result
 }
 
 function uid(): string {
@@ -316,6 +343,7 @@ export default function Tasks(): JSX.Element {
   const [pathTemplate, setPathTemplate] = useState(DEFAULT_PATH_TEMPLATE)
   const [pathFolders, setPathFolders] = useState<PathFolder[]>([])
   const [pathStructure, setPathStructure] = useState('')
+  const [customFilenames, setCustomFilenames] = useState<CustomFileNames>({})
   const [structureBlocked, setStructureBlocked] = useState(false)
   // 进过第 3 步才会把回显的文件夹结构提交上来
   const [structureSeen, setStructureSeen] = useState(false)
@@ -451,6 +479,7 @@ export default function Tasks(): JSX.Element {
     setPathTemplate(DEFAULT_PATH_TEMPLATE)
     setPathFolders([])
     setPathStructure('')
+    setCustomFilenames({})
     setStructureBlocked(false)
     setStructureSeen(false)
     setStep(0)
@@ -482,6 +511,7 @@ export default function Tasks(): JSX.Element {
     setPathTemplate(task.pathTemplate || '')
     setPathFolders(task.pathFolders || [])
     setPathStructure(task.pathStructure || '')
+    setCustomFilenames(task.customFilenames || {})
     setStructureBlocked(false)
     setStructureSeen(false)
     setStep(0)
@@ -546,6 +576,7 @@ export default function Tasks(): JSX.Element {
         downloadDir: '',
         pathFolders,
         pathStructure,
+        customFilenames,
         uploadProfileId: values.uploadProfileId || '',
         autoUpload: Boolean(values.autoUpload),
         indicatorRetry: Number(values.indicatorRetry ?? 3),
@@ -1083,6 +1114,8 @@ export default function Tasks(): JSX.Element {
             indicators={selectedIndicators}
             workflows={workflows}
             indicatorWindows={windows}
+            customNames={customFilenames}
+            onCustomNamesChange={setCustomFilenames}
             onChange={(nextStructure, blocked) => {
               setPathStructure(nextStructure)
               setStructureBlocked(blocked)
@@ -1122,7 +1155,8 @@ export default function Tasks(): JSX.Element {
             downloadDir: selection.downloadDir,
             pathTemplate: selection.pathTemplate,
             pathFolders: selection.pathFolders,
-            pathStructure: selection.pathStructure
+            pathStructure: selection.pathStructure,
+            customFilenames: selection.customFilenames
           })
           setCatchupOpen(false)
           setTaskProgressOpen(false)

@@ -156,6 +156,7 @@ def plan_download_files(
     target_date: date | None = None,
     query_month: str | None = None,
     today: date | None = None,
+    custom_filenames: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """列出这次执行预期会下载的文件，并带上存储目录。
 
@@ -171,6 +172,7 @@ def plan_download_files(
         target_date: 非循环导出使用的日期。
         query_month: 按月指标的月份，格式 ``YYYY-MM``。
         today: 展开相对日期的锚点。默认今天。
+        custom_filenames: 步骤位置到自定义文件名主体。有值时覆盖 save_as。
 
     Returns:
         list[dict]: 每项含 indicator、output_key、date、label、name、folders。
@@ -192,6 +194,11 @@ def plan_download_files(
         's0'
     """
     anchor = today or date.today()
+    names = {
+        str(key): str(value)
+        for key, value in (custom_filenames or {}).items()
+        if str(value).strip()
+    }
     dirs = {str(key): str(path) for key, path in (output_dirs or {}).items() if str(path).strip()}
     root = download_tree_root(Path(download_dir), dirs)
     steps = config.get("steps") if isinstance(config, dict) else None
@@ -201,7 +208,20 @@ def plan_download_files(
 
     def one(step: dict, position: str, current: date | None, date_text: str) -> dict[str, Any]:
         """组装一个预期文件。"""
-        filename = render_save_as(str(step.get("save_as") or ""), current)
+        save_as = str(step.get("save_as") or "")
+        filename = render_save_as(save_as, current)
+        template = names.get(position, "")
+        if template:
+            from spider_gd.core.custom_filename import (
+                filename_suffix,
+                render_custom_filename,
+            )
+            try:
+                filename = render_custom_filename(
+                    template, current or anchor, filename_suffix(save_as),
+                )
+            except ValueError:
+                pass
         label = str(step.get("name") or "").strip() or filename or "下载文件"
         filename = filename or label
         directory = Path(dirs.get(position) or download_dir)
@@ -750,6 +770,7 @@ class WorkflowRunner:
         query_month: str | date | None = None,
         output_dirs: dict[str, str] | None = None,
         output_repeat_dates: dict[str, list] | None = None,
+        custom_filenames: dict[str, str] | None = None,
     ):
         self.config = config
         self.name = config.get("name", "unnamed")
@@ -762,6 +783,12 @@ class WorkflowRunner:
             if str(path).strip()
         }
         self._active_output_dir = ""
+        self.custom_filenames = {
+            str(key): str(value)
+            for key, value in (custom_filenames or {}).items()
+            if str(value).strip()
+        }
+        self._overwrite_current = False
         self.headless = headless
         self.minimized = minimized
         self.target_date = self._coerce_target_date(target_date or config.get("target_date"))
@@ -943,9 +970,59 @@ class WorkflowRunner:
     def _output_base(self) -> Path:
         return Path(self._active_output_dir) if self._active_output_dir else self.download_dir
 
+    def _custom_filename(self, save_as: str, original_name: str = "") -> str:
+        """当前步骤若启用了自定义命名，返回渲染后的文件名。
+
+        没有设置、或模板不合法时返回空字符串，调用方继续用工作流命名。
+        扩展名优先用这次实际下载的文件，否则用 save_as 里的扩展名。
+
+        Args:
+            save_as: 步骤上的文件名模板。
+            original_name: 站点给出的原始文件名。
+
+        Returns:
+            str: 带扩展名的自定义文件名。不用自定义名时为空。
+
+        Examples:
+            >>> WorkflowRunner._custom_filename.__name__
+            '_custom_filename'
+        """
+        from spider_gd.core.custom_filename import (
+            filename_suffix,
+            render_custom_filename,
+        )
+
+        template = self.custom_filenames.get(self._active_output_key(), "")
+        if not template:
+            self._overwrite_current = False
+            return ""
+        original = save_as_filename(original_name)
+        suffix = Path(original).suffix or filename_suffix(save_as)
+        when = self.target_date or date.today()
+        try:
+            rendered = render_custom_filename(template, when, suffix)
+        except ValueError as exc:
+            logger.warning("  自定义文件名无效，改用工作流命名: {}", exc)
+            self._overwrite_current = False
+            return ""
+        self._overwrite_current = True
+        return rendered
+
+    def _keep_download(self, source: Path, dest: Path):
+        """保存下载结果。自定义命名重名时直接覆盖，工作流命名仍保留版本。"""
+        if self._overwrite_current:
+            from spider_gd.core.custom_filename import overwrite_file
+            from spider_gd.core.pipeline.file_versions import VersionedSaveResult
+
+            overwrite_file(source, dest)
+            return VersionedSaveResult(path=dest, sha256="", changed=True)
+        return save_versioned_file(source, dest)
+
     def _resolve_save_path(self, save_as: str, default_name: str = "output.xlsx") -> Path:
         """save_as → 当前输出目录下的文件路径。"""
-        name = self._save_as_name(save_as) or self._save_as_name(default_name)
+        name = self._custom_filename(save_as or default_name)
+        if not name:
+            name = self._save_as_name(save_as) or self._save_as_name(default_name)
         resolved = self._output_base() / name
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return resolved
@@ -953,8 +1030,12 @@ class WorkflowRunner:
     def _export_path(self, save_as: str, original_name: str) -> Path:
         """浏览器导出：文件名主体用 save_as，扩展名以站点实际下载为准。
 
+        任务为这个文件设了自定义名称时用自定义名，扩展名仍以站点下载为准。
         没写 save_as 时保留站点原名。
         """
+        custom = self._custom_filename(save_as, original_name)
+        if custom:
+            return self._output_base() / custom
         original = save_as_filename(original_name)
         name = self._save_as_name(save_as)
         if not name:
@@ -2231,6 +2312,7 @@ class WorkflowRunner:
             output_repeat_dates=self.output_repeat_dates,
             target_date=self.target_date,
             query_month=self.query_month,
+            custom_filenames=self.custom_filenames,
         ):
             self._emit("file_expected", **item)
 
@@ -4386,7 +4468,7 @@ class WorkflowRunner:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = save_path.parent / f".{save_path.name}.{time.time_ns()}.tmp"
             await download.save_as(str(tmp_path))
-            result = save_versioned_file(tmp_path, save_path)
+            result = self._keep_download(tmp_path, save_path)
             self._emit(
                 "export_saved", path=str(save_path), original_name=original_name,
                 size=save_path.stat().st_size,
@@ -4499,7 +4581,10 @@ class WorkflowRunner:
             or "octet-stream" in content_type
             or save_path.suffix.lower() in (".xlsx", ".xls")
         ) and not ("json" in content_type or "text" in content_type):
-            save_versioned_bytes(save_path, raw)
+            if self._overwrite_current:
+                save_path.write_bytes(raw)
+            else:
+                save_versioned_bytes(save_path, raw)
             return
 
         text = raw.decode("utf-8", errors="replace")
@@ -4507,21 +4592,32 @@ class WorkflowRunner:
             data = json.loads(text)
         except Exception:
             data = {"text": text}
-        self._save_data_as_xlsx(data, save_path)
+        self._save_data_as_xlsx(data, save_path, overwrite=self._overwrite_current)
 
     @staticmethod
-    def _save_versioned_text(save_path: Path, text: str, encoding: str = "utf-8") -> None:
-        save_versioned_bytes(save_path, text.encode(encoding))
+    def _save_versioned_text(
+        save_path: Path, text: str, encoding: str = "utf-8", *, overwrite: bool = False,
+    ) -> None:
+        data = text.encode(encoding)
+        if overwrite:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(data)
+            return
+        save_versioned_bytes(save_path, data)
 
     @staticmethod
-    def _save_workbook_versioned(save_path: Path, wb) -> None:
+    def _save_workbook_versioned(save_path: Path, wb, *, overwrite: bool = False) -> None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = save_path.parent / f".{save_path.stem}.{time.time_ns()}{save_path.suffix or '.xlsx'}"
         wb.save(str(tmp_path))
+        if overwrite:
+            from spider_gd.core.custom_filename import overwrite_file
+            overwrite_file(tmp_path, save_path)
+            return
         save_versioned_file(tmp_path, save_path)
 
     @staticmethod
-    def _save_data_as_xlsx(data: Any, save_path: Path) -> None:
+    def _save_data_as_xlsx(data: Any, save_path: Path, *, overwrite: bool = False) -> None:
         from openpyxl import Workbook
 
         wb = Workbook()
@@ -4557,7 +4653,7 @@ class WorkflowRunner:
         else:
             ws.cell(row=1, column=1, value=str(data))
 
-        WorkflowRunner._save_workbook_versioned(save_path, wb)
+        WorkflowRunner._save_workbook_versioned(save_path, wb, overwrite=overwrite)
 
     async def _do_switch_tab(self, step: dict) -> None:
         """切换到指定标签页。index: 0=第一个, -1=最后一个。"""
@@ -4648,7 +4744,10 @@ class WorkflowRunner:
 
         save_path = self._resolve_save_path(save_as, "extracted.json")
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        self._save_versioned_text(save_path, json.dumps(result, ensure_ascii=False, indent=2))
+        self._save_versioned_text(
+            save_path, json.dumps(result, ensure_ascii=False, indent=2),
+            overwrite=self._overwrite_current,
+        )
         self._note_file("saved", save_path)
         logger.info("  数据保存到: {}", save_path)
 
@@ -5327,7 +5426,10 @@ class WorkflowRunner:
 
         if fmt == "json":
             save_path = save_path.with_suffix(".json")
-            self._save_versioned_text(save_path, json.dumps(rows, ensure_ascii=False, indent=2))
+            self._save_versioned_text(
+                save_path, json.dumps(rows, ensure_ascii=False, indent=2),
+                overwrite=self._overwrite_current,
+            )
         elif fmt == "xlsx":
             save_path = save_path.with_suffix(".xlsx")
             self._save_grid_as_xlsx(rows, save_path)
@@ -5337,7 +5439,10 @@ class WorkflowRunner:
             output = io.StringIO()
             writer = _csv.writer(output)
             writer.writerows(rows)
-            self._save_versioned_text(save_path, output.getvalue(), encoding="utf-8-sig")
+            self._save_versioned_text(
+                save_path, output.getvalue(), encoding="utf-8-sig",
+                overwrite=self._overwrite_current,
+            )
 
         self._note_file("saved", save_path)
         logger.success("  表格保存 → {}", save_path)
@@ -5709,7 +5814,10 @@ class WorkflowRunner:
                     table = merge_calendar_rows(existing_rows, table)
                 except Exception as exc:
                     logger.warning("  旧交易日历读取失败，按新文件写入: {}", exc)
-            self._save_versioned_text(save_path, calendar_csv_text(table), encoding="utf-8-sig")
+            self._save_versioned_text(
+                save_path, calendar_csv_text(table), encoding="utf-8-sig",
+                overwrite=self._overwrite_current,
+            )
             saved += 1
             logger.success("  交易日历已保存 → {}（{} 行）", save_path, len(table) - 1)
             self._on_event({"event": "calendar_saved", "path": str(save_path),
@@ -5802,7 +5910,7 @@ class WorkflowRunner:
             for ci, val in enumerate(row, start=1):
                 if val:
                     ws.cell(row=ri, column=ci, value=val)
-        WorkflowRunner._save_workbook_versioned(Path(save_path), wb)
+        self._save_workbook_versioned(Path(save_path), wb, overwrite=self._overwrite_current)
 
     async def _do_extract_echarts(self, step: dict) -> None:
         """提取页面中 ECharts 图表的 option 数据。
@@ -5873,7 +5981,10 @@ class WorkflowRunner:
             self._save_echarts_as_xlsx(raw, save_path)
         else:
             save_path = save_path.with_suffix(".json")
-            self._save_versioned_text(save_path, json.dumps(raw, ensure_ascii=False, indent=2))
+            self._save_versioned_text(
+                save_path, json.dumps(raw, ensure_ascii=False, indent=2),
+                overwrite=self._overwrite_current,
+            )
         errors = [
             str(item.get("_error") or "")
             for item in raw
@@ -6011,7 +6122,7 @@ class WorkflowRunner:
         else:
             ws.cell(row=1, column=1, value=str(extracted))
 
-        self._save_workbook_versioned(save_path, wb)
+        self._save_workbook_versioned(save_path, wb, overwrite=self._overwrite_current)
         if isinstance(extracted, dict) and "_error" in extracted:
             self._note_file("failed", save_path, reason=str(extracted["_error"]))
             logger.error("  拦截数据失败: {}", extracted["_error"])
@@ -6128,7 +6239,7 @@ class WorkflowRunner:
         else:
             ws.cell(row=1, column=1, value=str(data))
 
-        self._save_workbook_versioned(save_path, wb)
+        self._save_workbook_versioned(save_path, wb, overwrite=self._overwrite_current)
         if isinstance(data, dict) and "_error" in data:
             self._note_file("failed", save_path, reason=str(data["_error"]))
             logger.error("  API 数据失败: {}", data["_error"])
@@ -6204,7 +6315,7 @@ class WorkflowRunner:
                 if isinstance(chart, dict) and "_error" in chart:
                     ws.cell(row=i + 1, column=1, value=f"Chart {i}: {chart['_error']}")
 
-        WorkflowRunner._save_workbook_versioned(Path(save_path), wb)
+        self._save_workbook_versioned(Path(save_path), wb, overwrite=self._overwrite_current)
 
     @staticmethod
     def _step_summary(step: dict) -> str:

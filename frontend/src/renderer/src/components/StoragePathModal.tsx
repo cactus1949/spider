@@ -8,8 +8,10 @@ import {
   Modal,
   Select,
   Space,
+  Switch,
   Tag,
-  Tooltip
+  Tooltip,
+  Typography
 } from 'antd'
 import {
   CalendarOutlined,
@@ -25,6 +27,12 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { api, type WorkflowInfo, type WorkflowOutput } from '../services/api'
+import {
+  fileSuffix,
+  previewCustomFilename,
+  validateCustomFilename,
+  type CustomFileNames
+} from './customFilename'
 
 export const DEFAULT_PATH_TEMPLATE = ''
 export const LEGACY_PATH_TEMPLATE = '{YYYY-MM}/{YYYY-MM-DD}'
@@ -99,6 +107,9 @@ interface StoragePathModalProps {
   onChange?: (structure: string, blocked: boolean) => void
   onCancel?: () => void
   onSave?: (structure: string) => void
+  /** 仅当前任务。键是 指标::输出key。旧任务没有这个字段。 */
+  customNames?: CustomFileNames
+  onCustomNamesChange?: (names: CustomFileNames) => void
 }
 
 const ROOT_ID = 'root'
@@ -561,7 +572,9 @@ export default function StoragePathModal({
   rootHint = '在设置里修改',
   onChange,
   onCancel,
-  onSave
+  onSave,
+  customNames = {},
+  onCustomNamesChange
 }: StoragePathModalProps): JSX.Element {
   const { message, modal } = AntApp.useApp()
   const [nodes, setNodes] = useState<PathNode[]>([])
@@ -579,6 +592,13 @@ export default function StoragePathModal({
     conflicts: []
   })
   const [checking, setChecking] = useState(false)
+  const [nameEditor, setNameEditor] = useState<{
+    canonical: string
+    title: string
+    suffix: string
+    enabled: boolean
+    template: string
+  } | null>(null)
   // 嵌入时所见即所得：初始化完就回传。旧任务的空结构是按 save_as 目录回显的，而运行时已忽略这些目录
   const [ready, setReady] = useState(false)
   const [startedEmpty, setStartedEmpty] = useState(false)
@@ -1006,6 +1026,12 @@ export default function StoragePathModal({
     const parent = outputParent(rawLabel, windowLabel)
     const output = findOutput(workflows, node.indicator || '', node.outputKey || '')
     const position = output?.duplicate ? output.position || output.key : ''
+    const canonical = outputCanonical(node.indicator || '', node.outputKey || '')
+    const custom = customNames[canonical]
+    const suffix = fileSuffix(output?.save_as || rawLabel)
+    const customPreview = custom?.enabled
+      ? previewCustomFilename(custom.template, suffix)
+      : ''
     const invalid = isInvalidFile(node, preview.invalid)
     const duplicate = preview.conflicts.includes(outputCanonical(node.indicator || '', node.outputKey || ''))
     const problem = invalid
@@ -1032,14 +1058,38 @@ export default function StoragePathModal({
         <Tooltip title={problem || `${source}：${fullLabel}；拖动可换位置`} placement="topLeft">
           <span className="sp-file-main">
             <FileTextOutlined className="sp-file-icon" />
-            <span className="sp-file-name">{parent ? `[${parent}] ` : ''}{label}</span>
-            <span className="sp-file-source">{source}</span>
-            {position && <span className="sp-pos">{position}</span>}
-            {invalid && <Tag color="error" bordered={false}>已失效</Tag>}
-            {!invalid && duplicate && <Tag color="error" bordered={false}>同目录重名</Tag>}
+            <span className="sp-file-text">
+              <span className="sp-file-line">
+                <span className="sp-file-name">{parent ? `[${parent}] ` : ''}{label}</span>
+                <span className="sp-file-source">{source}</span>
+                {position && <span className="sp-pos">{position}</span>}
+                {invalid && <Tag color="error" bordered={false}>已失效</Tag>}
+                {!invalid && duplicate && <Tag color="error" bordered={false}>同目录重名</Tag>}
+              </span>
+              {customPreview && (
+                <span className="sp-file-custom">{customPreview}</span>
+              )}
+            </span>
           </span>
         </Tooltip>
         <span className="sp-actions">
+          <Button
+            size="small"
+            type="link"
+            className="sp-edit"
+            onClick={(event) => {
+              event.stopPropagation()
+              setNameEditor({
+                canonical,
+                title: `${parent ? `[${parent}] ` : ''}${label} ${source}`.trim(),
+                suffix,
+                enabled: Boolean(custom?.enabled),
+                template: custom?.template || ''
+              })
+            }}
+          >
+            编辑
+          </Button>
           <Tooltip title="移出结构">
             <Button
               size="small"
@@ -1371,22 +1421,90 @@ export default function StoragePathModal({
       </Space>
   )
 
-  if (embedded) return body
+  const nameError = nameEditor?.enabled ? validateCustomFilename(nameEditor.template) : ''
+  const namePreview = nameEditor && nameEditor.enabled
+    ? previewCustomFilename(nameEditor.template, nameEditor.suffix)
+    : ''
+  const nameDialog = (
+    <Modal
+      title="自定义文件名"
+      open={Boolean(nameEditor)}
+      onCancel={() => setNameEditor(null)}
+      okText="确定"
+      cancelText="取消"
+      okButtonProps={{ disabled: Boolean(nameError) }}
+      destroyOnClose
+      onOk={() => {
+        if (!nameEditor) return
+        if (nameEditor.enabled && validateCustomFilename(nameEditor.template)) return
+        const template = nameEditor.template.trim()
+        const next = { ...customNames }
+        if (!template) delete next[nameEditor.canonical]
+        else next[nameEditor.canonical] = { enabled: nameEditor.enabled, template }
+        onCustomNamesChange?.(next)
+        setNameEditor(null)
+      }}
+    >
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        仅对当前任务生效。只填文件名，扩展名仍用原文件的 {nameEditor?.suffix || '.xlsx'}。
+        重名时直接覆盖旧文件。
+      </Typography.Paragraph>
+      <div className="sp-name-switch">
+        <span>启用自定义命名</span>
+        <Switch
+          checked={Boolean(nameEditor?.enabled)}
+          onChange={(enabled) => setNameEditor((current) => (current ? { ...current, enabled } : current))}
+        />
+      </div>
+      <Input
+        value={nameEditor?.template || ''}
+        disabled={!nameEditor?.enabled}
+        placeholder="现货分时分类型出清电量-日前-{yyyyMMdd}"
+        status={nameError ? 'error' : undefined}
+        suffix={nameEditor?.suffix || '.xlsx'}
+        onChange={(event) => {
+          const template = event.target.value
+          setNameEditor((current) => (current ? { ...current, template } : current))
+        }}
+      />
+      {nameError && <div className="sp-name-error">{nameError}</div>}
+      {namePreview && <div className="sp-name-preview">预览：{namePreview}</div>}
+      <Typography.Paragraph type="secondary" className="sp-name-help">
+        变量取数据日期。补数据跨多天时，每天的文件用各自的日期。
+        {'{yyyy}'} 年，{'{MM}'} 月，{'{dd}'} 日，{'{yyyyMM}'}，{'{yyyyMMdd}'}，
+        {'{yyyy-MM}'}，{'{yyyy-MM-dd}'}。
+        示例：现货分时分类型出清电量-日前-{'{yyyyMMdd}'}，预览为
+        现货分时分类型出清电量-日前-20261112.xlsx。
+      </Typography.Paragraph>
+    </Modal>
+  )
+
+  if (embedded) {
+    return (
+      <>
+        {body}
+        {nameDialog}
+      </>
+    )
+  }
 
   return (
-    <Modal
-      title="存储结构"
-      open={open}
-      onCancel={onCancel}
-      width={1060}
-      destroyOnClose
-      styles={{ body: { maxHeight: '80vh', overflowY: 'auto' } }}
-      okText="保存"
-      cancelText="取消"
-      okButtonProps={{ disabled: saveDisabled }}
-      onOk={() => onSave?.(structureText)}
-    >
-      {body}
-    </Modal>
+    <>
+      <Modal
+        title="存储结构"
+        open={open}
+        onCancel={onCancel}
+        width={1060}
+        destroyOnClose
+        styles={{ body: { maxHeight: '80vh', overflowY: 'auto' } }}
+        okText="保存"
+        cancelText="取消"
+        okButtonProps={{ disabled: saveDisabled }}
+        onOk={() => onSave?.(structureText)}
+      >
+        {body}
+      </Modal>
+      {nameDialog}
+    </>
   )
 }
