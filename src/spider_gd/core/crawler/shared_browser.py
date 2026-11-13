@@ -1072,7 +1072,9 @@ class SharedBrowser:
                 return {"state": "unauthenticated", "reason": PAGE_LOAD_FAILED_MESSAGE}
             if urlsplit(page.url).netloc != urlsplit(self._config["target_origin"]).netloc:
                 return {"state": "unauthenticated", "reason": "当前页面不是配置的业务站点"}
-            if await page.locator(".ant-modal-confirm").first.is_visible():
+            from spider_gd.core.crawler.workbench_popup import read_workbench_popup
+
+            if await read_workbench_popup(page):
                 return {"state": "challenge", "reason": "业务页面存在待处理弹窗"}
             if is_public_portal_url(page.url):
                 return {"state": "unauthenticated", "reason":

@@ -3041,6 +3041,56 @@ class WorkflowRunner:
             raise WorkflowExecutionError(f"坐标点击失败：{selector}") from exc
         return True
 
+    async def _low_profile_click_box(self, box: dict) -> None:
+        """按已经读到的坐标点击。轨迹和按压与 ``_low_profile_click`` 相同。
+
+        坐标来自同一次弹窗读取，这里不再查选择器，避免多一次页面脚本。
+
+        Args:
+            box: 含 ``x``、``y``、``width``、``height`` 的按钮矩形。
+
+        Returns:
+            None: 点击结束后返回。
+
+        Examples:
+            >>> WorkflowRunner._low_profile_click_box.__name__
+            '_low_profile_click_box'
+        """
+        await self._bring_page_to_front(self.page)
+        await self._press_at(box)
+
+    async def dismiss_workbench_popups(self) -> None:
+        """关掉工作台上不改业务状态的弹窗。关不掉就暂停。
+
+        Returns:
+            None: 没有弹窗，或已经关掉后返回。
+
+        Examples:
+            >>> WorkflowRunner.dismiss_workbench_popups.__name__
+            'dismiss_workbench_popups'
+        """
+        from spider_gd.core.crawler.workbench_popup import (
+            close_workbench_popups,
+            read_workbench_popup,
+        )
+
+        async def read():
+            return await read_workbench_popup(self.page)
+
+        async def click(box: dict) -> None:
+            await self._low_profile_click_box(box)
+
+        async def pause(message: str) -> None:
+            await self._pause_and_wait(message)
+
+        async def wait() -> None:
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+
+        def log(text: str) -> None:
+            logger.info("  关闭工作台弹窗: {}", text)
+
+        await close_workbench_popups(read, click, pause, wait, log)
+
     async def _low_profile_fill(self, selector: str, value: str) -> bool:
         if not await self._low_profile_click(selector, timeout=3000):
             return False
@@ -3166,6 +3216,7 @@ class WorkflowRunner:
             self.pages = [item for item in self.pages if item is not other]
         self._bind_page(page)
         logger.info("  已绑定登录后的工作台: {}", self._page_url(page))
+        await self.dismiss_workbench_popups()
 
     async def _await_login_landing(self, step: dict) -> None:
         """等登录成功信号，而不是固定睡几秒再查一次。
