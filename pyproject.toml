@@ -1,6 +1,6 @@
 [project]
 name = "spider-gd"
-version = "0.1.4"
+version = "0.2.0"
 description = "广东电力交易数据智能采集系统"
 requires-python = ">=3.11"
 readme = "README.md"
