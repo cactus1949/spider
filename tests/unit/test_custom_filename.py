@@ -3,6 +3,8 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from spider_gd.core.custom_filename import (
     active_templates,
     filename_suffix,
@@ -13,6 +15,27 @@ from spider_gd.core.custom_filename import (
     validate_custom_filename,
 )
 from workflow_runner import WorkflowRunner, plan_download_files
+
+
+def test_placeholder_tokens_match_as_a_whole():
+    when = date(2026, 1, 2)
+    assert render_custom_filename("{yyyy-MM-dd}", when, ".xlsx") == "2026-01-02.xlsx"
+    assert render_custom_filename("{yyyy}", when, ".xlsx") == "2026.xlsx"
+    assert render_custom_filename("{yyyy}-{yyyy-MM-dd}", when, ".xlsx") == "2026-2026-01-02.xlsx"
+    assert "成对" in validate_custom_filename("电量-{yyyy")
+    assert "成对" in validate_custom_filename("电量-yyyy}")
+    assert "成对" in validate_custom_filename("{yyyy{MM}}")
+    assert "不认识" in validate_custom_filename("电量-{week}")
+
+
+def test_filename_edges():
+    assert "保留名" in validate_custom_filename("lpt9")
+    assert "保留名" in validate_custom_filename("AUX.{yyyy}")
+    assert "空格或点" in validate_custom_filename("电量.")
+    assert "空格或点" in validate_custom_filename(" 电量")
+    assert "不能包含" in validate_custom_filename("电量\n日前")
+    assert validate_custom_filename("a" * 180) == ""
+    assert validate_custom_filename("a" * 181) == "文件名过长"
 
 
 def test_placeholders_render_with_the_business_date():
@@ -78,6 +101,22 @@ def test_custom_name_outranks_yaml_and_missing_keeps_yaml(tmp_path: Path):
     assert filename_suffix("原名_{date}.xlsx") == ".xlsx"
 
 
+def test_export_path_uses_each_business_day(tmp_path: Path):
+    runner = WorkflowRunner(
+        {"name": "n", "steps": []},
+        download_dir=str(tmp_path),
+        custom_filenames={"s0": "日前-{yyyyMMdd}"},
+    )
+    runner._executing_step_index = 0
+    runner.target_date = date(2026, 11, 11)
+    first = runner._export_path("原名_{date}.xlsx", "站点.xlsx")
+    runner.target_date = date(2026, 11, 12)
+    second = runner._export_path("原名_{date}.xlsx", "站点.xlsx")
+    assert first.name == "日前-20261111.xlsx"
+    assert second.name == "日前-20261112.xlsx"
+    assert first.parent == second.parent == tmp_path
+
+
 def test_each_catchup_day_uses_its_own_date(tmp_path: Path):
     files = plan_download_files(
         {"steps": [{"action": "repeat", "steps": [
@@ -115,8 +154,13 @@ def test_catchup_inherits_task_custom_names_until_this_run_overrides_them():
     assert replaced["custom_filenames"] == {}
 
 
-def test_duplicate_custom_name_overwrites_the_old_file(tmp_path: Path):
+def test_duplicate_custom_name_overwrites_only_the_target_file(tmp_path: Path):
     dest = tmp_path / "日前-20261112.xlsx"
+    sibling = tmp_path / "其他.xlsx"
+    folder = tmp_path / "目录.xlsx"
+    sibling.write_bytes(b"keep")
+    folder.mkdir()
+    (folder / "inside.txt").write_text("stay", encoding="utf-8")
     first = tmp_path / "first.tmp"
     second = tmp_path / "second.tmp"
     first.write_bytes(b"old")
@@ -124,6 +168,59 @@ def test_duplicate_custom_name_overwrites_the_old_file(tmp_path: Path):
     overwrite_file(first, dest)
     overwrite_file(second, dest)
     assert dest.read_bytes() == b"new"
+    assert sibling.read_bytes() == b"keep"
+    assert (folder / "inside.txt").read_text(encoding="utf-8") == "stay"
     assert not first.exists()
     assert not second.exists()
     assert list(tmp_path.glob("_versions/*")) == []
+    missing = tmp_path / "missing.tmp"
+    with pytest.raises(FileNotFoundError):
+        overwrite_file(missing, dest)
+    assert dest.read_bytes() == b"new"
+    with pytest.raises(IsADirectoryError):
+        overwrite_file(sibling, folder)
+    assert (folder / "inside.txt").exists()
+
+
+def test_old_task_database_gains_empty_custom_names(tmp_path: Path):
+    import sqlite3
+
+    from spider_gd.infrastructure.storage.database import TaskStateStore
+
+    db_path = tmp_path / "old.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE task_configs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            login TEXT NOT NULL DEFAULT '',
+            indicators TEXT NOT NULL DEFAULT '[]',
+            repeat TEXT NOT NULL DEFAULT 'daily',
+            time TEXT NOT NULL DEFAULT '09:00',
+            weekdays TEXT NOT NULL DEFAULT '[]',
+            backfill_days INTEGER NOT NULL DEFAULT 1,
+            cover_days INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            remark TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        )"""
+    )
+    conn.execute(
+        "INSERT INTO task_configs (id, name, indicators, created_at, updated_at) "
+        "VALUES ('old', '旧任务', '[\"日前\"]', 1, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = TaskStateStore(db_path)
+    loaded = store.get_task_config("old")
+    assert loaded is not None
+    assert loaded["name"] == "旧任务"
+    assert loaded["indicators"] == ["日前"]
+    assert loaded["custom_filenames"] == {}
+    store.close()
+
+    again = TaskStateStore(db_path)
+    assert again.get_task_config("old")["custom_filenames"] == {}
+    again.close()

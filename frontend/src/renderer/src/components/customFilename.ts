@@ -11,7 +11,9 @@ export const FILENAME_PLACEHOLDERS = [
   'yyyy-MM-dd'
 ] as const
 
-const PLACEHOLDER = /\{([^{}]*)\}/g
+function placeholderPattern(): RegExp {
+  return /\{([^{}]*)\}/g
+}
 const RESERVED = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
   ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
@@ -45,7 +47,7 @@ export function validateCustomFilename(template: string): string {
   const opens = text.split('{').length - 1
   const closes = text.split('}').length - 1
   if (opens !== closes) return '花括号要成对'
-  const stripped = text.replace(PLACEHOLDER, '')
+  const stripped = text.replace(placeholderPattern(), '')
   if (stripped.includes('{') || stripped.includes('}')) return '花括号要成对'
   const tokens = [...text.matchAll(/\{([^{}]*)\}/g)].map((item) => item[1])
   for (const token of tokens) {
@@ -79,5 +81,5 @@ function renderStem(template: string): string {
     'yyyy-MM': '2026-11',
     'yyyy-MM-dd': '2026-11-12'
   }
-  return template.replace(/\{([^{}]*)\}/g, (_all, token: string) => sample[token] || '')
+  return template.replace(placeholderPattern(), (_all, token: string) => sample[token] || '')
 }

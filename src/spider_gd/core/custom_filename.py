@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
+import os
 import re
-import shutil
 from datetime import date
 from pathlib import Path
 
@@ -120,7 +120,10 @@ def render_custom_filename(template: str, when: date, suffix: str) -> str:
         raise ValueError(error)
     stem = _render_stem(str(template).strip(), when)
     extension = _normalize_suffix(suffix)
-    return f"{stem}{extension}"
+    filename = f"{stem}{extension}"
+    if len(filename) > 255 or Path(filename).name != filename:
+        raise ValueError("文件名过长" if len(filename) > 255 else "文件名不能包含路径")
+    return filename
 
 
 def filename_suffix(save_as: str, default: str = ".xlsx") -> str:
@@ -240,14 +243,22 @@ def templates_for_indicator(mapping: object, indicator: str) -> dict[str, str]:
 
 
 def overwrite_file(source: str | Path, dest: str | Path) -> None:
-    """用新文件替换目标。目标已存在时直接覆盖，不另存版本。
+    """用新文件替换目标文件。目标已存在时直接覆盖，不另存版本。
+
+    只替换 ``dest`` 这一个文件。源文件不存在、目标是目录，或文件名带路径时直接失败，
+    不会先删掉目标。
 
     Args:
-        source: 刚下载的临时文件。
-        dest: 最终路径。
+        source: 刚下载的临时文件，必须已经存在。
+        dest: 最终文件路径。文件名本身不能带目录。
 
     Returns:
         None: 替换完成后返回。临时文件不再保留。
+
+    Raises:
+        FileNotFoundError: 源文件不存在。目标保持原样。
+        IsADirectoryError: 目标是目录。
+        ValueError: 文件名带有路径。
 
     Examples:
         >>> overwrite_file.__name__
@@ -255,10 +266,17 @@ def overwrite_file(source: str | Path, dest: str | Path) -> None:
     """
     source_path = Path(source)
     dest_path = Path(dest)
+    leaf = dest_path.name
+    if leaf in {"", ".", ".."} or leaf != Path(leaf).name or "/" in leaf or "\\" in leaf:
+        raise ValueError("文件名不能包含路径")
+    if not source_path.is_file():
+        raise FileNotFoundError(source_path)
+    if dest_path.exists() and not dest_path.is_file():
+        raise IsADirectoryError(dest_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    if dest_path.exists():
-        dest_path.unlink()
-    shutil.move(str(source_path), dest_path)
+    if source_path.resolve() == dest_path.resolve():
+        return
+    os.replace(source_path, dest_path)
 
 
 def _render_stem(template: str, when: date) -> str:
