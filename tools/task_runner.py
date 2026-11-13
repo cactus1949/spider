@@ -45,7 +45,12 @@ from spider_gd.core.dates import (
     read_output_windows,
 )
 from spider_gd.core.workflow_outputs import workflow_outputs
-from workflow_runner import WorkflowExecutionError, WorkflowRunner, plan_download_files
+from workflow_runner import (
+    WorkflowExecutionError,
+    WorkflowPaused,
+    WorkflowRunner,
+    plan_download_files,
+)
 
 
 def _sanitize_name(name: str) -> str:
@@ -846,6 +851,9 @@ class TaskRunner:
                             self._login_done = False
                     if self.login_name:
                         step_idx += 1
+                        await self._dismiss_workbench_popups()
+                        if self._failed:
+                            break
                         auth = await session.check_auth()
                         if auth["state"] == "authenticated":
                             self._login_done = True
@@ -861,6 +869,13 @@ class TaskRunner:
                         else:
                             _emit("task_step", step=step_idx, total=total_steps, phase="login",
                                   name=self.login_name, status="done", message="复用当前业务登录态")
+                        await self._dismiss_workbench_popups()
+                        if self._failed:
+                            break
+                    else:
+                        await self._dismiss_workbench_popups()
+                        if self._failed:
+                            break
                     self._summary = {"success": 0, "failed": 0, "skipped": 0}
                     for index, item in enumerate(runs):
                         if self._stopped or session._cancel_requested or self._failed:
@@ -1118,6 +1133,38 @@ class TaskRunner:
             return
         self._bind_session_page(target)
         await self._activate(target)
+        await self._dismiss_workbench_popups()
+
+    async def _dismiss_workbench_popups(self) -> None:
+        """进入或重新绑定工作台后，关掉不改业务状态的弹窗。
+
+        不在工作台时直接返回。关不掉时暂停整个任务。
+
+        Returns:
+            None: 弹窗已处理，或当前不是工作台。
+
+        Examples:
+            >>> TaskRunner._dismiss_workbench_popups.__name__
+            '_dismiss_workbench_popups'
+        """
+        from workbench_tabs import is_workbench_url
+
+        page = self._workbench_page if self._page_open(self._workbench_page) else None
+        if page is None and self._shared_pages:
+            index = min(self._current_page_idx, len(self._shared_pages) - 1)
+            page = self._shared_pages[index]
+        if page is None or not self._page_open(page) or not is_workbench_url(self._url(page)):
+            return
+        runner = WorkflowRunner(
+            {"name": "工作台", "steps": []}, download_dir=self.download_dir,
+        )
+        runner.pages = [page]
+        runner._wait_continue = self._wait_continue
+        runner._on_event = self._on_event or (lambda _event: None)
+        try:
+            await runner.dismiss_workbench_popups()
+        except WorkflowPaused as exc:
+            self._record_failure(str(exc), stop=True)
 
     async def _workbench_score(self, page) -> int:
         """给工作台打分：有结算菜单且已登录的优先。
@@ -1793,6 +1840,7 @@ class TaskRunner:
             except Exception:
                 current = ""
             if "powerEnterprise" in current:
+                await self._dismiss_workbench_popups()
                 return
             try:
                 found = await page.evaluate(
