@@ -4142,9 +4142,20 @@ class WorkflowRunner:
 
         saved = await self._save_attachment_buttons(
             base, timeout, ".attachments button", title=title, notice_id=notice_id,
+            require_year=(self.target_date or date.today()).year,
         )
         if saved == 0:
             raise WorkflowExecutionError(f"运行日报没有下载到附件：{title}")
+
+    def _report_download_matches_year(self, filename: str, path: Path, year: int) -> bool:
+        """下载文件的原名或 PDF 标题是否含目标年份。"""
+        from spider_gd.core.report_dates import report_file_has_year
+
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            payload = b""
+        return report_file_has_year(filename, payload, year)
 
     async def _save_attachment_buttons(
         self,
@@ -4154,6 +4165,7 @@ class WorkflowRunner:
         *,
         title: str = "",
         notice_id: int | None = None,
+        require_year: int | None = None,
     ) -> int:
         """逐个点击详情页附件按钮并保存；返回成功保存的数量。"""
         saved = 0
@@ -4182,6 +4194,13 @@ class WorkflowRunner:
             save_path = base / safe_name
             tmp_path = base / f".{safe_name}.{time.time_ns()}.tmp"
             await download.save_as(str(tmp_path))
+            if require_year is not None and not self._report_download_matches_year(
+                suggested, tmp_path, require_year,
+            ):
+                tmp_path.unlink(missing_ok=True)
+                reason = f"运行日报年份不符：目标 {require_year} 年，文件「{suggested}」"
+                self._note_file("failed", reason=reason, when=self.target_date)
+                raise WorkflowDateExportFailed(reason)
             result = save_versioned_file(tmp_path, save_path)
             saved += 1
             self._emit(
@@ -4768,6 +4787,15 @@ class WorkflowRunner:
         await self.page.screenshot(path=str(path), full_page=True)
         logger.info("  截图保存: {}", path)
 
+    def _report_query_fill(self, value: str) -> str:
+        """运行日报才把日期填空换成带年份的查询词。其他工作流返回空字符串。"""
+        from spider_gd.core.report_dates import is_report_workflow, report_fill_value
+
+        name = str(self.config.get("name") or self.config.get("_control_name") or "")
+        if not is_report_workflow(name):
+            return ""
+        return report_fill_value(value, self.target_date or date.today()) or ""
+
     async def _do_fill(self, step: dict) -> None:
         """在输入框中填入文本。"""
         selector = step.get("selector", "")
@@ -4778,6 +4806,8 @@ class WorkflowRunner:
         if isinstance(value, str) and "{target_ym}" in value:
             target = self.target_date or date.today()
             value = value.replace("{target_ym}", f"{target.year}年{target.month}月")
+        elif query := self._report_query_fill(str(value)):
+            value = query
         elif value in {"today", "yesterday", "{target}"} or (
             isinstance(value, str) and re.fullmatch(r"-\d+d", value)
         ):
@@ -5735,6 +5765,7 @@ class WorkflowRunner:
         logger.info("  读取交易日历: {}", selector)
         network_view = ""
         rows: list = []
+        authoritative_dates: list[str] = []
         if step.get("from_network"):
             payload = await self._await_calendar_payload(
                 getattr(self, "_calendar_payload_baseline", 0),
@@ -5756,6 +5787,17 @@ class WorkflowRunner:
                     )
                 rows = self._limit_calendar_rows(parsed)
                 network_view = "周"
+                authoritative_dates = self._calendar_week_dates()
+                event_dates = sorted({
+                    str(item.get("date") or "")
+                    for item in rows
+                    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(item.get("date") or ""))
+                })
+                logger.info(
+                    "  交易日历这一周接口覆盖日期: {}；有事件: {}",
+                    "、".join(authoritative_dates) or "无",
+                    "、".join(event_dates) or "无",
+                )
         if not network_view:
             try:
                 raw = await self.page.evaluate(
@@ -5776,6 +5818,8 @@ class WorkflowRunner:
             await self._ensure_calendar_settled(
                 getattr(self, "_calendar_watch_baseline", 0), timeout_ms=2000,
             )
+            if authoritative_dates:
+                self._replace_calendar_week(step, authoritative_dates)
             if not strict:
                 if step.get("from_network"):
                     logger.info("  交易日历目标周没有交易事件，跳过")
@@ -5811,7 +5855,14 @@ class WorkflowRunner:
                 try:
                     with save_path.open("r", encoding="utf-8-sig", newline="") as fh:
                         existing_rows = list(_csv.DictReader(fh))
-                    table = merge_calendar_rows(existing_rows, table)
+                    table = merge_calendar_rows(
+                        existing_rows,
+                        table,
+                        replace_dates=[
+                            item for item in authoritative_dates
+                            if item.startswith(output_month)
+                        ],
+                    )
                 except Exception as exc:
                     logger.warning("  旧交易日历读取失败，按新文件写入: {}", exc)
             self._save_versioned_text(
@@ -5833,6 +5884,55 @@ class WorkflowRunner:
                 self._note_calendar_empty(step)
                 return
             raise WorkflowExecutionError("交易日历读取失败: 目标周没有交易事件")
+
+    def _calendar_week_dates(self) -> list[str]:
+        """这次翻到的一周里、属于目标月的日期。没有目标周时为空。"""
+        monday = getattr(self, "_calendar_shown_monday", None)
+        if not isinstance(monday, date):
+            return []
+        days = [monday + timedelta(days=offset) for offset in range(7)]
+        month = getattr(self, "query_month", None)
+        if isinstance(month, date):
+            prefix = month.strftime("%Y-%m")
+            days = [item for item in days if item.strftime("%Y-%m") == prefix]
+        return [item.isoformat() for item in days]
+
+    def _replace_calendar_week(self, step: dict, dates: list[str]) -> None:
+        """接口确认这一周没有事件时，从已有 CSV 去掉这些日期，不把旧行补回来。"""
+        import csv as _csv
+
+        from calendar_data import CALENDAR_COLUMNS, calendar_csv_text, merge_calendar_rows
+
+        by_month: dict[str, list[str]] = {}
+        for iso in dates:
+            by_month.setdefault(iso[:7], []).append(iso)
+        save_as = str(step.get("save_as") or "交易日历{month_iso}.csv")
+        for month, month_dates in by_month.items():
+            compact = month.replace("-", "")
+            save_name = save_as.replace("{month_iso}", month).replace("{month}", compact)
+            save_path = self._resolve_save_path(save_name, f"交易日历{month}.csv")
+            if save_path.suffix.lower() != ".csv":
+                save_path = save_path.with_suffix(".csv")
+            if not save_path.exists():
+                logger.info(
+                    "  交易日历 {} 接口没有这些日期的事件，也没有旧文件: {}",
+                    month, "、".join(month_dates),
+                )
+                continue
+            try:
+                with save_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                    existing_rows = list(_csv.DictReader(handle))
+            except Exception as exc:
+                logger.warning("  旧交易日历读取失败，不改文件: {}", exc)
+                continue
+            table = merge_calendar_rows(
+                existing_rows, [list(CALENDAR_COLUMNS)], replace_dates=month_dates,
+            )
+            self._save_versioned_text(
+                save_path, calendar_csv_text(table), encoding="utf-8-sig",
+                overwrite=self._overwrite_current,
+            )
+            logger.info("  交易日历已按接口去掉旧记录: {}", "、".join(month_dates))
 
     def _limit_calendar_rows(self, rows: list[dict]) -> list[dict]:
         """只留下当前这一周、并且落在任务目标月里的事件。

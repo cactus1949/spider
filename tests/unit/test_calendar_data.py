@@ -293,6 +293,68 @@ def test_find_trade_calendar_expands_one_row_per_record():
     assert "seqId" not in rows[0]["event"]
 
 
+def test_merge_drops_packed_api_rows_and_does_not_keep_a_week_the_site_left_empty():
+    existing = [
+        {
+            "日期": "2026-11-01",
+            "交易名称": '[{"seqName": "旧接口数组"}]',
+            "申报时间": "",
+            "交易时间范围": "",
+        },
+        {
+            "日期": "2026-11-02",
+            "交易名称": "旧假数据",
+            "申报时间": "11-02 09:00 ~ 11-02 10:00",
+            "交易时间范围": "2026-11-02 ~ 2026-11-03",
+        },
+        {
+            "日期": "2026-11-08",
+            "交易名称": "下一周仍保留",
+            "申报时间": "11-08 09:00 ~ 11-08 10:00",
+            "交易时间范围": "2026-11-08 ~ 2026-11-09",
+        },
+        {
+            "日期": "2026-11-09",
+            "交易名称": '[{"seqName": "另一周的旧格式"}]',
+        },
+    ]
+    fresh = build_calendar_table(
+        [{
+            "date": "2026-11-03",
+            "event": "网站新事件",
+            "time_range": "2026-11-03 ~ 2026-11-04",
+            "apply_time": "11-03 09:00 ~ 11-03 10:00",
+            "event_type": "正式",
+            "status": "未开始",
+        }],
+        month="2026-11",
+        view="周",
+        include_empty_days=False,
+        captured_at="2026-11-13 09:00:00",
+    )
+    week = [f"2026-11-0{day}" for day in range(1, 8)]
+    merged = merge_calendar_rows(existing, fresh, replace_dates=week)
+    names = [row[3] for row in merged[1:]]
+    assert '[{"seqName": "旧接口数组"}]' not in names
+    assert "旧假数据" not in names
+    assert '[{"seqName": "另一周的旧格式"}]' not in names
+    assert "网站新事件" in names
+    assert "下一周仍保留" in names
+
+
+def test_empty_api_week_removes_old_rows_for_those_dates_only():
+    existing = [
+        {"日期": "2026-11-01", "交易名称": "不该留下"},
+        {"日期": "2026-11-08", "交易名称": "其他周"},
+    ]
+    header = [
+        "日期", "星期", "时段", "交易名称", "交易时间范围", "申报时间",
+        "类型", "状态", "视图", "月份", "采集时间",
+    ]
+    merged = merge_calendar_rows(existing, [header], replace_dates=["2026-11-01"])
+    assert [row[3] for row in merged[1:]] == ["其他周"]
+
+
 def test_merge_keeps_capture_time_when_the_event_did_not_change():
     existing = [{
         "日期": "2026-10-01",

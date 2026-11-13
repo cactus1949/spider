@@ -577,6 +577,15 @@ def _resolve_relative_date_value(value: object, target: date) -> str:
     return text
 
 
+def _report_fill(cfg: dict, value: object, target: date) -> str:
+    """运行日报的查询词。其他工作流返回空字符串，沿用原来的月.日。"""
+    from spider_gd.core.report_dates import is_report_workflow, report_fill_value
+
+    if not is_report_workflow(str(cfg.get("name") or cfg.get("_control_name") or "")):
+        return ""
+    return report_fill_value(str(value or ""), target) or ""
+
+
 def apply_target_date_to_workflow(cfg: dict, target: date | None) -> dict:
     """Return a copied workflow config pinned to one target date."""
     copied = deepcopy(cfg)
@@ -590,6 +599,8 @@ def apply_target_date_to_workflow(cfg: dict, target: date | None) -> dict:
         action = step.get("action")
         if action == "pick_date" and _is_relative_date_value(step.get("value")):
             step["value"] = target.isoformat()
+        elif action == "fill" and _report_fill(copied, step.get("value"), target):
+            step["value"] = _report_fill(copied, step.get("value"), target)
         elif action == "fill" and step.get("value") == "{target}":
             step["value"] = f"{target.month}.{target.day:02d}"
         elif action == "fill" and isinstance(step.get("value"), str) and "{target_ym}" in step.get("value"):
