@@ -2698,6 +2698,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             "path_folders": cfg.get("path_folders") or [],
             "path_structure": cfg.get("path_structure", ""),
             "custom_filenames": cfg.get("custom_filenames") or {},
+            "ukey_station_ids": cfg.get("ukey_station_ids") or [],
         }
 
         # 使用任务配置的下载目录，否则用系统默认；任务可自定义日期分层模板
@@ -2822,7 +2823,11 @@ def _task_runner_job(ctx: AppContext, task_id: str):
         ).strip()
 
         station_queue: list[dict[str, str]] = []
-        from spider_gd.core.ukey_plan import collect_runtime_plan, format_station_report
+        from spider_gd.core.ukey_plan import (
+            collect_runtime_plan,
+            configured_ukey_ids,
+            format_station_report,
+        )
         from spider_gd.core.station_profile import parse_station_profiles
 
         try:
@@ -2832,7 +2837,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
         except ValueError as exc:
             saved_profiles = []
             logger.warning("场站设置无法读取，定时任务不按场站切换: {}", exc)
-        selected_ids = task_cfg.get("ukey_station_ids") or []
+        selected_ids = configured_ukey_ids(task_cfg)
         if saved_profiles or selected_ids:
             ukey_plan = collect_runtime_plan(
                 saved_profiles,

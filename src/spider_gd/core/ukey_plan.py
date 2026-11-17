@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from spider_gd.core.station_profile import (
     StationProfile,
+    normalize_org_name,
     org_name_matches,
     same_ukey,
     station_run_plan,
@@ -127,7 +128,8 @@ def select_available_cert(
 ) -> tuple[KnownCert | None, str]:
     """在当前可用证书里为场站找唯一一张。
 
-    缓存但私钥不可用的证书不算可用。同一单位有多张可用证书、又没有指纹时不选第一张。
+    缓存但私钥不可用的证书不算可用。同一单位在证书库里出现两张可用证书时，
+    仍视为这一站可以跑，证书窗口再按单位确认唯一一行。关键字同时对上多个不同单位时不选。
 
     Args:
         certs: 证书库读到的证书。
@@ -142,6 +144,12 @@ def select_available_cert(
         ...     [KnownCert("aa", "阳江公司", False)], "阳江",
         ... )
         >>> cert is None and "不在当前钥匙" in reason
+        True
+        >>> picked, why = select_available_cert(
+        ...     [KnownCert("aa", "阳江公司", True), KnownCert("bb", "阳江公司", True)],
+        ...     "阳江",
+        ... )
+        >>> picked is not None and why == ""
         True
     """
     wanted = thumbprint.strip().lower()
@@ -158,10 +166,15 @@ def select_available_cert(
             return None, "证书不在当前钥匙上"
         return None, "没有匹配的可用证书"
     hits = [item for item in available if org_name_matches(keyword, item.org_name)]
-    if len(hits) == 1:
+    distinct = {
+        normalize_org_name(item.org_name)
+        for item in hits
+        if normalize_org_name(item.org_name)
+    }
+    if len(distinct) > 1:
+        return None, "单位关键字匹配了多个不同单位"
+    if len(hits) >= 1:
         return hits[0], ""
-    if len(hits) > 1:
-        return None, "同单位有多张可用证书"
     cached_org = [
         item for item in certs
         if not item.available and org_name_matches(keyword, item.org_name)
@@ -360,6 +373,8 @@ def format_station_report(rows: Sequence[StationDecision | dict[str, str]]) -> s
             reason = str(item.get("reason") or "")
         if status == "ran":
             lines.append(f"场站 {name}：已执行")
+        elif status == "failed":
+            lines.append(f"场站 {name or '未命名'}：失败（{reason or '执行失败'}）")
         elif name or reason:
             lines.append(f"场站 {name or '未命名'}：未执行（{reason or '未执行'}）")
     return "\n".join(lines)
@@ -380,6 +395,120 @@ def release_ukey_run() -> None:
             _RUN_LOCK.release()
         except RuntimeError:
             return
+
+
+def configured_ukey_ids(cfg: dict | None) -> list[str]:
+    """读出任务配置里保存的场站编号。
+
+    Args:
+        cfg: 任务配置。没有这个字段时返回空列表。
+
+    Returns:
+        list[str]: 去重后仍保持原来的顺序。
+
+    Examples:
+        >>> configured_ukey_ids({"ukey_station_ids": ["a", "a", " b "]})
+        ['a', 'b']
+        >>> configured_ukey_ids(None)
+        []
+    """
+    if not isinstance(cfg, dict):
+        return []
+    raw = cfg.get("ukey_station_ids") or []
+    if isinstance(raw, str):
+        import json
+
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    found: list[str] = []
+    for item in raw:
+        text = str(item).strip()
+        if text and text not in found:
+            found.append(text)
+    return found
+
+
+def should_reuse_login(*, station_count: int, auth_state: str) -> bool:
+    """一次要跑多个场站时，不把当前页面当成已经登录。
+
+    Args:
+        station_count: 这次要执行的场站数。没有场站队列时为 1。
+        auth_state: ``check_auth`` 返回的状态。
+
+    Returns:
+        bool: 可以跳过登录流程时为 True。
+
+    Examples:
+        >>> should_reuse_login(station_count=2, auth_state="authenticated")
+        False
+        >>> should_reuse_login(station_count=1, auth_state="authenticated")
+        True
+    """
+    if station_count > 1:
+        return False
+    return auth_state == "authenticated"
+
+
+def login_page_can_be_skipped(force_login: bool, auth_state: str) -> bool:
+    """切场站时，上一站的工作台还开着也不能当成这一站已登录。
+
+    Args:
+        force_login: 这场站必须重新走登录。
+        auth_state: 当前页面看起来的登录状态。
+
+    Returns:
+        bool: 可以跳过登录表单时为 True。
+
+    Examples:
+        >>> login_page_can_be_skipped(True, "authenticated")
+        False
+        >>> login_page_can_be_skipped(False, "authenticated")
+        True
+    """
+    if force_login:
+        return False
+    return auth_state == "authenticated"
+
+
+def station_followup(
+    *,
+    user_cancelled: bool,
+    station_failed: bool,
+    more_stations: bool,
+) -> str:
+    """决定一个场站结束后，后面的场站还跑不跑。
+
+    用户取消才停下。某一站登录失败或出错，后面还有站就继续。
+
+    Args:
+        user_cancelled: 用户点了停止，或等待时取消。
+        station_failed: 这一站没有跑完。
+        more_stations: 队列里还有没开始的场站。
+
+    Returns:
+        str: ``stop`` 不再跑后面的站；``continue`` 这一站失败但继续；
+        ``next`` 这一站成功并且后面还有站；``finish`` 到此结束。
+
+    Examples:
+        >>> station_followup(user_cancelled=False, station_failed=True, more_stations=True)
+        'continue'
+        >>> station_followup(user_cancelled=True, station_failed=True, more_stations=True)
+        'stop'
+    """
+    if user_cancelled:
+        return "stop"
+    if station_failed and more_stations:
+        return "continue"
+    if more_stations:
+        return "next"
+    return "finish"
 
 
 def collect_runtime_plan(

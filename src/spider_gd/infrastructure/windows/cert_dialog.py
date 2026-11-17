@@ -5,6 +5,7 @@ Windows 上的点击要到现场用 UI Automation 验收。这里的匹配可以
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from dataclasses import dataclass
 
@@ -89,6 +90,220 @@ def match_dialog_row(rows: list[CertDialogRow], keyword: str) -> CertDialogResul
     return CertDialogResult(False, "证书窗口有多行匹配")
 
 
+_COLUMNS = ("颁发给", "单位", "截止日期", "颁发者")
+
+
+def assemble_certificate_rows(
+    headers: list[str],
+    row_cells: list[list[str]],
+) -> list[CertDialogRow]:
+    """按证书窗口的四列表头把单元格收成行。
+
+    缺任何一列表头时返回空列表，调用方就不能点确定。
+
+    Args:
+        headers: 表头原文，顺序与窗口一致。
+        row_cells: 每一行的单元格文字。
+
+    Returns:
+        list[CertDialogRow]: 能对上四列的行。
+
+    Examples:
+        >>> rows = assemble_certificate_rows(
+        ...     ["颁发给", "单位", "截止日期", "颁发者"],
+        ...     [["甲", "单位甲公司", "2031-01-01", "NETCA"]],
+        ... )
+        >>> rows[0].org_name
+        '单位甲公司'
+        >>> assemble_certificate_rows(["颁发给"], [["甲"]])
+        []
+    """
+    index = {title: pos for pos, title in enumerate(headers)}
+    if any(title not in index for title in _COLUMNS):
+        return []
+    rows: list[CertDialogRow] = []
+    for cells in row_cells:
+        def cell(title: str, cells: list[str] = cells) -> str:
+            pos = index[title]
+            return cells[pos] if pos < len(cells) else ""
+
+        if not any(cell(title).strip() for title in _COLUMNS):
+            continue
+        rows.append(CertDialogRow(
+            cell("颁发给"), cell("单位"), cell("截止日期"), cell("颁发者"),
+        ))
+    return rows
+
+
+def apply_dialog_choice(
+    rows: list[CertDialogRow],
+    keyword: str,
+    select,
+    selected,
+    invoke_ok,
+    invoke_cancel,
+) -> CertDialogResult:
+    """选中唯一一行，确认它仍然选中，再点确定。
+
+    对不上、有多行、或选中没有保持时，点取消把窗口放掉，不点确定。
+
+    Args:
+        rows: 已经读出的证书行。
+        keyword: 场站单位关键字。
+        select: 按行号选中。
+        selected: 返回这一行现在是不是仍被选中。
+        invoke_ok: 点击确定。
+        invoke_cancel: 点击取消。
+
+    Returns:
+        CertDialogResult: 只有确定已经被点下时 ``ok`` 为 True。
+
+    Examples:
+        >>> rows = [
+        ...     CertDialogRow("甲", "单位甲公司", "2031-01-01", "NETCA"),
+        ...     CertDialogRow("乙", "单位乙公司", "2031-01-01", "NETCA"),
+        ... ]
+        >>> chosen = {}
+        >>> result = apply_dialog_choice(
+        ...     rows, "单位甲",
+        ...     lambda index: chosen.__setitem__("index", index),
+        ...     lambda index: chosen.get("index") == index,
+        ...     lambda: chosen.__setitem__("ok", True),
+        ...     lambda: chosen.__setitem__("cancel", True),
+        ... )
+        >>> result.ok and chosen["ok"] and not chosen.get("cancel")
+        True
+    """
+    matched = match_dialog_row(rows, keyword)
+
+    def cancel() -> None:
+        try:
+            invoke_cancel()
+        except Exception:
+            return
+
+    if matched.row_index is None:
+        cancel()
+        return CertDialogResult(False, matched.reason or "证书窗口无法唯一确认")
+    try:
+        select(matched.row_index)
+    except Exception as exc:
+        cancel()
+        return CertDialogResult(False, f"无法选中证书行：{exc}")
+    try:
+        held = bool(selected(matched.row_index))
+    except Exception as exc:
+        cancel()
+        return CertDialogResult(False, f"无法确认证书行已选中：{exc}")
+    if not held:
+        cancel()
+        return CertDialogResult(False, "证书行没有保持选中")
+    try:
+        invoke_ok()
+    except Exception as exc:
+        cancel()
+        return CertDialogResult(False, f"无法点击确定：{exc}")
+    return CertDialogResult(True, "", matched.row_index)
+
+
+class CertificateWatch:
+    """在登录点击的同时看证书窗口。
+
+    点击若被原生窗口挡住，这个监视在另一条线程里选中唯一行并点确定，
+    点击才能返回。窗口没出现就结束，不额外空等一整段登录时间。
+    """
+
+    def __init__(
+        self,
+        keyword: str,
+        thumbprint: str = "",
+        *,
+        probe=None,
+        interval: float = 0.8,
+        sleeper=None,
+        clock=None,
+        cancelled=None,
+        timeout: float = 20.0,
+        after_click: float = 2.0,
+    ):
+        import threading
+        import time
+
+        self.keyword = keyword
+        self.thumbprint = thumbprint
+        self._probe = probe or (lambda: confirm_certificate(keyword, thumbprint))
+        self._interval = interval
+        self._sleeper = sleeper or time.sleep
+        self._clock = clock or time.monotonic
+        self._cancelled = cancelled
+        self._timeout = timeout
+        self._after_click = after_click
+        self._click_finished = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.result: CertDialogResult | None = None
+
+    def start(self) -> None:
+        """开始监视。必须在等待登录点击之前调用。"""
+        import threading
+
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="cert-dialog-watch", daemon=True)
+        self._thread.start()
+
+    def mark_click_finished(self) -> None:
+        """登录点击已经返回。之后只再短暂看一眼窗口。"""
+        if not hasattr(self, "_click_seen_at"):
+            self._click_seen_at = self._clock()
+        self._click_finished.set()
+
+    def finish(self, timeout: float | None = None) -> CertDialogResult:
+        """等到监视结束。"""
+        if self._thread is not None:
+            self._thread.join(self._timeout if timeout is None else timeout)
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(1)
+        if self.result is not None:
+            return self.result
+        return CertDialogResult(False, "", absent=True)
+
+    def stop(self) -> None:
+        """不再等待。已经点过确定的结果保留。"""
+        self._stop.set()
+        self.mark_click_finished()
+
+    def _run(self) -> None:
+        started = self._clock()
+        deadline = started + self._timeout
+        while not self._stop.is_set():
+            if self._cancelled and self._cancelled():
+                self.result = CertDialogResult(False, "已取消")
+                return
+            try:
+                result = self._probe()
+            except Exception as exc:
+                result = CertDialogResult(False, f"读取证书窗口失败：{exc}", absent=True)
+            if result.needs_windows and result.absent:
+                self.result = result
+                return
+            if result.absent:
+                click_done = self._click_finished.is_set() and hasattr(self, "_click_seen_at")
+                if click_done and self._clock() >= self._click_seen_at + self._after_click:
+                    self.result = result
+                    return
+                if self._clock() >= deadline:
+                    self.result = result
+                    return
+                self._sleeper(self._interval)
+                continue
+            self.result = result
+            return
+        if self.result is None:
+            self.result = CertDialogResult(False, "", absent=True)
+
+
 def confirm_certificate(keyword: str, thumbprint: str = "") -> CertDialogResult:
     """在 Windows 上找原生证书窗口并确认唯一行。
 
@@ -119,69 +334,127 @@ def confirm_certificate(keyword: str, thumbprint: str = "") -> CertDialogResult:
 
 
 def _confirm_on_windows(keyword: str) -> CertDialogResult:
-    """读当前证书窗口。读不到或对不上就不点确定。"""
+    """读当前证书窗口。读不到、对不上或选不中，就点取消，不点确定。"""
     try:
         import uiautomation as auto
     except Exception as exc:
-        return CertDialogResult(False, f"缺少 UI Automation：{exc}", needs_windows=True, absent=True)
-    root = auto.GetRootControl()
-    dialog = None
-    for window in root.GetChildren():
-        name = str(getattr(window, "Name", "") or "")
-        if "证书" not in name:
-            continue
-        dialog = window
-        break
+        return CertDialogResult(
+            False, f"缺少 UI Automation：{exc}", needs_windows=True, absent=True,
+        )
+    dialog = _find_dialog(auto.GetRootControl())
     if dialog is None:
-        return CertDialogResult(False, "", absent=True, needs_windows=True)
+        # 窗口还没出现。needs_windows 留给「这台系统看不了窗口」，
+        # 不能把「还没弹出来」标成看不了，否则监视会立刻停。
+        return CertDialogResult(False, "", absent=True)
     rows = _read_rows(dialog)
-    matched = match_dialog_row(rows, keyword)
-    if matched.row_index is None:
-        return CertDialogResult(False, matched.reason, needs_windows=True)
-    table_rows = _table_rows(dialog)
-    if matched.row_index >= len(table_rows):
-        return CertDialogResult(False, "证书窗口行对不上", needs_windows=True)
+    selectable = _selectable_rows(dialog)
+
+    def cancel() -> None:
+        button = _find_button(dialog, "取消")
+        if button is not None:
+            button.GetInvokePattern().Invoke()
+
+    if not rows or len(selectable) != len(rows):
+        with contextlib.suppress(Exception):
+            cancel()
+        reason = "证书窗口没有读到单位列" if not rows else "证书窗口行对不上"
+        return CertDialogResult(False, reason, needs_windows=True)
+
+    def select(index: int) -> None:
+        selectable[index].GetSelectionItemPattern().Select()
+
+    def selected(index: int) -> bool:
+        pattern = selectable[index].GetSelectionItemPattern()
+        flag = getattr(pattern, "IsSelected", None)
+        if callable(flag):
+            flag = flag()
+        return bool(flag)
+
+    def ok() -> None:
+        button = _find_button(dialog, "确定")
+        if button is None:
+            raise RuntimeError("证书窗口没有确定按钮")
+        button.GetInvokePattern().Invoke()
+
+    result = apply_dialog_choice(rows, keyword, select, selected, ok, cancel)
+    return CertDialogResult(
+        result.ok, result.reason, result.row_index, needs_windows=True,
+    )
+
+
+def _find_dialog(root: object) -> object | None:
+    """优先找标题里带「证书选择」的窗口。"""
+    fallback = None
     try:
-        table_rows[matched.row_index].GetSelectionItemPattern().Select()
-    except Exception as exc:
-        return CertDialogResult(False, f"无法选中证书行：{exc}", needs_windows=True)
-    ok_button = _find_button(dialog, "确定")
-    if ok_button is None:
-        return CertDialogResult(False, "证书窗口没有确定按钮", needs_windows=True)
-    try:
-        ok_button.GetInvokePattern().Invoke()
-    except Exception as exc:
-        return CertDialogResult(False, f"无法点击确定：{exc}", needs_windows=True)
-    return CertDialogResult(True, "", matched.row_index, needs_windows=True)
+        children = root.GetChildren()
+    except Exception:
+        return None
+    for window in children:
+        name = str(getattr(window, "Name", "") or "")
+        if "证书选择" in name:
+            return window
+        if fallback is None and "证书" in name:
+            fallback = window
+    return fallback
 
 
 def _read_rows(dialog: object) -> list[CertDialogRow]:
     """把表格读成单位行。列对不上时返回空，调用方就不会点确定。"""
-    headers: list[str] = []
-    body: list[list[str]] = []
-    for item in _walk(dialog):
-        control = str(getattr(item, "ControlTypeName", "") or "")
-        name = str(getattr(item, "Name", "") or "").strip()
-        if control == "HeaderItemControl" and name:
-            headers.append(name)
-        elif control == "DataItemControl" and name:
-            if not body or len(body[-1]) >= max(len(headers), 4):
-                body.append([name])
-            else:
-                body[-1].append(name)
-    if not headers:
+    headers = [
+        str(getattr(item, "Name", "") or "").strip()
+        for item in _walk(dialog)
+        if str(getattr(item, "ControlTypeName", "") or "") == "HeaderItemControl"
+        and str(getattr(item, "Name", "") or "").strip()
+    ]
+    list_rows = [item for item in _walk(dialog) if _is_list_row(item)]
+    if list_rows:
+        return assemble_certificate_rows(headers, [_row_texts(item) for item in list_rows])
+    cells = [
+        str(getattr(item, "Name", "") or "").strip()
+        for item in _walk(dialog)
+        if str(getattr(item, "ControlTypeName", "") or "") == "DataItemControl"
+        and str(getattr(item, "Name", "") or "").strip()
+    ]
+    width = len(headers)
+    if width < 4 or not cells:
         return []
-    index = {title: pos for pos, title in enumerate(headers)}
-    needed = ("颁发给", "单位", "截止日期", "颁发者")
-    if any(title not in index for title in needed):
-        return []
-    rows: list[CertDialogRow] = []
-    for cells in body:
-        def cell(title: str) -> str:
-            pos = index[title]
-            return cells[pos] if pos < len(cells) else ""
-        rows.append(CertDialogRow(cell("颁发给"), cell("单位"), cell("截止日期"), cell("颁发者")))
-    return rows
+    grouped = [cells[start:start + width] for start in range(0, len(cells), width)]
+    return assemble_certificate_rows(headers, grouped)
+
+
+def _is_list_row(item: object) -> bool:
+    """列表行本身可以选择。单元格不是行。"""
+    if str(getattr(item, "ControlTypeName", "") or "") != "ListItemControl":
+        return False
+    try:
+        item.GetSelectionItemPattern()
+    except Exception:
+        return False
+    return True
+
+
+def _row_texts(item: object) -> list[str]:
+    """一行里按从左到右收集文字。行自己的名字通常是「颁发给」。"""
+    texts: list[str] = []
+    own = str(getattr(item, "Name", "") or "").strip()
+    if own:
+        texts.append(own)
+    for child in _walk(item)[1:]:
+        kind = str(getattr(child, "ControlTypeName", "") or "")
+        if kind in {"ListItemControl", "HeaderControl", "HeaderItemControl"}:
+            continue
+        name = str(getattr(child, "Name", "") or "").strip()
+        if name and kind in {"TextControl", "EditControl", "DataItemControl", "CustomControl"}:
+            texts.append(name)
+    return texts
+
+
+def _selectable_rows(dialog: object) -> list[object]:
+    """返回与读出的行同一顺序、可以选中的列表行。"""
+    rows = [item for item in _walk(dialog) if _is_list_row(item)]
+    if rows:
+        return rows
+    return _table_rows(dialog)
 
 
 def _table_rows(dialog: object) -> list[object]:

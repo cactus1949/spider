@@ -211,6 +211,7 @@ class CatchupRunRequest(BaseModel):
     minimized: str = "true"
     upload_profile_id: str = ""
     auto_upload: bool = False
+    ukey_station_ids: list[str] | None = None
 
 
 def _make_wf_loader(service):
@@ -1810,6 +1811,9 @@ def create_app(
                     "auto_upload": bool(db_cfg.get("auto_upload", False)),
                     "indicator_retry": db_cfg.get("indicator_retry", cfg.get("indicator_retry", 3)),
                 })
+            from spider_gd.core.ukey_plan import configured_ukey_ids
+
+            cfg["ukey_station_ids"] = configured_ukey_ids(db_cfg) or configured_ukey_ids(cfg)
             if reference_date.strip():
                 cfg["reference_date"] = reference_date.strip()
 
@@ -2047,7 +2051,11 @@ def create_app(
         station_queue: list[dict[str, str]] = []
         from spider_gd.core.station_picker import pick_stations
         from spider_gd.core.station_profile import parse_station_profiles
-        from spider_gd.core.ukey_plan import collect_runtime_plan, format_station_report
+        from spider_gd.core.ukey_plan import (
+            collect_runtime_plan,
+            configured_ukey_ids,
+            format_station_report,
+        )
 
         try:
             saved_profiles = parse_station_profiles(
@@ -2055,7 +2063,7 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        selected_ids = cfg.get("ukey_station_ids") or []
+        selected_ids = configured_ukey_ids(cfg)
         if saved_profiles or selected_ids:
             def _open_once(rows, timeout):
                 picked = pick_stations(rows, timeout_sec=timeout)
@@ -3910,6 +3918,7 @@ def create_app(
             download_dir=body.download_dir,
             storage_overridden=body.storage_overridden,
             custom_filenames=body.custom_filenames,
+            ukey_station_ids=body.ukey_station_ids,
         )
         return await run_task_stream(
             "catchup",

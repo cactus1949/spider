@@ -27,6 +27,24 @@ class WifiWaitResult:
     attempts: int
 
 
+def wifi_wait_budget(unattended: bool) -> float:
+    """无人值守有总时限。有人在旁边时限更长，到点后改为暂停而不是一直扫。
+
+    Args:
+        unattended: 定时任务这类没有人守着的执行为 True。
+
+    Returns:
+        float: 秒。
+
+    Examples:
+        >>> wifi_wait_budget(True)
+        45.0
+        >>> wifi_wait_budget(False)
+        90.0
+    """
+    return 45.0 if unattended else 90.0
+
+
 def wait_for_saved_ssid(
     ssid: str,
     *,
@@ -91,5 +109,12 @@ def wait_for_saved_ssid(
             return WifiWaitResult(
                 False, "missing", "未搜到已保存的热点，请检查设备电源", attempts,
             )
-        sleeper(min(delay, deadline - now))
+        remaining = min(delay, deadline - now)
+        slept = 0.0
+        while slept < remaining - 1e-9:
+            if cancelled and cancelled():
+                return WifiWaitResult(False, "cancelled", "已取消", attempts)
+            step = min(0.5, remaining - slept)
+            sleeper(step)
+            slept += step
         delay = min(max_delay, delay * 2)

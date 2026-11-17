@@ -8,6 +8,62 @@ from __future__ import annotations
 
 import sys
 
+# CryptAcquireCertificatePrivateKey：静默，不允许为了私钥弹出 PIN。
+CRYPT_ACQUIRE_SILENT_FLAG = 0x00000040
+CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG = 0x00010000
+CERT_NCRYPT_KEY_SPEC = 0xFFFFFFFF
+
+
+def probe_script() -> str:
+    """给 Windows 用的静默探测脚本。
+
+    Returns:
+        str: PowerShell 脚本。里面只有静默标志，没有 PIN 或证书界面。
+
+    Examples:
+        >>> "CryptAcquireCertificatePrivateKey" in probe_script()
+        True
+        >>> "0x40" in probe_script()
+        True
+    """
+    return f"""
+$sig = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
+public static class SilentKey {{
+  [DllImport("crypt32.dll", SetLastError=true)]
+  public static extern bool CryptAcquireCertificatePrivateKey(
+    IntPtr pCert, uint dwFlags, IntPtr pvParameters, out IntPtr phCryptProvOrNCryptKey,
+    out uint pdwKeySpec, out bool pfCallerFreeProvOrNCryptKey);
+  [DllImport("ncrypt.dll")]
+  public static extern int NCryptFreeObject(IntPtr hObject);
+  [DllImport("advapi32.dll", SetLastError=true)]
+  public static extern bool CryptReleaseContext(IntPtr hProv, uint dwFlags);
+  public static bool CanUse(X509Certificate2 cert) {{
+    IntPtr handle; uint spec; bool freeCaller;
+    const uint SILENT = 0x{CRYPT_ACQUIRE_SILENT_FLAG:X};
+    const uint ALLOW_NCRYPT = 0x{CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG:X};
+    const uint NCRYPT_SPEC = 0x{CERT_NCRYPT_KEY_SPEC:X};
+    bool ok = CryptAcquireCertificatePrivateKey(cert.Handle, SILENT | ALLOW_NCRYPT,
+      IntPtr.Zero, out handle, out spec, out freeCaller);
+    if (ok && freeCaller && handle != IntPtr.Zero) {{
+      if (spec == NCRYPT_SPEC) NCryptFreeObject(handle);
+      else CryptReleaseContext(handle, 0);
+    }}
+    return ok;
+  }}
+}}
+'@
+Add-Type -TypeDefinition $sig -ErrorAction SilentlyContinue | Out-Null
+$found = @()
+Get-ChildItem Cert:\\CurrentUser\\My |
+  Where-Object {{ $_.NotAfter -gt (Get-Date) }} | ForEach-Object {{
+  if ([SilentKey]::CanUse($_)) {{ $found += $_.Thumbprint.ToLower() }}
+}}
+$found | ConvertTo-Json -Compress
+"""
+
 
 def silent_thumbprints() -> set[str] | None:
     """返回当前能静默打开私钥的证书指纹。
@@ -36,36 +92,7 @@ def _silent_thumbprints_windows() -> set[str]:
 
     from spider_gd.infrastructure.network.usb_devices import _command_text, _powershell
 
-    script = r"""
-$sig = @'
-using System;
-using System.Runtime.InteropServices;
-using System.Security.Cryptography.X509Certificates;
-public static class SilentKey {
-  [DllImport("crypt32.dll", SetLastError=true)]
-  public static extern bool CryptAcquireCertificatePrivateKey(
-    IntPtr pCert, uint dwFlags, IntPtr pvParameters, out IntPtr phCryptProvOrNCryptKey,
-    out uint pdwKeySpec, out bool pfCallerFreeProvOrNCryptKey);
-  [DllImport("ncrypt.dll")]
-  public static extern int NCryptFreeObject(IntPtr hObject);
-  public static bool CanUse(X509Certificate2 cert) {
-    IntPtr handle; uint spec; bool freeCaller;
-    const uint SILENT = 0x40; const uint ALLOW_NCRYPT = 0x10000;
-    bool ok = CryptAcquireCertificatePrivateKey(cert.Handle, SILENT | ALLOW_NCRYPT,
-      IntPtr.Zero, out handle, out spec, out freeCaller);
-    if (ok && freeCaller && handle != IntPtr.Zero) NCryptFreeObject(handle);
-    return ok;
-  }
-}
-'@
-Add-Type -TypeDefinition $sig -ErrorAction SilentlyContinue | Out-Null
-$found = @()
-Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.NotAfter -gt (Get-Date) } | ForEach-Object {
-  if ([SilentKey]::CanUse($_)) { $found += $_.Thumbprint.ToLower() }
-}
-$found | ConvertTo-Json -Compress
-"""
-    ok, text = _command_text(_powershell(script), 8.0, "证书可用性")
+    ok, text = _command_text(_powershell(probe_script()), 8.0, "证书可用性")
     if not ok or not text.strip() or text == "（没有输出）":
         return set()
     data = json.loads(text)

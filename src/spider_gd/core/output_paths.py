@@ -133,6 +133,39 @@ def choose_download_root(
     ) if str(value or "").strip()), "."))
 
 
+def station_scoped_path(root: str | Path, station: str, original: str | Path) -> str:
+    """多场站同时执行时，把落盘路径放进该场站自己的目录。
+
+    同一场站重复计算得到同一路径，同名文件仍可覆盖。不在根目录下的路径
+    只取最后一段，避免把别的盘符带进来。
+
+    Args:
+        root: 这次任务的下载根目录。
+        station: 场站名称。
+        original: 原来要写的文件或目录。
+
+    Returns:
+        str: 带场站目录的路径。场站名为空时保持原路径。
+
+    Examples:
+        >>> station_scoped_path("/data", "阳江", "/data/2026/日前.xlsx")
+        '/data/阳江/2026/日前.xlsx'
+        >>> left = station_scoped_path("/data", "阳江", "/data/2026/日前.xlsx")
+        >>> left == station_scoped_path("/data", "阳江", "/data/2026/日前.xlsx")
+        True
+    """
+    name = sanitize_segment(station)
+    path = Path(original)
+    if not name:
+        return str(path)
+    base = Path(root)
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        relative = Path(path.name)
+    return str(base / name / relative)
+
+
 def template_example(template: str, when: date | None = None, ssid: str = "") -> str:
     """给前端/文档用：渲染失败的模板原样返回，避免预览接口 500。"""
     try:

@@ -13,11 +13,16 @@ from spider_gd.core.ukey_plan import (
     kept_task_ukeys,
     plan_task_execution,
     select_available_cert,
+    station_block_reason,
 )
 from spider_gd.infrastructure.network.usb_devices import parse_pnp_devices
-from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid
+from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid, wifi_wait_budget
 from spider_gd.infrastructure.storage.database import TaskStateStore
-from spider_gd.infrastructure.windows.cert_dialog import CertDialogRow, confirm_certificate, match_dialog_row
+from spider_gd.infrastructure.windows.cert_dialog import (
+    CertDialogRow,
+    confirm_certificate,
+    match_dialog_row,
+)
 
 
 def _stations() -> list[StationProfile]:
@@ -156,7 +161,7 @@ def test_cached_certificate_is_not_available():
     assert "不在当前钥匙" in reason
 
 
-def test_same_org_without_thumbprint_is_ambiguous():
+def test_same_org_duplicate_certs_still_run_and_thumbprint_can_pick_one():
     cert, reason = select_available_cert(
         [
             KnownCert("aa", "蕴阳公司", True),
@@ -164,8 +169,8 @@ def test_same_org_without_thumbprint_is_ambiguous():
         ],
         "蕴阳",
     )
-    assert cert is None
-    assert "多张" in reason
+    assert reason == ""
+    assert cert is not None
     chosen, ok = select_available_cert(
         [
             KnownCert("aa", "蕴阳公司", True),
@@ -175,7 +180,17 @@ def test_same_org_without_thumbprint_is_ambiguous():
         "bb",
     )
     assert ok == ""
-    assert chosen is not None and chosen.thumbprint == "bb"
+    assert chosen is not None
+    assert chosen.thumbprint == "bb"
+    blocked, why = select_available_cert(
+        [
+            KnownCert("aa", "蕴阳公司", True),
+            KnownCert("bb", "韶关公司", True),
+        ],
+        "公司",
+    )
+    assert blocked is None
+    assert "多个" in why
 
 
 def test_expired_or_unmatched_dialog_does_not_pick_a_row():
@@ -254,6 +269,124 @@ def test_wifi_wait_backs_off_and_stops_at_the_deadline():
         cancelled=lambda: True,
     )
     assert result.status == "cancelled"
+
+
+def test_same_org_duplicate_certs_do_not_reject_other_keys():
+    stations = [
+        StationProfile("a", "场站甲", "A", org_name="单位甲"),
+        StationProfile("b", "场站乙", "B", org_name="单位乙"),
+        StationProfile("wide", "过宽", "W", org_name="公司"),
+    ]
+    certs = [
+        KnownCert("1", "单位甲公司", True),
+        KnownCert("2", "单位甲公司", True),
+        KnownCert("3", "单位乙公司", True),
+        KnownCert("4", "单位乙公司", True),
+    ]
+    plan = plan_task_execution(
+        stations,
+        selected_ids=["a", "b", "wide"],
+        present_device_ids=[],
+        certs=certs,
+        mode="scheduled",
+    )
+    assert [item["id"] for item in plan.runnable] == ["a", "b"]
+    assert plan.skipped[0].id == "wide"
+    assert "多个" in plan.skipped[0].reason
+
+
+def test_cached_certificate_is_not_treated_as_plugged_in():
+    station = StationProfile("a", "场站甲", "A", org_name="单位甲")
+    cached = [KnownCert("1", "单位甲公司", False), KnownCert("2", "单位甲公司", False)]
+    plan = plan_task_execution(
+        [station], selected_ids=["a"], present_device_ids=[], certs=cached, mode="manual",
+    )
+    assert plan.started is False
+    assert "不在当前钥匙" in plan.skipped[0].reason
+    live = [KnownCert("1", "单位甲公司", False), KnownCert("2", "单位甲公司", True)]
+    ready = plan_task_execution(
+        [station], selected_ids=["a"], present_device_ids=[], certs=live, mode="scheduled",
+    )
+    assert [item["id"] for item in ready.runnable] == ["a"]
+    assert station_block_reason(station, [], live, certs_checked=False) == "未能确认当前可用证书"
+
+
+def test_real_parent_shape_collapses_to_physical_keys():
+    """脱敏拓扑：父节点大小写与现场一致，HID 子节点并回 USB 父节点。"""
+    def key(port: str) -> list[dict[str, str]]:
+        usb = rf"USB\VID_096E&PID_0317\5&PORT&0&{port}"
+        return [
+            {
+                "FriendlyName": "USB 输入设备",
+                "InstanceId": usb,
+                "Class": "HIDClass",
+                "Parent": r"USB\ROOT_HUB30\4&HUB&0&0",
+            },
+            {
+                "FriendlyName": "符合 HID 标准的供应商定义设备",
+                "InstanceId": rf"HID\VID_096E&PID_0317\6&CHILD&0&{port}",
+                "Class": "HIDClass",
+                "Parent": usb.lower(),
+            },
+        ]
+
+    noise = [
+        {
+            "FriendlyName": "USB 输入设备",
+            "InstanceId": r"USB\VID_17EF&PID_6099\5&PORT&0&9",
+            "Class": "HIDClass",
+            "Parent": r"USB\ROOT_HUB30\4&HUB&0&0",
+        },
+        {
+            "FriendlyName": "HID Keyboard Device",
+            "InstanceId": r"HID\VID_17EF&PID_6099\6&KEY&0&0000",
+            "Class": "Keyboard",
+            "Parent": r"usb\vid_17ef&pid_6099\5&port&0&9",
+        },
+        {
+            "FriendlyName": "USB 大容量存储设备",
+            "InstanceId": r"USB\VID_0781&PID_5591\DISK",
+            "Class": "USB",
+            "Parent": r"USB\ROOT_HUB30\4&HUB&0&0",
+        },
+    ]
+    two = [
+        item for item in parse_pnp_devices(json.dumps([*key("1"), *key("2"), *noise]))
+        if item.ukey_candidate
+    ]
+    four_raw = [*key("1"), *key("2"), *key("3"), *key("4"), *noise]
+    four = [
+        item for item in parse_pnp_devices(json.dumps(four_raw))
+        if item.ukey_candidate
+    ]
+    assert len(two) == 2
+    assert len(four) == 4
+    assert all(item.device_id.upper().startswith("USB\\VID_096E") for item in four)
+    assert all(not item.device_id.upper().startswith("HID\\") for item in four)
+
+
+def test_wifi_cancel_returns_inside_the_sleep_slice():
+    now = {"t": 0.0}
+
+    def clock() -> float:
+        return now["t"]
+
+    def sleeper(seconds: float) -> None:
+        now["t"] += seconds
+
+    result = wait_for_saved_ssid(
+        "YY",
+        visible=lambda: [],
+        connect=lambda: False,
+        timeout_sec=45,
+        clock=clock,
+        sleeper=sleeper,
+        cancelled=lambda: now["t"] >= 0.5,
+    )
+    assert result.status == "cancelled"
+    assert now["t"] < 2
+    assert wifi_wait_budget(True) == 45
+    assert wifi_wait_budget(False) == 90
 
 
 def test_old_task_without_ukey_field_still_loads(tmp_path):
