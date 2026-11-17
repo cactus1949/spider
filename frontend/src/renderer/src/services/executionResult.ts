@@ -118,6 +118,23 @@ export function createDownloadLedger(): {
       sawPlan = false
     },
     note(event: string, data: Record<string, unknown>, labels: Record<string, string> = {}): void {
+      if (event === 'station_report') {
+        const stations = Array.isArray(data.stations) ? data.stations as Record<string, unknown>[] : []
+        stations.forEach((item) => {
+          const name = text(item.name) || '场站'
+          if (text(item.status) === 'ran') return
+          files.push({
+            id: `station-${name}-${files.length}`,
+            folders: [name],
+            name,
+            source: name,
+            date: '',
+            status: 'missed',
+            reason: text(item.reason)
+          })
+        })
+        return
+      }
       if (event === 'file_expected') {
         sawPlan = true
         const id = fileKey(data)

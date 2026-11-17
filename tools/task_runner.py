@@ -647,6 +647,12 @@ class TaskRunner:
         self._gateway_reset_used = False
         self.indicators = task_config.get("indicators", [])
         self.download_dir = download_dir
+        self._download_root = download_dir
+        self._unattended = bool(task_config.get("_unattended"))
+        self._skipped_stations = list(task_config.get("_skipped_stations") or [])
+        self._station_results: list[dict[str, str]] = []
+        self._station_report_sent = False
+        self._active_station_name = ""
         self.headless = headless
         self.minimized = minimized
         self._workflow_loader = workflow_loader  # (id: str) -> dict | None
@@ -787,6 +793,20 @@ class TaskRunner:
         session = session or get_shared_browser()
         async with session.execution(self.config.get("_control_name", self.name), on_event) as emit:
             self._shared_session = session
+            base_emit = emit
+
+            def emit(payload):
+                if isinstance(payload, dict) and self._active_station_name:
+                    if payload.get("event") in {"file_expected", "file_result", "repeat_no_data"}:
+                        folders = list(payload.get("folders") or [])
+                        if self._active_station_name not in folders:
+                            payload = {
+                                **payload,
+                                "folders": [self._active_station_name, *folders],
+                                "station": self._active_station_name,
+                            }
+                base_emit(payload)
+
             self._on_event = emit
             self._wait_continue = session.wait_continue
             self._browser, self._context = session._browser, session.page.context
@@ -841,13 +861,17 @@ class TaskRunner:
                         break
                     step_idx = 0
                     if isinstance(station, dict):
-                        self._use_station(station, station_index, len(stations))
+                        prepared = await self._use_station(station, station_index, len(stations))
+                        if prepared == "stop":
+                            break
+                        if prepared == "skip":
+                            continue
                         if self._failed:
                             _emit("task_error", error=self._failure_reason or "场站准备失败")
                             self._task_error_emitted = True
                             break
                         if len(stations) > 1:
-                            await self._return_to_login_page()
+                            await self._drop_station_session()
                             self._login_done = False
                     if self.login_name:
                         step_idx += 1
@@ -926,7 +950,13 @@ class TaskRunner:
                         f"跳过 {self._summary['skipped']} 项"
                     )
                     _emit("task_summary", **self._summary, message=message)
+                    self._station_results.append({
+                        "name": station.get("name", "") if isinstance(station, dict) else "",
+                        "status": "ran",
+                        "reason": "",
+                    })
                     if station_index == len(stations) - 1:
+                        self._emit_station_report(_emit)
                         _emit("task_done", name=self.name, **self._summary, message=message)
                     else:
                         station_name = station.get("name", "") if isinstance(station, dict) else ""
@@ -943,10 +973,31 @@ class TaskRunner:
                 _emit("task_error", error=str(exc))
             finally:
                 with contextlib.suppress(Exception):
+                    self._emit_station_report(_emit)
+                with contextlib.suppress(Exception):
                     await self._finish_indicator_pages()
                 session._active_runner = None
 
-    def _use_station(self, station: dict, index: int, total: int) -> None:
+    def _emit_station_report(self, _emit) -> None:
+        """把已跳过和已执行的场站一起写进结果。"""
+        rows = [
+            *self._skipped_stations,
+            *self._station_results,
+        ]
+        if rows and not self._station_report_sent:
+            self._station_report_sent = True
+            _emit("station_report", stations=rows)
+
+    async def _drop_station_session(self) -> None:
+        """清掉上一场站的登录cookie，不新开页面跳转。"""
+        session = self._shared_session
+        context = getattr(getattr(session, "page", None), "context", None)
+        if context is not None:
+            with contextlib.suppress(Exception):
+                await context.clear_cookies()
+        self._login_done = False
+
+    async def _use_station(self, station: dict, index: int, total: int) -> str:
         """切换到指定场站的证书密码，并连接它的 WiFi。
 
         Args:
@@ -955,41 +1006,104 @@ class TaskRunner:
             total: 本次要执行的场站数。
 
         Returns:
-            None: 结果通过事件送出。WiFi 连接失败时记为任务失败。
+            str: ``ok`` 继续采集，``skip`` 跳过这一站，``stop`` 停止整个任务。
 
         Examples:
-            >>> runner = TaskRunner({"name": "t"}, station_queue=[{"name": "阳江", "cert_password": "pin"}])
-            >>> runner._use_station(runner._station_queue[0], 0, 1)
+            >>> import asyncio
+            >>> runner = TaskRunner({"name": "t", "_unattended": True}, station_queue=[{"name": "阳江", "cert_password": "pin"}])
+            >>> asyncio.run(runner._use_station(runner._station_queue[0], 0, 1))
+            'ok'
             >>> runner._cert_password
             'pin'
         """
         name = str(station.get("name") or "").strip()
+        self._active_station_name = name
         cert_password = str(station.get("cert_password") or "").strip()
         if cert_password:
             self._cert_password = cert_password
+        self._current_station = dict(station)
+        if name and total > 1:
+            from spider_gd.core.output_paths import sanitize_segment
+
+            target = Path(self._download_root) / sanitize_segment(name)
+            target.mkdir(parents=True, exist_ok=True)
+            self.download_dir = str(target)
         self._on_event({
             "event": "station_start",
             "name": name,
             "index": index + 1,
             "total": total,
-            "message": f"第 {index + 1}/{total} 个场站：{name}",
+            "message": name,
         })
         ssid = str(station.get("wifi_ssid") or "").strip()
         if not ssid:
-            return
-        from spider_gd.infrastructure.network.wifi_connector import WifiConnectOptions, WifiConnector
+            return "ok"
+        outcome = await self._connect_station_wifi(name, ssid, str(station.get("wifi_password") or ""))
+        return outcome
 
-        result = WifiConnector().prepare(
-            WifiConnectOptions(ssid=ssid, password=str(station.get("wifi_password") or ""))
-        )
-        self._on_event({
-            "event": "station_wifi",
-            "name": name,
-            "ok": result.ok,
-            "message": result.message,
+    async def _connect_station_wifi(self, name: str, ssid: str, password: str) -> str:
+        """连已保存的热点。无人值守超时就跳过；有人时可以重试、跳过或停止。"""
+        import time
+
+        from spider_gd.infrastructure.network.wifi_connector import WifiConnectOptions, WifiConnector
+        from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid
+
+        connector = WifiConnector()
+        pauses = 0
+        while pauses < 3:
+            self._on_event({
+                "event": "station_wifi",
+                "name": name,
+                "ok": False,
+                "message": "扫描",
+            })
+            result = wait_for_saved_ssid(
+                ssid,
+                visible=lambda: [item.ssid for item in connector.list_networks()],
+                connect=lambda: connector.prepare(
+                    WifiConnectOptions(ssid=ssid, password=password)
+                ).ok,
+                timeout_sec=45 if self._unattended else 90,
+                clock=time.monotonic,
+                sleeper=time.sleep,
+            )
+            self._on_event({
+                "event": "station_wifi",
+                "name": name,
+                "ok": result.ok,
+                "message": result.reason or result.status,
+            })
+            if result.ok:
+                return "ok"
+            if self._unattended or self._wait_continue is None:
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": result.reason,
+                })
+                return "skip"
+            self._on_event({
+                "event": "error_pause",
+                "message": result.reason,
+                "kind": "wifi",
+            })
+            continued = await self._wait_continue()
+            session = self._shared_session
+            skipped = bool(session and getattr(session, "consume_station_skip", lambda: False)())
+            if skipped:
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": result.reason,
+                })
+                return "skip"
+            if not continued:
+                self._stopped = True
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": "已停止",
+                })
+                return "stop"
+            pauses += 1
+        self._station_results.append({
+            "name": name, "status": "skipped", "reason": "未搜到已保存的热点，请检查设备电源",
         })
-        if not result.ok:
-            self._record_failure(result.message or f"连接 WiFi 失败：{ssid}")
+        return "skip"
 
     async def _return_to_login_page(self) -> None:
         """打开任务入口页，让下一场站重新走登录。
@@ -1389,6 +1503,7 @@ class TaskRunner:
             if val:
                 _raw = _raw.replace(placeholder, val)
         login_cfg = _json.loads(_raw)
+        login_cfg["_station"] = dict(getattr(self, "_current_station", {}) or {})
 
         # 执行登录工作流（共享浏览器）—— 每次都重新登录，不依赖 storage_state
         _emit("task_step", step=step_idx, total=total,

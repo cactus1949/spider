@@ -80,6 +80,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const [steps, setSteps] = useState<StepProgress[]>([])
   const [running, setRunning] = useState(false)
   const [needInput, setNeedInput] = useState(false)
+  const [wifiPause, setWifiPause] = useState(false)
   const [pauseMessage, setPauseMessage] = useState('')
   const [error, setError] = useState<string | null>(null)
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null)
@@ -485,6 +486,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
       }
 
       case 'error_pause': {
+        setWifiPause(data.kind === 'wifi')
         const msg = ((data.message as string) || (data.error as string) || '执行出现错误，已暂停')
         setNeedInput(true)
         setPauseMessage(msg)
@@ -641,7 +643,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
     }
   }
 
-  const controlRun = async (action: 'resume' | 'cancel'): Promise<void> => {
+  const controlRun = async (action: 'resume' | 'cancel' | 'skip-station'): Promise<void> => {
     if (!runRef.current) return
     try {
       const res = await fetch(`${BASE}/api/browser/${action}`, {
@@ -649,7 +651,10 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
       })
       const result = await res.json()
       if (!res.ok || result.status === 'error') throw new Error(result.message || result.detail || '操作失败')
-      if (action === 'resume') setNeedInput(false)
+      if (action === 'resume' || action === 'skip-station') {
+        setNeedInput(false)
+        setWifiPause(false)
+      }
     } catch (err) { setError(err instanceof Error ? err.message : String(err)) }
   }
   const handleContinue = (): void => { void controlRun('resume') }
@@ -697,6 +702,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
             <Button type="primary" onClick={handleContinue} icon={<PlayCircleOutlined />}>
               继续
             </Button>
+          )}
+          {needInput && wifiPause && (
+            <Button onClick={() => { void controlRun('skip-station') }}>跳过</Button>
           )}
           {!running && failedSlotKeys.length > 0 && (
             <Button onClick={() => retrySlots(failedSlotKeys)}>重试全部失败项</Button>

@@ -84,6 +84,7 @@ interface AutoTask {
   uploadProfileId?: string
   autoUpload?: boolean
   indicatorRetry?: number
+  ukeyStationIds?: string[]
   enabled: boolean
   remark?: string
   createdAt: number
@@ -161,6 +162,7 @@ interface FormValues {
   uploadProfileId?: string
   autoUpload?: boolean
   indicatorRetry?: number
+  ukeyStationIds?: string[]
 }
 
 async function loadTasksFromApi(): Promise<AutoTask[]> {
@@ -186,6 +188,7 @@ async function loadTasksFromApi(): Promise<AutoTask[]> {
         uploadProfileId: typeof c.upload_profile_id === 'string' ? c.upload_profile_id : '',
         autoUpload: Boolean(c.auto_upload),
         indicatorRetry: Number(c.indicator_retry ?? 3),
+        ukeyStationIds: Array.isArray(c.ukey_station_ids) ? c.ukey_station_ids.map(String) : [],
         downloadDir: c.download_dir_custom ? (c.download_dir || '') : '',
         enabled: c.enabled ?? true,
         remark: c.remark || '',
@@ -220,6 +223,7 @@ async function saveTaskConfigs(tasks: AutoTask[]): Promise<void> {
         upload_profile_id: t.uploadProfileId || '',
         auto_upload: Boolean(t.autoUpload),
         indicator_retry: t.indicatorRetry ?? 3,
+        ukey_station_ids: t.ukeyStationIds || [],
         enabled: t.enabled,
         remark: t.remark || '',
         download_dir: t.downloadDir || '',
@@ -329,6 +333,31 @@ export default function Tasks(): JSX.Element {
   const { message, modal } = AntApp.useApp()
   const [tasks, setTasks] = useState<AutoTask[]>([])
   const [keyword, setKeyword] = useState('')
+  const [stationOptions, setStationOptions] = useState<{ value: string; label: string }[]>([])
+  useEffect(() => {
+    let alive = true
+    api.getSettings().then((result) => {
+      if (!alive) return
+      const raw = result.settings?.stationProfiles || ''
+      let rows: Array<Record<string, unknown>> = []
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) rows = parsed
+      } catch {
+        rows = []
+      }
+      setStationOptions(rows.flatMap((item) => {
+        const id = String(item.id || '')
+        const name = String(item.name || '').trim()
+        if (!id || !name) return []
+        const orgName = String(item.orgName || '').trim()
+        return [{ value: id, label: orgName ? `${name} / ${orgName}` : name }]
+      }))
+    }).catch(() => {
+      if (alive) setStationOptions([])
+    })
+    return () => { alive = false }
+  }, [])
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<AutoTask | null>(null)
   const [form] = Form.useForm<FormValues>()
@@ -472,7 +501,8 @@ export default function Tasks(): JSX.Element {
       remark: '',
       uploadProfileId: undefined,
       autoUpload: false,
-      indicatorRetry: 3
+      indicatorRetry: 3,
+      ukeyStationIds: []
     })
     setWindows({})
     setOutputWindows({})
@@ -499,7 +529,8 @@ export default function Tasks(): JSX.Element {
       remark: task.remark || '',
       uploadProfileId: task.uploadProfileId || undefined,
       autoUpload: Boolean(task.autoUpload),
-      indicatorRetry: task.indicatorRetry ?? 3
+      indicatorRetry: task.indicatorRetry ?? 3,
+      ukeyStationIds: task.ukeyStationIds || []
     })
     const saved = Object.fromEntries(
       Object.entries(task.indicatorWindows || {}).map(([name, window]) => [name, [window.start, window.end] as [number, number]])
@@ -580,6 +611,7 @@ export default function Tasks(): JSX.Element {
         uploadProfileId: values.uploadProfileId || '',
         autoUpload: Boolean(values.autoUpload),
         indicatorRetry: Number(values.indicatorRetry ?? 3),
+        ukeyStationIds: values.ukeyStationIds || [],
         enabled: values.enabled,
         remark: values.remark?.trim() || undefined,
         createdAt: editing?.createdAt || Date.now()
@@ -934,6 +966,14 @@ export default function Tasks(): JSX.Element {
           <div className="task-form-grid">
             <Form.Item label="任务名称" name="name" rules={[{ required: true, message: '请输入任务名称' }]}>
               <Input placeholder="例如：现货出清电量采集" maxLength={64} showCount value={nameWatch} />
+            </Form.Item>
+            <Form.Item label="UKey" name="ukeyStationIds">
+              <Select
+                mode="multiple"
+                allowClear
+                placeholder="选择场站"
+                options={stationOptions}
+              />
             </Form.Item>
             <Form.Item label="登录方式" name="login" tooltip="选择用于登录的工作流">
               <Select

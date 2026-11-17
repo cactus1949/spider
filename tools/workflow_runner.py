@@ -3270,6 +3270,28 @@ class WorkflowRunner:
             f"登录提交后 {timeout_ms}ms 内没有进入工作台（检查页：{checked}）"
         )
 
+    def _confirm_station_certificate(self) -> None:
+        """立即登录之后，如有原生证书窗口，只确认唯一对上的单位。
+
+        窗口没出现就继续。对不上或有多行时停下，不点确定。
+        非 Windows 上不假装已经点过。
+        """
+        station = self.config.get("_station") if isinstance(self.config, dict) else None
+        if not isinstance(station, dict):
+            return
+        keyword = str(station.get("org_name") or "").strip()
+        if not keyword:
+            return
+        from spider_gd.infrastructure.windows.cert_dialog import confirm_certificate
+
+        result = confirm_certificate(keyword, str(station.get("cert_thumbprint") or ""))
+        if result.absent and result.needs_windows:
+            return
+        if result.absent:
+            return
+        if result.row_index is None or not result.ok:
+            raise WorkflowExecutionError(result.reason or "证书窗口无法唯一确认")
+
     async def _do_click(self, step: dict) -> None:
         """点击元素。如果 expect=new_tab，等待新标签页打开。"""
         selector = step.get("selector", "")
@@ -3303,6 +3325,8 @@ class WorkflowRunner:
                     clicked = await self._low_profile_click(selector, timeout=timeout)
                 if not clicked:
                     raise WorkflowExecutionError(self._click_miss_message(selector))
+                if watch_login:
+                    self._confirm_station_certificate()
             except Exception as exc:
                 if step.get("allow_empty") and step.get("no_data_selector"):
                     no_data_selector = str(step["no_data_selector"])

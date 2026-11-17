@@ -401,7 +401,7 @@ def pick_certificate_row(
     """在证书表里按单位名称选出最吻合的一行。
 
     表头对应证书窗口的「颁发给、单位、截止日期、颁发者」。多行都能对上时，
-    取得分更高的一行；得分相同则保留表里更靠前的一行。
+    只取得分严格更高的那一行。得分相同就不选，避免碰到多行时拿第一行。
 
     Args:
         keyword: 场站配置的单位名称。
@@ -417,20 +417,25 @@ def pick_certificate_row(
         ... ]
         >>> pick_certificate_row("浈江", rows)["颁发给"]
         '乙'
+        >>> pick_certificate_row("三峡新能源", rows) is None
+        True
     """
-    best: dict[str, str] | None = None
-    best_score = 0
     key = normalize_org_name(keyword)
+    scored: list[tuple[int, dict[str, str]]] = []
     for row in rows:
         unit_text = str(row.get("单位") or row.get("org") or "")
         if not org_name_matches(keyword, unit_text):
             continue
         unit = normalize_org_name(unit_text)
         score = len(key) if key in unit else len(unit)
-        if best is None or score > best_score:
-            best = row
-            best_score = score
-    return best
+        scored.append((score, row))
+    if not scored:
+        return None
+    best_score = max(score for score, _row in scored)
+    winners = [row for score, row in scored if score == best_score]
+    if len(winners) != 1:
+        return None
+    return winners[0]
 
 
 def find_station(profiles: list[StationProfile], choice: str) -> StationProfile | None:

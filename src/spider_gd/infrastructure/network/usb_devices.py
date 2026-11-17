@@ -57,6 +57,7 @@ class UsbDevice:
     pid: str = ""
     ukey_candidate: bool = False
     serial: str = ""
+    parent: str = ""
 
     def as_dict(self) -> dict[str, str | bool]:
         """转成接口返回的字段。
@@ -136,7 +137,7 @@ def parse_pnp_devices(raw: str) -> list[UsbDevice]:
         seen.add(device_id)
         vid, pid = _vid_pid(device_id)
         serial = usb_serial(device_id)
-        devices.append(_device(device_id, name, vid, pid, serial))
+        devices.append(_device(device_id, name, vid, pid, serial, parent))
     return _with_unique_labels(_collapse_interfaces(devices))
 
 
@@ -695,6 +696,7 @@ def _device(
     vid: str,
     pid: str,
     serial: str = "",
+    parent: str = "",
 ) -> UsbDevice:
     """组装一条还没处理重名的设备。
 
@@ -720,6 +722,7 @@ def _device(
         pid=pid,
         ukey_candidate=vid in _UKEY_VIDS,
         serial=serial,
+        parent=parent,
     )
 
 
@@ -769,7 +772,8 @@ def _with_unique_labels(devices: list[UsbDevice]) -> list[UsbDevice]:
 def _collapse_interfaces(devices: list[UsbDevice]) -> list[UsbDevice]:
     """把同一把设备的多个接口收成一行。
 
-    只有序列号相同的接口才会合并。没有序列号的两把钥匙仍会各占一行。
+    有稳定序列号的接口按序列号合并。没有序列号时，HID 子节点顺着 Parent
+    收到它的 USB 父节点上。不同父节点、又没有序列号的两把钥匙不会按 VID/PID 并成一把。
 
     Args:
         devices: 已经滤过的外部设备。
@@ -785,16 +789,34 @@ def _collapse_interfaces(devices: list[UsbDevice]) -> list[UsbDevice]:
         >>> len(_collapse_interfaces(rows))
         1
     """
+    by_id = {device.device_id.upper(): device for device in devices}
+
+    def _root(device: UsbDevice) -> UsbDevice:
+        seen: set[str] = set()
+        current = device
+        while True:
+            parent = (current.parent or "").upper()
+            if not parent or parent not in by_id or parent in seen:
+                return current
+            seen.add(current.device_id.upper())
+            current = by_id[parent]
+
     grouped: dict[str, UsbDevice] = {}
     order: list[str] = []
     for device in devices:
-        key = f"{device.vid}:{device.pid}:{device.serial}" if device.serial else device.device_id
+        top = _root(device)
+        serial = top.serial or device.serial
+        if serial and not _LOCATION_SERIAL.match(serial):
+            key = f"sn:{top.vid}:{top.pid}:{serial}"
+        else:
+            key = f"id:{top.device_id.upper()}"
         current = grouped.get(key)
         if current is None:
-            grouped[key] = device
+            grouped[key] = top if _device_rank(top) >= _device_rank(device) else device
             order.append(key)
             continue
-        grouped[key] = current if _device_rank(current) >= _device_rank(device) else device
+        challenger = top if _device_rank(top) >= _device_rank(device) else device
+        grouped[key] = current if _device_rank(current) >= _device_rank(challenger) else challenger
     return [grouped[key] for key in order]
 
 
