@@ -340,6 +340,7 @@ class SharedBrowser:
         }
         self._run: dict[str, Any] | None = None
         self._resume_event = asyncio.Event()
+        self._station_skip = False
         self._cancel_requested = False
         self._active_runner: Any = None
         if config_path and config_path.exists():
@@ -1232,6 +1233,21 @@ class SharedBrowser:
         if self._run["state"] != "paused" or self._run["pause_version"] != pause_version:
             raise ValueError("暂停状态已变化，请刷新后再操作")
         self._resume_event.set()
+
+    def skip_station(self, run_id: str, pause_version: int) -> None:
+        """继续等待，但告诉任务跳过当前场站。"""
+        if not self._execution_lock.locked() or not self._run or self._run["id"] != run_id:
+            raise ValueError("运行实例已结束或发生变化")
+        if self._run["state"] != "paused" or self._run["pause_version"] != pause_version:
+            raise ValueError("暂停状态已变化，请刷新后再操作")
+        self._station_skip = True
+        self._resume_event.set()
+
+    def consume_station_skip(self) -> bool:
+        """取出并清掉「跳过当前场站」标记。"""
+        value = bool(getattr(self, "_station_skip", False))
+        self._station_skip = False
+        return value
 
     def cancel(self, run_id: str) -> None:
         if not self._execution_lock.locked() or not self._run or self._run["id"] != run_id:

@@ -400,6 +400,7 @@ def apply_catchup_storage(
     download_dir: str | None = None,
     storage_overridden: bool = False,
     custom_filenames: object = None,
+    ukey_station_ids: list | None = None,
 ) -> dict:
     """把这次补数的落盘路径写进配置。
 
@@ -418,6 +419,7 @@ def apply_catchup_storage(
         download_dir (str | None): 本次下载根目录。非空时覆盖任务目录；空表示不单独指定。
         storage_overridden (bool): 为 True 时，即使路径字段为空也不回退到任务。
         custom_filenames: 这次补数的自定义文件名。None 表示沿用匹配任务；传了对象就用这次的。
+        ukey_station_ids: 这次补数要跑的场站。None 表示沿用匹配任务里保存的场站。
 
     Returns:
         dict: 带上 path_structure / path_template / path_folders，以及可能的下载目录。
@@ -442,6 +444,19 @@ def apply_catchup_storage(
     """
     chosen = dict(config)
     explicit_dir = str(download_dir or "").strip()
+    from spider_gd.core.ukey_plan import configured_ukey_ids
+
+    def _keep_ukeys(matched_task: dict | None) -> None:
+        if ukey_station_ids is not None:
+            chosen["ukey_station_ids"] = configured_ukey_ids({"ukey_station_ids": ukey_station_ids})
+            return
+        inherited = configured_ukey_ids(matched_task)
+        if inherited:
+            chosen["ukey_station_ids"] = inherited
+            return
+        own = configured_ukey_ids(chosen)
+        if own:
+            chosen["ukey_station_ids"] = own
     provided = (
         bool(storage_overridden)
         or path_structure is not None
@@ -457,6 +472,7 @@ def apply_catchup_storage(
         chosen["download_dir_custom"] = bool(explicit_dir)
         _apply_catchup_custom_filenames(chosen, custom_filenames, matched)
         _remember_structure_indicators(chosen, matched)
+        _keep_ukeys(matched)
         return chosen
 
     if matched is not None:
@@ -474,6 +490,7 @@ def apply_catchup_storage(
         chosen["download_dir_custom"] = True
     _apply_catchup_custom_filenames(chosen, custom_filenames, matched)
     _remember_structure_indicators(chosen, matched)
+    _keep_ukeys(matched)
     return chosen
 
 
@@ -647,6 +664,12 @@ class TaskRunner:
         self._gateway_reset_used = False
         self.indicators = task_config.get("indicators", [])
         self.download_dir = download_dir
+        self._download_root = download_dir
+        self._unattended = bool(task_config.get("_unattended"))
+        self._skipped_stations = list(task_config.get("_skipped_stations") or [])
+        self._station_results: list[dict[str, str]] = []
+        self._station_report_sent = False
+        self._active_station_name = ""
         self.headless = headless
         self.minimized = minimized
         self._workflow_loader = workflow_loader  # (id: str) -> dict | None
@@ -690,6 +713,9 @@ class TaskRunner:
         self._failed = False
         self._had_error = False
         self._failure_reason = ""
+        self._defer_terminal = False
+        self._force_station_login = False
+        self._terminal_sent = False
         self._task_error_emitted = False
         self._storage_state_path = self._resolve_storage_state_path(Path(download_dir))
         self._login_done = False
@@ -787,6 +813,29 @@ class TaskRunner:
         session = session or get_shared_browser()
         async with session.execution(self.config.get("_control_name", self.name), on_event) as emit:
             self._shared_session = session
+            base_emit = emit
+
+            def emit(payload):
+                if isinstance(payload, dict) and self._defer_terminal and payload.get("event") == "task_error":
+                    self._had_error = True
+                    if not self._failure_reason:
+                        self._failure_reason = str(payload.get("error") or "")
+                    return
+                if isinstance(payload, dict) and payload.get("event") in {"task_error", "task_done"}:
+                    self._terminal_sent = True
+                    if payload.get("event") == "task_error":
+                        self._task_error_emitted = True
+                if isinstance(payload, dict) and self._active_station_name:
+                    if payload.get("event") in {"file_expected", "file_result", "repeat_no_data"}:
+                        folders = list(payload.get("folders") or [])
+                        if self._active_station_name not in folders:
+                            payload = {
+                                **payload,
+                                "folders": [self._active_station_name, *folders],
+                                "station": self._active_station_name,
+                            }
+                base_emit(payload)
+
             self._on_event = emit
             self._wait_continue = session.wait_continue
             self._browser, self._context = session._browser, session.page.context
@@ -835,33 +884,58 @@ class TaskRunner:
             _emit("indicator_plan", items=plan_rows)
 
             stations = self._station_queue or [None]
+            multi = len(stations) > 1
+            self._defer_terminal = multi
+            self._rolled = {"success": 0, "failed": 0, "skipped": 0}
             try:
                 for station_index, station in enumerate(stations):
-                    if self._stopped or self._failed:
+                    user_cancelled = bool(self._stopped or session._cancel_requested)
+                    if user_cancelled:
                         break
+                    self._failed = False
+                    self._gateway_reset_used = False
                     step_idx = 0
                     if isinstance(station, dict):
-                        self._use_station(station, station_index, len(stations))
-                        if self._failed:
-                            _emit("task_error", error=self._failure_reason or "场站准备失败")
-                            self._task_error_emitted = True
+                        prepared = await self._use_station(station, station_index, len(stations))
+                        if prepared == "stop":
                             break
-                        if len(stations) > 1:
-                            await self._return_to_login_page()
-                            self._login_done = False
+                        if prepared == "skip":
+                            continue
+                        if self._failed:
+                            if self._close_station(
+                                station, station_index, len(stations), _emit,
+                                failed=True, count_failure=True,
+                            ) == "stop":
+                                break
+                            continue
+                    if multi:
+                        await self._drop_station_session()
+                        self._login_done = False
+                        self._force_station_login = True
+                    else:
+                        self._force_station_login = False
                     if self.login_name:
                         step_idx += 1
                         await self._dismiss_workbench_popups()
                         if self._failed:
-                            break
-                        auth = await session.check_auth()
-                        if auth["state"] == "authenticated":
-                            self._login_done = True
-                        elif auth["state"] == "unauthenticated":
-                            # 任务配置了登录流程才自动登录。全局会话保持 reuse_only。
+                            if self._close_station(
+                                station, station_index, len(stations), _emit,
+                                failed=True, count_failure=True,
+                            ) == "stop":
+                                break
+                            continue
+                        if multi:
                             self._login_done = False
                         else:
-                            self._login_done = await session.require_auth(allow_auto=False)
+                            from spider_gd.core.ukey_plan import should_reuse_login
+
+                            auth = await session.check_auth()
+                            if should_reuse_login(station_count=1, auth_state=auth["state"]):
+                                self._login_done = True
+                            elif auth["state"] == "unauthenticated":
+                                self._login_done = False
+                            else:
+                                self._login_done = await session.require_auth(allow_auto=False)
                         if not self._login_done:
                             await self._run_login_shared(step_idx, total_steps, _emit)
                             if not self._failed:
@@ -870,12 +944,22 @@ class TaskRunner:
                             _emit("task_step", step=step_idx, total=total_steps, phase="login",
                                   name=self.login_name, status="done", message="复用当前业务登录态")
                         await self._dismiss_workbench_popups()
-                        if self._failed:
-                            break
+                        if self._failed or self._stopped or session._cancel_requested:
+                            if self._close_station(
+                                station, station_index, len(stations), _emit,
+                                failed=bool(self._failed), count_failure=bool(self._failed),
+                            ) == "stop":
+                                break
+                            continue
                     else:
                         await self._dismiss_workbench_popups()
-                        if self._failed:
-                            break
+                        if self._failed or self._stopped or session._cancel_requested:
+                            if self._close_station(
+                                station, station_index, len(stations), _emit,
+                                failed=bool(self._failed), count_failure=bool(self._failed),
+                            ) == "stop":
+                                break
+                            continue
                     self._summary = {"success": 0, "failed": 0, "skipped": 0}
                     for index, item in enumerate(runs):
                         if self._stopped or session._cancel_requested or self._failed:
@@ -916,37 +1000,153 @@ class TaskRunner:
                         outcome = await self._run_with_retries(item, step_idx, total_steps, _emit, keys)
                         if outcome == "fatal":
                             break
-                    if self._stopped or session._cancel_requested or self._failed:
-                        if not self._task_error_emitted:
-                            _emit("task_error", error=self._failure_reason or "用户中止")
-                            self._task_error_emitted = True
+                    for key in self._rolled:
+                        self._rolled[key] += self._summary[key]
+                    if self._close_station(
+                        station, station_index, len(stations), _emit,
+                        failed=bool(self._failed),
+                    ) == "stop":
                         break
-                    message = (
-                        f"成功 {self._summary['success']} 项，失败 {self._summary['failed']} 项，"
-                        f"跳过 {self._summary['skipped']} 项"
-                    )
-                    _emit("task_summary", **self._summary, message=message)
-                    if station_index == len(stations) - 1:
-                        _emit("task_done", name=self.name, **self._summary, message=message)
+                if not self._terminal_sent:
+                    self._defer_terminal = False
+                    if self._stopped or session._cancel_requested:
+                        _emit("task_error", error=self._failure_reason or "用户中止")
+                        self._task_error_emitted = True
+                        self._terminal_sent = True
                     else:
-                        station_name = station.get("name", "") if isinstance(station, dict) else ""
-                        _emit(
-                            "station_done",
-                            name=station_name,
-                            index=station_index + 1,
-                            total=len(stations),
-                            message=f"场站 {station_name} 的指标已完成，准备切换下一个场站",
-                        )
-                        self._login_done = False
+                        self._emit_terminal(_emit)
             except Exception as exc:
+                self._defer_terminal = False
                 self._record_failure(str(exc))
-                _emit("task_error", error=str(exc))
+                if not self._terminal_sent:
+                    _emit("task_error", error=str(exc))
+                    self._task_error_emitted = True
+                    self._terminal_sent = True
             finally:
+                with contextlib.suppress(Exception):
+                    self._emit_station_report(_emit)
                 with contextlib.suppress(Exception):
                     await self._finish_indicator_pages()
                 session._active_runner = None
 
-    def _use_station(self, station: dict, index: int, total: int) -> None:
+    def _close_station(self, station, index: int, total: int, _emit, *, failed: bool, count_failure: bool = False) -> str:
+        """记下这一站的结果，并决定后面的站还跑不跑。
+
+        Args:
+            station: 当前场站。没有场站队列时为 None。
+            index: 从 0 开始。
+            total: 场站数。
+            _emit: 任务事件回调。
+            failed: 这一站没有跑完。
+            count_failure: 登录还没进入指标时失败，要单独记一次失败。
+
+        Returns:
+            str: ``station_followup`` 的结果。``stop`` 时调用方要结束循环。
+        """
+        from spider_gd.core.ukey_plan import station_followup
+
+        session = self._shared_session
+        user_cancelled = bool(self._stopped or (session and getattr(session, "_cancel_requested", False)))
+        name = station.get("name", "") if isinstance(station, dict) else ""
+        action = station_followup(
+            user_cancelled=user_cancelled,
+            station_failed=bool(failed) and not user_cancelled,
+            more_stations=index < total - 1,
+        )
+        if not user_cancelled and not failed:
+            message = (
+                f"成功 {self._summary['success']} 项，失败 {self._summary['failed']} 项，"
+                f"跳过 {self._summary['skipped']} 项"
+            )
+            _emit("task_summary", **self._summary, message=message)
+        if isinstance(station, dict):
+            if user_cancelled:
+                self._station_results.append({"name": name, "status": "skipped", "reason": "已停止"})
+            elif failed:
+                self._station_results.append({
+                    "name": name,
+                    "status": "failed",
+                    "reason": self._failure_reason or "场站执行失败",
+                })
+                if count_failure:
+                    self._rolled["failed"] += 1
+            else:
+                self._station_results.append({"name": name, "status": "ran", "reason": ""})
+        if action == "stop":
+            self._defer_terminal = False
+            if not self._task_error_emitted:
+                _emit("task_error", error=self._failure_reason or "用户中止")
+                self._task_error_emitted = True
+            self._terminal_sent = True
+            return action
+        if action == "next":
+            _emit(
+                "station_done",
+                name=name,
+                index=index + 1,
+                total=total,
+                message=f"场站 {name} 的指标已完成，准备切换下一个场站",
+            )
+            self._login_done = False
+            self._failed = False
+            return action
+        if action == "continue":
+            self._login_done = False
+            self._failed = False
+            return action
+        self._emit_terminal(_emit, station_failed=bool(failed) and not user_cancelled)
+        return action
+
+    def _emit_terminal(self, _emit, *, station_failed: bool = False) -> None:
+        """所有场站都有了结果之后，再发一次任务结束。"""
+        if self._terminal_sent:
+            return
+        self._defer_terminal = False
+        self._emit_station_report(_emit)
+        ran = any(row.get("status") == "ran" for row in self._station_results)
+        unfinished = station_failed or any(
+            row.get("status") in {"failed", "skipped"} for row in self._station_results
+        )
+        if not ran and unfinished:
+            _emit("task_error", error=self._failure_reason or "没有场站执行成功")
+            self._terminal_sent = True
+            self._task_error_emitted = True
+            return
+        failed = self._rolled["failed"]
+        message = (
+            f"成功 {self._rolled['success']} 项，失败 {failed} 项，"
+            f"跳过 {self._rolled['skipped']} 项"
+        )
+        _emit(
+            "task_done",
+            name=self.name,
+            success=self._rolled["success"],
+            failed=failed,
+            skipped=self._rolled["skipped"],
+            message=message,
+        )
+        self._terminal_sent = True
+
+    def _emit_station_report(self, _emit) -> None:
+        """把已跳过和已执行的场站一起写进结果。"""
+        rows = [
+            *self._skipped_stations,
+            *self._station_results,
+        ]
+        if rows and not self._station_report_sent:
+            self._station_report_sent = True
+            _emit("station_report", stations=rows)
+
+    async def _drop_station_session(self) -> None:
+        """清掉上一场站的登录cookie，不新开页面跳转。"""
+        session = self._shared_session
+        context = getattr(getattr(session, "page", None), "context", None)
+        if context is not None:
+            with contextlib.suppress(Exception):
+                await context.clear_cookies()
+        self._login_done = False
+
+    async def _use_station(self, station: dict, index: int, total: int) -> str:
         """切换到指定场站的证书密码，并连接它的 WiFi。
 
         Args:
@@ -955,41 +1155,131 @@ class TaskRunner:
             total: 本次要执行的场站数。
 
         Returns:
-            None: 结果通过事件送出。WiFi 连接失败时记为任务失败。
+            str: ``ok`` 继续采集，``skip`` 跳过这一站，``stop`` 停止整个任务。
 
         Examples:
-            >>> runner = TaskRunner({"name": "t"}, station_queue=[{"name": "阳江", "cert_password": "pin"}])
-            >>> runner._use_station(runner._station_queue[0], 0, 1)
+            >>> import asyncio
+            >>> runner = TaskRunner({"name": "t", "_unattended": True}, station_queue=[{"name": "阳江", "cert_password": "pin"}])
+            >>> asyncio.run(runner._use_station(runner._station_queue[0], 0, 1))
+            'ok'
             >>> runner._cert_password
             'pin'
         """
         name = str(station.get("name") or "").strip()
+        self._active_station_name = name
         cert_password = str(station.get("cert_password") or "").strip()
         if cert_password:
             self._cert_password = cert_password
+        self._current_station = dict(station)
+        if name and total > 1:
+            from spider_gd.core.output_paths import sanitize_segment, station_scoped_path
+
+            target = Path(self._download_root) / sanitize_segment(name)
+            target.mkdir(parents=True, exist_ok=True)
+            self.download_dir = str(target)
+            if not hasattr(self, "_output_dirs_base"):
+                self._output_dirs_base = self.output_dirs
+                self._indicator_dirs_base = dict(self.indicator_dirs)
+            self.output_dirs = {
+                indicator: {
+                    key: station_scoped_path(self._download_root, name, path)
+                    for key, path in mapping.items()
+                }
+                for indicator, mapping in self._output_dirs_base.items()
+            }
+            self.indicator_dirs = {
+                key: station_scoped_path(self._download_root, name, path)
+                for key, path in self._indicator_dirs_base.items()
+            }
         self._on_event({
             "event": "station_start",
             "name": name,
             "index": index + 1,
             "total": total,
-            "message": f"第 {index + 1}/{total} 个场站：{name}",
+            "message": name,
         })
         ssid = str(station.get("wifi_ssid") or "").strip()
         if not ssid:
-            return
-        from spider_gd.infrastructure.network.wifi_connector import WifiConnectOptions, WifiConnector
+            return "ok"
+        outcome = await self._connect_station_wifi(name, ssid, str(station.get("wifi_password") or ""))
+        return outcome
 
-        result = WifiConnector().prepare(
-            WifiConnectOptions(ssid=ssid, password=str(station.get("wifi_password") or ""))
-        )
-        self._on_event({
-            "event": "station_wifi",
-            "name": name,
-            "ok": result.ok,
-            "message": result.message,
+    async def _connect_station_wifi(self, name: str, ssid: str, password: str) -> str:
+        """连已保存的热点。无人值守超时就跳过；有人时可以重试、跳过或停止。"""
+        import time
+
+        import asyncio
+
+        from spider_gd.infrastructure.network.wifi_connector import WifiConnectOptions, WifiConnector
+        from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid, wifi_wait_budget
+
+        connector = WifiConnector()
+        pauses = 0
+
+        def cancelled() -> bool:
+            session = self._shared_session
+            return bool(self._stopped or (session and getattr(session, "_cancel_requested", False)))
+
+        while pauses < 3:
+            self._on_event({
+                "event": "station_wifi",
+                "name": name,
+                "ok": False,
+                "message": "扫描",
+            })
+            result = await asyncio.to_thread(
+                wait_for_saved_ssid,
+                ssid,
+                visible=lambda: [item.ssid for item in connector.list_networks()],
+                connect=lambda: connector.prepare(
+                    WifiConnectOptions(ssid=ssid, password=password)
+                ).ok,
+                timeout_sec=wifi_wait_budget(self._unattended),
+                clock=time.monotonic,
+                sleeper=time.sleep,
+                cancelled=cancelled,
+            )
+            self._on_event({
+                "event": "station_wifi",
+                "name": name,
+                "ok": result.ok,
+                "message": result.reason or result.status,
+            })
+            if result.status == "cancelled":
+                self._stopped = True
+                self._station_results.append({"name": name, "status": "skipped", "reason": "已停止"})
+                return "stop"
+            if result.ok:
+                return "ok"
+            if self._unattended or self._wait_continue is None:
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": result.reason,
+                })
+                return "skip"
+            self._on_event({
+                "event": "error_pause",
+                "message": result.reason,
+                "kind": "wifi",
+            })
+            continued = await self._wait_continue()
+            session = self._shared_session
+            skipped = bool(session and getattr(session, "consume_station_skip", lambda: False)())
+            if skipped:
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": result.reason,
+                })
+                return "skip"
+            if not continued:
+                self._stopped = True
+                self._station_results.append({
+                    "name": name, "status": "skipped", "reason": "已停止",
+                })
+                return "stop"
+            pauses += 1
+        self._station_results.append({
+            "name": name, "status": "skipped", "reason": "未搜到已保存的热点，请检查设备电源",
         })
-        if not result.ok:
-            self._record_failure(result.message or f"连接 WiFi 失败：{ssid}")
+        return "skip"
 
     async def _return_to_login_page(self) -> None:
         """打开任务入口页，让下一场站重新走登录。
@@ -1389,6 +1679,9 @@ class TaskRunner:
             if val:
                 _raw = _raw.replace(placeholder, val)
         login_cfg = _json.loads(_raw)
+        login_cfg["_station"] = dict(getattr(self, "_current_station", {}) or {})
+        if self._force_station_login:
+            login_cfg["_force_login"] = True
 
         # 执行登录工作流（共享浏览器）—— 每次都重新登录，不依赖 storage_state
         _emit("task_step", step=step_idx, total=total,
@@ -1951,4 +2244,3 @@ class TaskRunner:
             self._failure_reason = reason
         if stop:
             self._failed = True
-            self._stopped = True

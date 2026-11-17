@@ -2590,6 +2590,9 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 if status in status_messages:
                     return status_messages[status]
                 return f"{icon} [{step}/{total}] {label}: {status}"
+            elif evt == "station_report":
+                from spider_gd.core.ukey_plan import format_station_report
+                return format_station_report(data.get("stations") or [])
             elif evt == "task_window":
                 return f"📅 日期窗口 {data.get('index', '?')}/{data.get('total', '?')}: {data.get('date', '')}"
             elif evt == "task_done":
@@ -2695,6 +2698,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             "path_folders": cfg.get("path_folders") or [],
             "path_structure": cfg.get("path_structure", ""),
             "custom_filenames": cfg.get("custom_filenames") or {},
+            "ukey_station_ids": cfg.get("ukey_station_ids") or [],
         }
 
         # 使用任务配置的下载目录，否则用系统默认；任务可自定义日期分层模板
@@ -2819,49 +2823,48 @@ def _task_runner_job(ctx: AppContext, task_id: str):
         ).strip()
 
         station_queue: list[dict[str, str]] = []
-        if _bool_setting(_read_state_setting(ctx, "multiStationEnabled") or "", False):
-            from spider_gd.core.station_picker import StationPickError, choose_task_stations
-            from spider_gd.core.station_profile import parse_station_profiles
-            from spider_gd.infrastructure.network.usb_devices import list_usb_devices
+        from spider_gd.core.ukey_plan import (
+            collect_runtime_plan,
+            configured_ukey_ids,
+            format_station_report,
+        )
+        from spider_gd.core.station_profile import parse_station_profiles
 
-            try:
-                saved_profiles = parse_station_profiles(
-                    _read_state_setting(ctx, "stationProfiles") or ""
-                )
-            except ValueError as exc:
-                saved_profiles = []
-                logger.warning("场站设置无法读取，定时任务按原证书密码继续: {}", exc)
-            try:
-                usb_devices = list_usb_devices()
-            except Exception as exc:
-                logger.warning("读取 UKey 失败，定时任务按原证书密码继续: {}", exc)
-                usb_devices = []
-            plugged_ukeys = [
-                (item.device_id, item.label) for item in usb_devices if item.ukey_candidate
-            ]
-            try:
-                chosen = choose_task_stations(
-                    saved_profiles,
-                    plugged_ukeys,
-                    fallback_cert_password=cert_password,
-                )
-            except StationPickError as exc:
-                reason = str(exc)
-                logger.error("{}（任务 {}）", reason, task_id)
-                ctx.state_store.update_execution_log(
-                    exec_id, status="failed", reason=reason[:200],
-                    updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                return
-            if chosen is None:
-                reason = "已取消选择场站"
+        try:
+            saved_profiles = parse_station_profiles(
+                _read_state_setting(ctx, "stationProfiles") or ""
+            )
+        except ValueError as exc:
+            saved_profiles = []
+            logger.warning("场站设置无法读取，定时任务不按场站切换: {}", exc)
+        selected_ids = configured_ukey_ids(task_cfg)
+        if saved_profiles or selected_ids:
+            ukey_plan = collect_runtime_plan(
+                saved_profiles,
+                selected_ids=selected_ids,
+                mode="scheduled",
+                fallback_cert_password=cert_password,
+            )
+            report = format_station_report(ukey_plan.skipped)
+            if report:
+                try:
+                    ctx.state_store.append_execution_log_detail(exec_id, report)
+                except Exception:
+                    pass
+            if not ukey_plan.started:
+                reason = "没有可执行的场站"
                 logger.info("{}（任务 {}）", reason, task_id)
                 ctx.state_store.update_execution_log(
                     exec_id, status="failed", reason=reason,
                     updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
                 return
-            station_queue = chosen
+            station_queue = ukey_plan.runnable
+            task_cfg["_skipped_stations"] = [
+                {"name": item.name, "status": item.status, "reason": item.reason}
+                for item in ukey_plan.skipped
+            ]
+        task_cfg["_unattended"] = True
         from task_retry import remember_run_plan
 
         task_cfg["_exec_id"] = exec_id
@@ -2916,6 +2919,15 @@ def _task_runner_job(ctx: AppContext, task_id: str):
 
         final_status = "success"
         final_reason = ""
+        from spider_gd.core.ukey_plan import acquire_ukey_run, release_ukey_run
+        hold_ukey = bool(station_queue)
+        if hold_ukey and not acquire_ukey_run():
+            reason = "另一个任务正在使用证书或网络"
+            ctx.state_store.update_execution_log(
+                exec_id, status="failed", reason=reason,
+                updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return
         try:
             await runner.run(on_event=_capture_events)
             if errors:
@@ -2929,6 +2941,8 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             final_reason = str(e)[:200]
             logger.error("❌ 定时任务异常: {} - {}", task_id, str(e)[:500])
         finally:
+            if hold_ukey:
+                release_ukey_run()
             zip_path = None
             try:
                 zip_path = await deliver_task_runner_downloads(

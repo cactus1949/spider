@@ -211,6 +211,7 @@ class CatchupRunRequest(BaseModel):
     minimized: str = "true"
     upload_profile_id: str = ""
     auto_upload: bool = False
+    ukey_station_ids: list[str] | None = None
 
 
 def _make_wf_loader(service):
@@ -1584,6 +1585,7 @@ def create_app(
                     "output_windows": f.get("output_windows") or {},
                     "upload_profile_id": f.get("upload_profile_id", ""),
                     "auto_upload": bool(f.get("auto_upload", False)),
+                    "ukey_station_ids": f.get("ukey_station_ids") or [],
                 })
                 imported.append(cfg_id)
             except Exception as exc:
@@ -1809,6 +1811,9 @@ def create_app(
                     "auto_upload": bool(db_cfg.get("auto_upload", False)),
                     "indicator_retry": db_cfg.get("indicator_retry", cfg.get("indicator_retry", 3)),
                 })
+            from spider_gd.core.ukey_plan import configured_ukey_ids
+
+            cfg["ukey_station_ids"] = configured_ukey_ids(db_cfg) or configured_ukey_ids(cfg)
             if reference_date.strip():
                 cfg["reference_date"] = reference_date.strip()
 
@@ -1854,6 +1859,9 @@ def create_app(
                 elif status == "skip":
                     return f"⏭ [{step}/{total}] {label}: 跳过"
                 return f"{icon} [{step}/{total}] {label}: {status}"
+            elif evt == "station_report":
+                from spider_gd.core.ukey_plan import format_station_report
+                return format_station_report(data.get("stations") or [])
             elif evt == "task_window":
                 return f"📅 日期窗口 {data.get('index', '?')}/{data.get('total', '?')}: {data.get('date', '')}"
             elif evt == "repeat_date":
@@ -2041,38 +2049,50 @@ def create_app(
 
         remember_run_plan(service._ctx.state_store, exec_id, cfg)
         station_queue: list[dict[str, str]] = []
-        multi_station = _bool_text(service._ctx.state_store.get_setting("multiStationEnabled"))
-        if multi_station:
-            from spider_gd.core.station_picker import StationPickError, choose_task_stations
-            from spider_gd.core.station_profile import parse_station_profiles
-            from spider_gd.infrastructure.network.usb_devices import list_usb_devices
+        from spider_gd.core.station_picker import pick_stations
+        from spider_gd.core.station_profile import parse_station_profiles
+        from spider_gd.core.ukey_plan import (
+            collect_runtime_plan,
+            configured_ukey_ids,
+            format_station_report,
+        )
 
-            try:
-                saved_profiles = parse_station_profiles(
-                    service._ctx.state_store.get_setting("stationProfiles") or ""
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            try:
-                usb_devices = await _asyncio.to_thread(list_usb_devices)
-            except Exception as exc:
-                logger.warning("读取 UKey 失败，任务按原证书密码继续: {}", exc)
-                usb_devices = []
-            plugged_ukeys = [
-                (item.device_id, item.label) for item in usb_devices if item.ukey_candidate
-            ]
-            try:
-                chosen = await _asyncio.to_thread(
-                    choose_task_stations,
-                    saved_profiles,
-                    plugged_ukeys,
-                    fallback_cert_password=cert_password,
-                )
-            except StationPickError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if chosen is None:
+        try:
+            saved_profiles = parse_station_profiles(
+                service._ctx.state_store.get_setting("stationProfiles") or ""
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        selected_ids = configured_ukey_ids(cfg)
+        if saved_profiles or selected_ids:
+            def _open_once(rows, timeout):
+                picked = pick_stations(rows, timeout_sec=timeout)
+                if picked is None:
+                    return None
+                return [item.id for item in picked]
+
+            ukey_plan = await _asyncio.to_thread(
+                collect_runtime_plan,
+                saved_profiles,
+                selected_ids=selected_ids,
+                mode="manual",
+                fallback_cert_password=cert_password,
+                opener=_open_once,
+            )
+            report = format_station_report(ukey_plan.skipped)
+            if report:
+                with contextlib.suppress(Exception):
+                    service._ctx.state_store.append_execution_log_detail(exec_id, report)
+            if ukey_plan.cancelled:
                 raise HTTPException(status_code=409, detail="已取消选择场站")
-            station_queue = chosen
+            if not ukey_plan.started:
+                raise HTTPException(status_code=409, detail=report or "没有可执行的场站")
+            station_queue = ukey_plan.runnable
+            cfg["_skipped_stations"] = [
+                {"name": item.name, "status": item.status, "reason": item.reason}
+                for item in ukey_plan.skipped
+            ]
+        cfg["_unattended"] = False
         runner = TaskRunner(cfg, download_dir=dl_dir, headless=is_headless,
                           minimized=is_minimized,
                           workflow_loader=_make_wf_loader(service),
@@ -2186,11 +2206,23 @@ def create_app(
             return cont_result[0]
 
         async def _execute_and_finalize():
+            from spider_gd.core.ukey_plan import acquire_ukey_run, release_ukey_run
+            hold_ukey = bool(station_queue)
+            if hold_ukey and not acquire_ukey_run():
+                reason = "另一个任务正在使用证书或网络"
+                _on_event({"event": "task_error", "error": reason})
+                service._ctx.state_store.update_execution_log(
+                    exec_id, status="failed", reason=reason,
+                    updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                return
             try:
                 await runner.run(on_event=_on_event, wait_continue=_wait_continue)
             except Exception as exc:
                 _on_event({"event": "task_error", "error": str(exc)})
             finally:
+                if hold_ukey:
+                    release_ukey_run()
                 final_status = _log_final_status[0]
                 reason = _log_final_status[1] if len(_log_final_status) > 1 else ""
                 try:
@@ -3886,6 +3918,7 @@ def create_app(
             download_dir=body.download_dir,
             storage_overridden=body.storage_overridden,
             custom_filenames=body.custom_filenames,
+            ukey_station_ids=body.ukey_station_ids,
         )
         return await run_task_stream(
             "catchup",
@@ -4002,6 +4035,15 @@ def create_app(
         from spider_gd.core.crawler.shared_browser import get_shared_browser
         try:
             get_shared_browser().resume(body.run_id, body.pause_version)
+            return {"status": "ok"}
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
+    @app.post("/api/browser/skip-station")
+    async def skip_browser_station(body: BrowserRunControlRequest):
+        from spider_gd.core.crawler.shared_browser import get_shared_browser
+        try:
+            get_shared_browser().skip_station(body.run_id, body.pause_version)
             return {"status": "ok"}
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}

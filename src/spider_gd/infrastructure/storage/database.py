@@ -254,6 +254,7 @@ class TaskStateStore:
             ("upload_profile_id", "TEXT NOT NULL DEFAULT ''"),
             ("auto_upload", "INTEGER NOT NULL DEFAULT 0"),
             ("indicator_retry", "INTEGER NOT NULL DEFAULT 3"),
+            ("ukey_station_ids", "TEXT NOT NULL DEFAULT '[]'"),
         ]:
             if col not in existing:
                 try:
@@ -335,7 +336,8 @@ class TaskStateStore:
                         enabled=?, remark=?, download_dir=?, download_dir_custom=?, indicator_windows=?,
                         output_windows=?, path_template=?, path_folders=?, path_structure=?,
                         custom_filenames=?,
-                        upload_profile_id=?, auto_upload=?, indicator_retry=?, updated_at=?
+                        upload_profile_id=?, auto_upload=?, indicator_retry=?,
+                        ukey_station_ids=?, updated_at=?
                     WHERE id=?""",
                     (
                         cfg["name"], cfg.get("login", ""),
@@ -351,6 +353,7 @@ class TaskStateStore:
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
+                        _ukey_station_ids_json(cfg.get("ukey_station_ids")),
                         now, cfg["id"],
                     ),
                 )
@@ -364,9 +367,10 @@ class TaskStateStore:
                          backfill_days, cover_days, enabled, remark, download_dir, download_dir_custom,
                          indicator_windows, output_windows, path_template, path_folders, path_structure,
                          custom_filenames,
-                         upload_profile_id, auto_upload, indicator_retry, created_at, updated_at)
+                         upload_profile_id, auto_upload, indicator_retry, ukey_station_ids,
+                         created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, """
-                    "?, ?, ?, ?, ?, ?)""",
+                    "?, ?, ?, ?, ?, ?, ?)""",
                     (
                         cfg["id"], cfg["name"], cfg.get("login", ""),
                         json.dumps(cfg.get("indicators", [])),
@@ -381,6 +385,7 @@ class TaskStateStore:
                         str(cfg.get("upload_profile_id") or ""),
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
+                        _ukey_station_ids_json(cfg.get("ukey_station_ids")),
                         now, now,
                     ),
                 )
@@ -1600,6 +1605,7 @@ def _task_config_row(row: sqlite3.Row) -> dict:
         "upload_profile_id": _col("upload_profile_id", "") or "",
         "auto_upload": bool(_col("auto_upload", 0)),
         "indicator_retry": _indicator_retry_value(_col("indicator_retry", 3)),
+        "ukey_station_ids": _parse_ukey_station_ids(_col("ukey_station_ids", "[]")),
         "created_at": _col("created_at", 0), "updated_at": _col("updated_at", 0),
     }
 
@@ -1618,6 +1624,40 @@ def _parse_custom_filenames(raw: object) -> dict:
     from spider_gd.core.custom_filename import normalize_custom_filenames
 
     return normalize_custom_filenames(raw)
+
+
+def _ukey_station_ids_json(raw: object) -> str:
+    """把任务选中的场站编号收成 JSON。没选时存空数组。"""
+    import json
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return "[]"
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return "[]"
+    if not isinstance(raw, list):
+        return "[]"
+    return json.dumps([str(item) for item in raw if str(item).strip()], ensure_ascii=False)
+
+
+def _parse_ukey_station_ids(raw: object) -> list[str]:
+    """读出任务上的场站编号。旧任务没有这一列时返回空列表。"""
+    import json
+
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item).strip()]
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if str(item).strip()]
 
 
 def _indicator_retry_value(raw) -> int:

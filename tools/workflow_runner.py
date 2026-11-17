@@ -2554,8 +2554,10 @@ class WorkflowRunner:
         state_file = step.get("restore_state", None)
 
         if self._shared_session is not None:
+            from spider_gd.core.ukey_plan import login_page_can_be_skipped
+
             auth = await self._shared_session.check_auth(self.page)
-            if auth["state"] == "authenticated":
+            if login_page_can_be_skipped(bool(self.config.get("_force_login")), auth["state"]):
                 self._skip_remaining_login_steps = True
                 return
             if state_file:
@@ -2581,8 +2583,12 @@ class WorkflowRunner:
         await self.page.goto(url, wait_until="domcontentloaded", timeout=15000)
         await asyncio.sleep(3)  # 等 SPA 渲染完
         logger.info("  导航到: {}", url)
-        if self.config.get("type") == "login" and (
-            await self._login_stage_ok() or await self._account_marker_visible()
+        if (
+            not self.config.get("_force_login")
+            and self.config.get("type") == "login"
+            and (
+                await self._login_stage_ok() or await self._account_marker_visible()
+            )
         ):
             self._skip_remaining_login_steps = True
             logger.info("  已检测到完整登录状态，跳过后续登录表单步骤")
@@ -3270,6 +3276,65 @@ class WorkflowRunner:
             f"登录提交后 {timeout_ms}ms 内没有进入工作台（检查页：{checked}）"
         )
 
+    def _start_certificate_watch(self):
+        """在点击「立即登录」之前开始看原生证书窗口。
+
+        点击本身可能被这个窗口挡住。监视放在另一条线程里，才能在点击返回前点确定。
+        没有单位关键字时不监视。
+
+        Returns:
+            CertificateWatch | None: 已经 start 的监视。不需要时为 None。
+        """
+        station = self.config.get("_station") if isinstance(self.config, dict) else None
+        if not isinstance(station, dict):
+            return None
+        keyword = str(station.get("org_name") or "").strip()
+        if not keyword:
+            return None
+        from spider_gd.infrastructure.windows.cert_dialog import CertificateWatch
+
+        def cancelled() -> bool:
+            session = getattr(self, "_shared_session", None)
+            return bool(session and getattr(session, "_cancel_requested", False))
+
+        watch = CertificateWatch(
+            keyword,
+            str(station.get("cert_thumbprint") or ""),
+            cancelled=cancelled,
+        )
+        watch.start()
+        return watch
+
+    async def _finish_certificate_watch(self, watch) -> None:
+        """点击返回后收起监视。窗口对不上就失败，没出现则继续登录。"""
+        watch.mark_click_finished()
+        result = await asyncio.to_thread(watch.finish)
+        if result.ok or result.absent:
+            return
+        raise WorkflowExecutionError(result.reason or "证书窗口无法唯一确认")
+
+    def _confirm_station_certificate(self) -> None:
+        """立即登录之后，如有原生证书窗口，只确认唯一对上的单位。
+
+        窗口没出现就继续。对不上或有多行时停下，不点确定。
+        非 Windows 上不假装已经点过。
+        """
+        station = self.config.get("_station") if isinstance(self.config, dict) else None
+        if not isinstance(station, dict):
+            return
+        keyword = str(station.get("org_name") or "").strip()
+        if not keyword:
+            return
+        from spider_gd.infrastructure.windows.cert_dialog import confirm_certificate
+
+        result = confirm_certificate(keyword, str(station.get("cert_thumbprint") or ""))
+        if result.absent and result.needs_windows:
+            return
+        if result.absent:
+            return
+        if result.row_index is None or not result.ok:
+            raise WorkflowExecutionError(result.reason or "证书窗口无法唯一确认")
+
     async def _do_click(self, step: dict) -> None:
         """点击元素。如果 expect=new_tab，等待新标签页打开。"""
         selector = step.get("selector", "")
@@ -3293,6 +3358,7 @@ class WorkflowRunner:
             self._login_origin_page = self.page
             self._login_error_baseline = len(self._page_errors)
             self._arm_login_response_listener(self.page)
+        cert_watch = self._start_certificate_watch() if watch_login else None
         await self._trace_browser_action("click.before")
         try:
             try:
@@ -3303,6 +3369,9 @@ class WorkflowRunner:
                     clicked = await self._low_profile_click(selector, timeout=timeout)
                 if not clicked:
                     raise WorkflowExecutionError(self._click_miss_message(selector))
+                if cert_watch is not None:
+                    await self._finish_certificate_watch(cert_watch)
+                    cert_watch = None
             except Exception as exc:
                 if step.get("allow_empty") and step.get("no_data_selector"):
                     no_data_selector = str(step["no_data_selector"])
@@ -3363,6 +3432,10 @@ class WorkflowRunner:
                 await self._wait_network_quiet(idle_ms=step.get("settle_idle_ms", 500),
                                                timeout=step.get("settle_timeout", 8000))
         finally:
+            if cert_watch is not None:
+                cert_watch.stop()
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(cert_watch.finish, 1)
             if watch_login:
                 await self._disarm_login_response_listener()
 
