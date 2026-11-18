@@ -62,6 +62,15 @@ def test_arm64_build_is_rejected_in_the_hint():
 
 
 @pytest.mark.unit
+def test_pyinstaller_collects_spider_gd_and_report_dates():
+    args = build_backend.spider_gd_pyinstaller_args()
+    assert args[:2] == ["--collect-submodules", "spider_gd"]
+    joined = " ".join(args)
+    assert "spider_gd.core.report_dates" in joined
+    assert str(build_backend.PACKAGE) in joined
+
+
+@pytest.mark.unit
 def test_missing_data_directory_is_not_packed(tmp_path: Path):
     present = tmp_path / "configs"
     present.mkdir()

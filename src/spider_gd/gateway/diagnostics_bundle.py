@@ -23,6 +23,7 @@ from spider_gd.gateway.execution_bundle import (
 )
 
 _TEXT_SUFFIXES = {".log", ".txt", ".json", ".yml", ".yaml", ".html", ".env", ".md"}
+_META_FILES = ("env.json", "README.txt")
 _SECRET_KEYS = (
     "certPassword",
     "accountPassword",
@@ -244,6 +245,11 @@ def _env_snapshot(ctx_bits: dict[str, Any]) -> dict[str, Any]:
     """
     versions: dict[str, str] = {"python": sys.version.split()[0]}
     try:
+        from spider_gd import __version__ as package_version
+    except Exception:
+        package_version = ""
+    versions["spider_gd"] = str(package_version or "")
+    try:
         import importlib.metadata as metadata
 
         versions["playwright"] = metadata.version("playwright")
@@ -262,6 +268,7 @@ def _env_snapshot(ctx_bits: dict[str, Any]) -> dict[str, Any]:
     return {
         "os": platform.platform(),
         "app_version": ctx_bits.get("app_version", ""),
+        "spider_gd": versions["spider_gd"],
         "python": versions["python"],
         "playwright": versions["playwright"],
         "chromium": versions["chromium"],
@@ -343,11 +350,15 @@ def build_diagnostics_zip(
     payload: list[tuple[str, bytes]] = []
     total = 0
 
-    def add_bytes(arcname: str, data: bytes) -> None:
+    def add_bytes(arcname: str, data: bytes, *, essential: bool = False) -> None:
         nonlocal total
         if any(name == arcname for name, _blob in payload):
             return
-        if len(payload) >= _MAX_FILES:
+        content_count = sum(1 for name, _blob in payload if name not in _META_FILES)
+        if not essential and content_count >= _MAX_FILES - len(_META_FILES):
+            notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
+            return
+        if not essential and len(payload) >= _MAX_FILES:
             notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
             return
         blob = data
@@ -360,9 +371,27 @@ def build_diagnostics_zip(
         payload.append((arcname, blob))
         total += len(blob)
 
-    def add_text(arcname: str, text: str) -> None:
+    def add_text(arcname: str, text: str, *, essential: bool = False) -> None:
         cleaned = redact_known_secrets(text, secrets)
-        add_bytes(arcname, cleaned.encode("utf-8"))
+        add_bytes(arcname, cleaned.encode("utf-8"), essential=essential)
+
+    try:
+        disk_free = __import__("shutil").disk_usage(data_path or install_path or ".").free
+    except OSError:
+        disk_free = 0
+    env_doc = _env_snapshot({
+        "app_version": app_version,
+        "install_path": install_path,
+        "data_path": data_path,
+        "sqlite_path": sqlite_path,
+        "user_home": user_home,
+        "disk_free_bytes": disk_free,
+        "network": network or {},
+        "wifi_ssid": wifi_ssid,
+        "ukey": ukey or {},
+        "settings": mask_settings(settings, secrets),
+    })
+    add_text("env.json", json.dumps(env_doc, ensure_ascii=False, indent=2), essential=True)
 
     if log_dir and log_dir.exists():
         for path in sorted(log_dir.rglob("*")):
@@ -425,25 +454,8 @@ def build_diagnostics_zip(
                 relative = path.name
             add_bytes(f"failures/{shot_index:02d}_{relative}", _tail_bytes(path, _MAX_FILE_BYTES))
 
-    try:
-        disk_free = __import__("shutil").disk_usage(data_path or install_path or ".").free
-    except OSError:
-        disk_free = 0
-    env_doc = _env_snapshot({
-        "app_version": app_version,
-        "install_path": install_path,
-        "data_path": data_path,
-        "sqlite_path": sqlite_path,
-        "user_home": user_home,
-        "disk_free_bytes": disk_free,
-        "network": network or {},
-        "wifi_ssid": wifi_ssid,
-        "ukey": ukey or {},
-        "settings": mask_settings(settings, secrets),
-    })
-    add_text("env.json", json.dumps(env_doc, ensure_ascii=False, indent=2))
     readme = "诊断包已脱敏。若仍发现密钥，请不要外传并联系维护人员。\n" + "\n".join(notes)
-    add_text("README.txt", readme)
+    add_text("README.txt", readme, essential=True)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as archive:

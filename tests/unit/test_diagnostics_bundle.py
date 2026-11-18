@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,32 @@ def test_partial_mask_and_known_secret_strip():
     assert "alice" not in secrets
     text = redact_known_secrets("使用 pin-7788 登录 alice", secrets)
     assert "pin-7788" not in text
+
+
+@pytest.mark.unit
+def test_bundle_keeps_env_when_file_limit_is_hit(tmp_path: Path, monkeypatch):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    for index in range(50):
+        (log_dir / f"app-{index:02d}.log").write_text(f"line-{index}\n", encoding="utf-8")
+    monkeypatch.setattr("spider_gd.gateway.diagnostics_bundle._MAX_FILES", 8)
+    dest = tmp_path / "diag.zip"
+    notes = build_diagnostics_zip(
+        dest,
+        settings={},
+        log_dir=log_dir,
+        app_version="0.2.1",
+        now=datetime(2026, 11, 5, 12, 0, 0),
+    )
+    with zipfile.ZipFile(dest) as archive:
+        names = archive.namelist()
+        env = json.loads(archive.read("env.json").decode("utf-8"))
+    assert "env.json" in names
+    assert "README.txt" in names
+    assert env["app_version"] == "0.2.1"
+    assert env.get("spider_gd")
+    assert any("文件上限" in item for item in notes)
+    assert len(names) <= 8
 
 
 @pytest.mark.unit

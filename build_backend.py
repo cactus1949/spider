@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "frontend" / "resources" / "backend"
 ENTRY = ROOT / "backend_entry.py"
 SRC = ROOT / "src"
+PACKAGE = SRC / "spider_gd"
 BUILD = ROOT / "build" / "pyinstaller"
 
 # 平台相关
@@ -67,6 +68,12 @@ HIDDEN_IMPORTS = [
     "spider_gd.core.crawler.session_provider",
     "spider_gd.core.pipeline.local_landing",
     "spider_gd.core.pipeline.data_processor",
+    "spider_gd.core.report_dates",
+    "spider_gd.core.ukey_plan",
+    "spider_gd.core.custom_filename",
+    "spider_gd.infrastructure.windows.cert_dialog",
+    "spider_gd.infrastructure.windows.cert_availability",
+    "spider_gd.infrastructure.network.wifi_wait",
     "spider_gd.core.scheduler.task_scheduler",
     "spider_gd.core.scheduler.backfill",
     "spider_gd.infrastructure.network.network_validator",
@@ -384,6 +391,31 @@ def _pywin32_search_roots() -> list[Path]:
     return roots
 
 
+def spider_gd_pyinstaller_args() -> list[str]:
+    """生成把整个 ``spider_gd`` 打进冻结包的参数。
+
+    登录、日报这类模块经常在函数里才 import。只列一部分 hidden-import
+    时，漏掉的模块在现场会报 ``No module named ...``。
+    ``--add-data`` 必须指向 ``src/spider_gd``，不能把 ``src`` 整目录
+    当成 ``spider_gd``，否则冻结目录里会多一层。
+
+    Returns:
+        list[str]: 追加到 PyInstaller 命令后面的参数。
+
+    Examples:
+        >>> args = spider_gd_pyinstaller_args()
+        >>> args[:2]
+        ['--collect-submodules', 'spider_gd']
+        >>> "spider_gd.core.report_dates" in args
+        True
+    """
+    args = ["--collect-submodules", "spider_gd"]
+    args += ["--hidden-import", "spider_gd.core.report_dates"]
+    if PACKAGE.exists():
+        args += ["--add-data", f"{PACKAGE}{os.pathsep}spider_gd"]
+    return args
+
+
 def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """保留打包时源路径仍然存在的数据目录。
 
@@ -426,10 +458,10 @@ def run_pyinstaller() -> None:
         "--distpath", str(OUTPUT),
         "--workpath", str(BUILD),
         "--specpath", str(ROOT / "build"),
-        "--add-data", f"{SRC}{os.pathsep}spider_gd",
         "--paths", str(SRC),
         "--paths", str(ROOT),   # 让 PyInstaller 找到 tools/
     ]
+    cmd += spider_gd_pyinstaller_args()
 
     present = existing_data_files(DATA_FILES)
     missing = [src for src, _dst in DATA_FILES if not Path(src).exists()]
