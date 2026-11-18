@@ -62,6 +62,24 @@ def test_arm64_build_is_rejected_in_the_hint():
 
 
 @pytest.mark.unit
+def test_ocr_binaries_are_placed_beside_the_pyd(tmp_path: Path):
+    capi = tmp_path / "capi"
+    capi.mkdir()
+    dll = capi / "onnxruntime.dll"
+    pyd = capi / "onnxruntime_pybind11_state.pyd"
+    dll.write_bytes(b"MZ")
+    pyd.write_bytes(b"MZ")
+    pairs = build_backend.onnxruntime_native_files(tmp_path)
+    assert (dll, "onnxruntime/capi") in pairs
+    assert (pyd, "onnxruntime/capi") in pairs
+    args = build_backend.ocr_pyinstaller_args(tmp_path)
+    joined = " ".join(args)
+    assert "--collect-all" in args and "onnxruntime" in joined and "ddddocr" in joined
+    assert f"{dll}{build_backend.os.pathsep}onnxruntime/capi" in joined
+    assert build_backend.missing_ocr_binaries(joined) == []
+
+
+@pytest.mark.unit
 def test_pyinstaller_collects_spider_gd_and_report_dates():
     args = build_backend.spider_gd_pyinstaller_args()
     assert args[:2] == ["--collect-submodules", "spider_gd"]

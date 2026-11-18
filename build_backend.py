@@ -416,6 +416,138 @@ def spider_gd_pyinstaller_args() -> list[str]:
     return args
 
 
+def onnxruntime_package_dir() -> Path | None:
+    """定位当前解释器里的 onnxruntime 包目录。
+
+    Returns:
+        Path | None: 含 ``capi`` 的目录。没安装时为 None。
+
+    Examples:
+        >>> onnxruntime_package_dir() is None or onnxruntime_package_dir().name == "onnxruntime"
+        True
+    """
+    try:
+        import onnxruntime
+    except ImportError:
+        return None
+    file_name = getattr(onnxruntime, "__file__", "") or ""
+    if not file_name:
+        return None
+    return Path(file_name).resolve().parent
+
+
+def onnxruntime_native_files(package_dir: Path) -> list[tuple[Path, str]]:
+    """列出要和验证码 pyd 放在同一目录的本机库。
+
+    ``onnxruntime_pybind11_state.pyd`` 按 Windows 加载规则到自己所在的
+    ``onnxruntime/capi`` 找 ``onnxruntime.dll``。库被放到冻结包根目录时，
+    现场就是「找不到指定的模块」。
+
+    Args:
+        package_dir: ``onnxruntime`` 包目录。
+
+    Returns:
+        list[tuple[Path, str]]: ``(本机文件, 冻结包内目录)``。
+
+    Examples:
+        >>> onnxruntime_native_files(Path("/no/such/onnxruntime"))
+        []
+    """
+    if not package_dir.is_dir():
+        return []
+    found: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for path in package_dir.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in {".dll", ".pyd"}:
+            continue
+        key = path.name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append((path, "onnxruntime/capi"))
+    return found
+
+
+def ocr_pyinstaller_args(package_dir: Path | None) -> list[str]:
+    """生成把验证码模型和 onnxruntime 本机库打进冻结包的参数。
+
+    Args:
+        package_dir: ``onnxruntime`` 包目录。没有时仍收集包名，本机文件留空。
+
+    Returns:
+        list[str]: 追加到 PyInstaller 命令后面的参数。
+
+    Examples:
+        >>> args = ocr_pyinstaller_args(None)
+        >>> "--collect-all" in args and "onnxruntime" in args and "ddddocr" in args
+        True
+    """
+    args = [
+        "--hidden-import", "onnxruntime",
+        "--hidden-import", "onnxruntime.capi.onnxruntime_pybind11_state",
+        "--collect-all", "onnxruntime",
+        "--collect-binaries", "onnxruntime",
+        "--collect-all", "ddddocr",
+    ]
+    for path, dest in onnxruntime_native_files(package_dir or Path()):
+        args += ["--add-binary", f"{path}{os.pathsep}{dest}"]
+    return args
+
+
+def missing_ocr_binaries(toc_text: str) -> list[str]:
+    """检查冻结清单里有没有验证码库的本机文件。
+
+    Args:
+        toc_text: PyInstaller toc 文本。
+
+    Returns:
+        list[str]: 缺失的文件名。都在时为空列表。
+
+    Examples:
+        >>> missing_ocr_binaries("onnxruntime.dll onnxruntime_pybind11_state.pyd")
+        []
+        >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd")
+        True
+    """
+    lowered = toc_text.lower()
+    missing: list[str] = []
+    if "onnxruntime.dll" not in lowered:
+        missing.append("onnxruntime.dll")
+    if "onnxruntime_pybind11_state" not in lowered:
+        missing.append("onnxruntime_pybind11_state.pyd")
+    return missing
+
+
+def assert_ocr_frozen(workpath: Path) -> None:
+    """冻结清单里没有验证码本机库时中止打包。
+
+    Args:
+        workpath: PyInstaller 的 workpath。
+
+    Returns:
+        None: 清单里同时有 dll 和 pyd 时返回。
+
+    Raises:
+        SystemExit: 找不到 toc，或清单里缺本机库。
+
+    Examples:
+        >>> callable(assert_ocr_frozen)
+        True
+    """
+    tocs = sorted(workpath.rglob("*.toc"))
+    if not tocs:
+        raise SystemExit(f"未找到 PyInstaller 清单，无法确认验证码库已打进包：{workpath}")
+    blob = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in tocs)
+    missing = missing_ocr_binaries(blob)
+    if missing:
+        raise SystemExit(
+            "冻结包里没有验证码所需的本机库："
+            + "、".join(missing)
+            + "。现场会报 DLL load failed while importing onnxruntime_pybind11_state。"
+        )
+    print("[done] 验证码本机库已进入冻结清单：onnxruntime.dll、onnxruntime_pybind11_state")
+
+
 def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """保留打包时源路径仍然存在的数据目录。
 
@@ -484,8 +616,8 @@ def run_pyinstaller() -> None:
     except ImportError:
         print("[warn] curl_cffi 未安装，打包将不含 TLS 伪装（httpx 回退）")
 
-    # 收集 ddddocr 的 onnx 模型文件
-    cmd += ["--collect-all", "ddddocr"]
+    # ddddocr 只带上模型不够。pyd 还要在 onnxruntime/capi 里找到 onnxruntime.dll。
+    cmd += ocr_pyinstaller_args(onnxruntime_package_dir())
 
     # 精简包体：排除不会被调用的重量级模块
     cmd += [
@@ -511,6 +643,8 @@ def run_pyinstaller() -> None:
     env["PATH"] = os.pathsep.join(path_parts)
 
     subprocess.run(cmd, check=True, env=env)
+    if IS_WIN:
+        assert_ocr_frozen(BUILD)
 
     # 复制 .env 模板（UTF-8 编码）
     env_template = OUTPUT / ".env"
