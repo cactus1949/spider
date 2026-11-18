@@ -416,6 +416,33 @@ def spider_gd_pyinstaller_args() -> list[str]:
     return args
 
 
+def certificate_ui_pyinstaller_args(*, is_win: bool) -> list[str]:
+    """生成把系统证书窗口自动化库打进冻结包的参数。
+
+    ``uiautomation`` 在点击「立即登录」时才 import。不写进参数的话，
+    冻结包里没有它，证书选择窗口不会被自动点确定。
+
+    Args:
+        is_win: 当前是不是 Windows。其他系统不打这套库。
+
+    Returns:
+        list[str]: 追加到 PyInstaller 命令后面的参数。非 Windows 时为空。
+
+    Examples:
+        >>> "uiautomation" in certificate_ui_pyinstaller_args(is_win=True)
+        True
+        >>> certificate_ui_pyinstaller_args(is_win=False)
+        []
+    """
+    if not is_win:
+        return []
+    return [
+        "--hidden-import", "uiautomation",
+        "--collect-submodules", "uiautomation",
+        "--collect-submodules", "comtypes",
+    ]
+
+
 def onnxruntime_package_dir() -> Path | None:
     """定位当前解释器里的 onnxruntime 包目录。
 
@@ -548,6 +575,92 @@ def assert_ocr_frozen(workpath: Path) -> None:
     print("[done] 验证码本机库已进入冻结清单：onnxruntime.dll、onnxruntime_pybind11_state")
 
 
+_FROZEN_REQUIRED = (
+    "spider_gd.core.report_dates",
+    "spider_gd.infrastructure.network.wifi_wait",
+    "spider_gd.infrastructure.windows.cert_dialog",
+    "uiautomation",
+)
+
+
+def frozen_module_names(exe: Path) -> set[str]:
+    """读出冻结 exe 里可以 import 的模块名。
+
+    Args:
+        exe: ``spider-gd-service.exe``。
+
+    Returns:
+        set[str]: PYZ 里的模块名。
+
+    Raises:
+        SystemExit: exe 里没有 PYZ。
+
+    Examples:
+        >>> callable(frozen_module_names)
+        True
+    """
+    from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+
+    reader = CArchiveReader(str(exe))
+    pyz_name = next(
+        (name for name in reader.toc if name.upper().endswith("PYZ.PYZ")),
+        "",
+    )
+    if not pyz_name:
+        raise SystemExit(f"冻结包里没有 PYZ：{exe}")
+    blob_path = exe.with_suffix(".pyz-check")
+    blob_path.write_bytes(reader.extract(pyz_name))
+    try:
+        return set(ZlibArchiveReader(str(blob_path)).toc)
+    finally:
+        blob_path.unlink(missing_ok=True)
+
+
+def missing_frozen_modules(names: set[str]) -> list[str]:
+    """返回登录、切网和证书窗口还不能导入的模块。
+
+    Args:
+        names: ``frozen_module_names`` 的结果。
+
+    Returns:
+        list[str]: 缺失的模块名。都在时为空列表。
+
+    Examples:
+        >>> missing_frozen_modules({"uiautomation", "spider_gd.core.report_dates", "spider_gd.infrastructure.network.wifi_wait", "spider_gd.infrastructure.windows.cert_dialog"})
+        []
+        >>> "uiautomation" in missing_frozen_modules(set())
+        True
+    """
+    missing: list[str] = []
+    for name in _FROZEN_REQUIRED:
+        present = name in names or any(item.startswith(name + ".") for item in names)
+        if not present:
+            missing.append(name)
+    return missing
+
+
+def assert_frozen_modules(exe: Path) -> None:
+    """冻结包缺登录或证书窗口模块时中止打包。
+
+    Args:
+        exe: 刚打出来的后端 exe。
+
+    Returns:
+        None: 必需模块都在时返回。
+
+    Raises:
+        SystemExit: 有模块不能导入。
+
+    Examples:
+        >>> callable(assert_frozen_modules)
+        True
+    """
+    missing = missing_frozen_modules(frozen_module_names(exe))
+    if missing:
+        raise SystemExit("冻结包不能导入：" + "、".join(missing))
+    print("[done] 登录与证书窗口模块已在冻结包中：" + "、".join(_FROZEN_REQUIRED))
+
+
 def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """保留打包时源路径仍然存在的数据目录。
 
@@ -607,6 +720,7 @@ def run_pyinstaller() -> None:
 
     if IS_WIN:
         cmd += windows_wmi_pyinstaller_args(is_win=True, dlls=pywin32_dlls(_pywin32_search_roots()))
+        cmd += certificate_ui_pyinstaller_args(is_win=True)
 
     # curl_cffi 可选：TLS 指纹伪装（JA3/JA4 绕过）
     try:
@@ -645,6 +759,7 @@ def run_pyinstaller() -> None:
     subprocess.run(cmd, check=True, env=env)
     if IS_WIN:
         assert_ocr_frozen(BUILD)
+        assert_frozen_modules(OUTPUT / f"{APP_NAME}{EXE_SUFFIX}")
 
     # 复制 .env 模板（UTF-8 编码）
     env_template = OUTPUT / ".env"

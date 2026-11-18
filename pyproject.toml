@@ -1,6 +1,6 @@
 [project]
 name = "spider-gd"
-version = "0.2.3"
+version = "0.2.4"
 description = "广东电力交易数据智能采集系统"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -40,6 +40,8 @@ ocr = [
 win = [
     "WMI>=1.5; sys_platform == 'win32'",
     "pywin32>=312; sys_platform == 'win32'",
+    # 点击系统「证书选择」窗口。只在 Windows 上导入。
+    "uiautomation>=2; sys_platform == 'win32'",
 ]
 dev = [
     "pytest>=8.0,<9.0",

@@ -80,7 +80,19 @@ def test_ocr_binaries_are_placed_beside_the_pyd(tmp_path: Path):
 
 
 @pytest.mark.unit
-def test_pyinstaller_collects_spider_gd_and_report_dates():
+def test_certificate_window_library_is_packed_on_windows():
+    assert build_backend.certificate_ui_pyinstaller_args(is_win=False) == []
+    args = build_backend.certificate_ui_pyinstaller_args(is_win=True)
+    assert "uiautomation" in args
+    assert "comtypes" in args
+    present = {
+        "uiautomation",
+        "spider_gd.core.report_dates",
+        "spider_gd.infrastructure.network.wifi_wait",
+        "spider_gd.infrastructure.windows.cert_dialog",
+    }
+    assert build_backend.missing_frozen_modules(present) == []
+    assert "uiautomation" in build_backend.missing_frozen_modules(set())
     args = build_backend.spider_gd_pyinstaller_args()
     assert args[:2] == ["--collect-submodules", "spider_gd"]
     joined = " ".join(args)
