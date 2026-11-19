@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +48,7 @@ DATA_FILES: list[tuple[str, str]] = [
     (str(ROOT / "configs"), "configs"),
     (str(ROOT / "workflows"), "workflows"),
     (str(ROOT / "tools"), "tools"),
+    (str(ROOT / "VERSION"), "."),
 ]
 
 # 动态 import 的模块（PyInstaller 静态分析不到）
@@ -651,6 +653,99 @@ def onnxruntime_package_dir() -> Path | None:
     return Path(file_name).resolve().parent
 
 
+def pe_machine_of(data: bytes) -> int:
+    """读取 PE 文件头里的机器类型。
+
+    Args:
+        data: PE 文件内容。至少要覆盖到 COFF Machine 字段。
+
+    Returns:
+        int: COFF Machine。x64 是 ``0x8664``，ARM64 是 ``0xAA64``。
+
+    Raises:
+        ValueError: 不是 PE，或头部太短。
+
+    Examples:
+        >>> pe_machine_of(_minimal_pe(0x8664)) == 0x8664
+        True
+        >>> pe_machine_of(_minimal_pe(0xAA64)) == 0xAA64
+        True
+    """
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise ValueError("不是 PE 文件")
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if pe + 6 > len(data):
+        raise ValueError("PE 头不完整")
+    return struct.unpack_from("<H", data, pe + 4)[0]
+
+
+def _minimal_pe(machine: int) -> bytes:
+    """构造只含 Machine 字段的最小 PE 头。
+
+    Args:
+        machine: 要写入的 COFF Machine。
+
+    Returns:
+        bytes: 可供 ``pe_machine_of`` 读取的字节。
+
+    Examples:
+        >>> _minimal_pe(0x8664)[:2]
+        b'MZ'
+    """
+    blob = bytearray(0x46)
+    blob[0:2] = b"MZ"
+    struct.pack_into("<I", blob, 0x3C, 0x40)
+    struct.pack_into("<I", blob, 0x40, 0x4550)
+    struct.pack_into("<H", blob, 0x44, machine)
+    return bytes(blob)
+
+
+def find_x64_msvcp140_1() -> Path:
+    """定位可以打进客户 x64 包的 ``MSVCP140_1.dll``。
+
+    构建机是 Windows ARM 时，``System32`` 里的同名文件是 ARM64。
+    那种文件能被虚拟机里的仿真进程加载，客户 Windows 10 x64 会报
+    「找不到指定的模块」。这里只接受机器类型 ``0x8664`` 的文件。
+
+    Returns:
+        Path: x64 DLL 的路径。
+
+    Raises:
+        SystemExit: 找不到 x64 文件，或候选文件不是 x64。
+
+    Examples:
+        >>> callable(find_x64_msvcp140_1)
+        True
+    """
+    candidates: list[Path] = []
+    override = os.environ.get("SPIDER_GD_MSVCP140_1", "").strip()
+    if override:
+        candidates.append(Path(override))
+    candidates.append(Path(r"C:\build\vc-x64\MSVCP140_1.dll"))
+    rejected: list[str] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            machine = pe_machine_of(path.read_bytes())
+        except (OSError, ValueError) as exc:
+            rejected.append(f"{path}（{exc}）")
+            continue
+        if machine != 0x8664:
+            rejected.append(f"{path} 的机器类型是 {hex(machine)}，不是 x64")
+            continue
+        return path
+    detail = "；".join(rejected)
+    raise SystemExit(
+        "没有找到 x64 的 MSVCP140_1.dll，不能继续打包。"
+        "客户 Windows 10 导入验证码库会报找不到指定的模块。"
+        "请把官方 VC++ 2015-2022 x64 运行库中的 MSVCP140_1.dll 放到 "
+        r"C:\build\vc-x64\MSVCP140_1.dll，或设置 SPIDER_GD_MSVCP140_1。"
+        "不要使用 ARM 虚拟机 System32 里的那份。"
+        + (f" 已检查：{detail}" if detail else "")
+    )
+
+
 def onnxruntime_native_files(package_dir: Path) -> list[tuple[Path, str]]:
     """列出要和验证码 pyd 放在同一目录的本机库。
 
@@ -706,6 +801,9 @@ def ocr_pyinstaller_args(package_dir: Path | None) -> list[str]:
     ]
     for path, dest in onnxruntime_native_files(package_dir or Path()):
         args += ["--add-binary", f"{path}{os.pathsep}{dest}"]
+    if sys.platform == "win32" and package_dir is not None:
+        runtime = find_x64_msvcp140_1()
+        args += ["--add-binary", f"{runtime}{os.pathsep}onnxruntime/capi"]
     return args
 
 
@@ -759,32 +857,43 @@ def _ocr_file_in_capi(toc_text: str, filename: str) -> bool:
         start = pos + len(needle)
 
 
-def missing_ocr_binaries(toc_text: str) -> list[str]:
+def missing_ocr_binaries(toc_text: str, *, require_vc: bool | None = None) -> list[str]:
     """检查冻结清单里，验证码 pyd 和它的 dll 是否都靠着 ``onnxruntime/capi``。
 
-    只出现文件名不算。现场的 ``DLL load failed`` 就是 pyd 旁边没有它要的本机库。
+    Windows 上还要求 x64 的 ``MSVCP140_1.dll`` 放在同一目录。构建机系统里
+    有这份库时，自测仍会通过，但客户机器没有就会导入失败。
 
     Args:
         toc_text: PyInstaller toc 或打包参数文本。
+        require_vc: 是否要求 ``MSVCP140_1.dll``。默认只在 Windows 上要求。
 
     Returns:
         list[str]: 缺失或放错目录的文件。都在时为空列表。
 
     Examples:
         >>> sample = "onnxruntime/capi/onnxruntime.dll capi/onnxruntime_pybind11_state.pyd"
-        >>> missing_ocr_binaries(sample)
+        >>> missing_ocr_binaries(sample, require_vc=False)
         []
         >>> doubled = "onnxruntime//capi//onnxruntime.dll onnxruntime//capi//onnxruntime_pybind11_state.pyd"
-        >>> missing_ocr_binaries(doubled)
+        >>> missing_ocr_binaries(doubled, require_vc=False)
         []
-        >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd")
+        >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd", require_vc=False)
         True
+        >>> "MSVCP140_1.dll" in missing_ocr_binaries(sample, require_vc=True)
+        True
+        >>> complete = sample + " onnxruntime/capi/msvcp140_1.dll"
+        >>> missing_ocr_binaries(complete, require_vc=True)
+        []
     """
+    if require_vc is None:
+        require_vc = sys.platform == "win32"
     missing: list[str] = []
     if not _ocr_file_in_capi(toc_text, "onnxruntime.dll"):
         missing.append("onnxruntime.dll")
     if not _ocr_file_in_capi(toc_text, "onnxruntime_pybind11_state"):
         missing.append("onnxruntime_pybind11_state.pyd")
+    if require_vc and not _ocr_file_in_capi(toc_text, "msvcp140_1.dll"):
+        missing.append("MSVCP140_1.dll")
     return missing
 
 

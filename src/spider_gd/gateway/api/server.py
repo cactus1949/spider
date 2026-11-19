@@ -439,7 +439,9 @@ def create_app(
         else:
             yield
 
-    app = FastAPI(title="spider-gd 控制接口", version="0.2.7", lifespan=lifespan)
+    from spider_gd import __version__
+
+    app = FastAPI(title="spider-gd 控制接口", version=__version__, lifespan=lifespan)
 
     def _sync_browser_download_dir() -> None:
         from spider_gd.core.crawler.shared_browser import get_shared_browser
