@@ -1075,7 +1075,10 @@ class SharedBrowser:
                 return {"state": "unauthenticated", "reason": "当前页面不是配置的业务站点"}
             from spider_gd.core.crawler.workbench_popup import read_workbench_popup
 
-            if await read_workbench_popup(page):
+            popup = await read_workbench_popup(page)
+            if popup:
+                text = str(popup.get("text") or "").replace("\n", " ").strip()[:120]
+                logger.info("登录检查看到待处理弹窗: {}", text or "无文本")
                 return {"state": "challenge", "reason": "业务页面存在待处理弹窗"}
             if is_public_portal_url(page.url):
                 return {"state": "unauthenticated", "reason":

@@ -1255,6 +1255,7 @@ class WorkflowRunner:
                     break
             if (self._shared_session and self.config.get("type") == "login"
                     and not self.config.get("_partial_run") and not self._failed and not self._stopped):
+                await self.dismiss_workbench_popups()
                 await self._shared_session.require_auth(
                     page=self.page,
                 )
