@@ -14,6 +14,9 @@ from loguru import logger
 
 def _wmi_list_usb_ids() -> set[str]:
     """通过 WMI 列出当前连接的所有 USB 设备 ID（VID:PID 格式）。"""
+    from spider_gd.infrastructure.com_apartment import ensure_com_apartment
+
+    ensure_com_apartment()
     import wmi  # 延迟导入，非 Windows 环境不影响其余模块
 
     conn = wmi.WMI()
