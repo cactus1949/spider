@@ -24,6 +24,7 @@ from spider_gd.gateway.execution_bundle import (
 
 _TEXT_SUFFIXES = {".log", ".txt", ".json", ".yml", ".yaml", ".html", ".env", ".md"}
 _META_FILES = ("env.json", "README.txt")
+_ESSENTIAL_PREFIXES = ("tasks/",)
 _SECRET_KEYS = (
     "certPassword",
     "accountPassword",
@@ -270,6 +271,7 @@ def _env_snapshot(ctx_bits: dict[str, Any]) -> dict[str, Any]:
         "app_version": ctx_bits.get("app_version", ""),
         "spider_gd": versions["spider_gd"],
         "python": versions["python"],
+        "frozen": bool(getattr(sys, "frozen", False)),
         "playwright": versions["playwright"],
         "chromium": versions["chromium"],
         "screen": screen,
@@ -354,11 +356,12 @@ def build_diagnostics_zip(
         nonlocal total
         if any(name == arcname for name, _blob in payload):
             return
+        kept = essential or arcname in _META_FILES or arcname.startswith(_ESSENTIAL_PREFIXES)
         content_count = sum(1 for name, _blob in payload if name not in _META_FILES)
-        if not essential and content_count >= _MAX_FILES - len(_META_FILES):
+        if not kept and content_count >= _MAX_FILES - len(_META_FILES):
             notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
             return
-        if not essential and len(payload) >= _MAX_FILES:
+        if not kept and len(payload) >= _MAX_FILES:
             notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
             return
         blob = data
@@ -392,6 +395,17 @@ def build_diagnostics_zip(
         "settings": mask_settings(settings, secrets),
     })
     add_text("env.json", json.dumps(env_doc, ensure_ascii=False, indent=2), essential=True)
+
+    if tasks_dir and tasks_dir.exists():
+        for path in sorted(tasks_dir.glob("*.yml")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            add_text(f"tasks/{path.name}", text, essential=True)
+    if store is not None and hasattr(store, "list_task_configs"):
+        try:
+            rendered = json.dumps(store.list_task_configs(), ensure_ascii=False, indent=2)
+            add_text("tasks/task_configs.json", rendered, essential=True)
+        except Exception as exc:
+            notes.append(f"导出任务配置失败: {exc}")
 
     if log_dir and log_dir.exists():
         for path in sorted(log_dir.rglob("*")):
@@ -433,16 +447,6 @@ def build_diagnostics_zip(
             continue
         for path in sorted(folder.glob("*.yml")):
             add_text(f"workflows/{path.name}", path.read_text(encoding="utf-8", errors="replace"))
-
-    if tasks_dir and tasks_dir.exists():
-        for path in sorted(tasks_dir.glob("*.yml")):
-            add_text(f"tasks/{path.name}", path.read_text(encoding="utf-8", errors="replace"))
-    if store is not None and hasattr(store, "list_task_configs"):
-        try:
-            rendered = json.dumps(store.list_task_configs(), ensure_ascii=False, indent=2)
-            add_text("tasks/task_configs.json", rendered)
-        except Exception as exc:
-            notes.append(f"导出任务配置失败: {exc}")
 
     shot_index = 0
     for root in download_dirs or []:

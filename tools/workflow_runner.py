@@ -4912,12 +4912,16 @@ class WorkflowRunner:
         logger.info("  截图保存: {}", path)
 
     def _report_query_fill(self, value: str) -> str:
-        """运行日报才把日期填空换成带年份的查询词。其他工作流返回空字符串。"""
-        from spider_gd.core.report_dates import is_report_workflow, report_fill_value
+        """运行日报才把日期填空换成带年份的查询词。其他工作流返回空字符串。
 
+        先看名称。普通登录填证书密码时不能为了这个判断去导入 ``report_dates``，
+        否则冻结包漏了该模块，登录会停在填表，到不了验证码。
+        """
         name = str(self.config.get("name") or self.config.get("_control_name") or "")
-        if not is_report_workflow(name):
+        if "运行日报" not in name:
             return ""
+        from spider_gd.core.report_dates import report_fill_value
+
         return report_fill_value(value, self.target_date or date.today()) or ""
 
     async def _do_fill(self, step: dict) -> None:

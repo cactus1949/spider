@@ -85,19 +85,26 @@ def test_certificate_window_library_is_packed_on_windows():
     args = build_backend.certificate_ui_pyinstaller_args(is_win=True)
     assert "uiautomation" in args
     assert "comtypes" in args
-    present = {
-        "uiautomation",
-        "spider_gd.core.report_dates",
-        "spider_gd.infrastructure.network.wifi_wait",
-        "spider_gd.infrastructure.windows.cert_dialog",
-    }
-    assert build_backend.missing_frozen_modules(present) == []
-    assert "uiautomation" in build_backend.missing_frozen_modules(set())
+    sources = build_backend.source_package_modules()
+    assert "spider_gd.core.report_dates" in sources
+    assert build_backend.missing_frozen_modules(set(sources), required=sources) == []
+    assert "spider_gd.core.report_dates" in build_backend.missing_frozen_modules(
+        set(), required=["spider_gd.core.report_dates"],
+    )
+    windows = build_backend.required_frozen_modules(include_windows_ui=True)
+    assert "uiautomation" in build_backend.missing_frozen_modules(set(sources), required=windows)
     args = build_backend.spider_gd_pyinstaller_args()
     assert args[:2] == ["--collect-submodules", "spider_gd"]
     joined = " ".join(args)
-    assert "spider_gd.core.report_dates" in joined
-    assert str(build_backend.PACKAGE) in joined
+    for name in sources:
+        assert f"--hidden-import {name}" in joined or name in args
+    data = args[args.index("--add-data") + 1]
+    src, dest = data.split(build_backend.os.pathsep)
+    assert Path(src) == build_backend.PACKAGE
+    assert dest == "spider_gd"
+    imported = build_backend.runtime_tool_imports()
+    assert "spider_gd.core.report_dates" in imported
+    assert build_backend.missing_repo_modules(imported, sources) == []
 
 
 @pytest.mark.unit

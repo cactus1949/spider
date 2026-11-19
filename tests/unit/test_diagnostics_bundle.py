@@ -56,8 +56,40 @@ def test_bundle_keeps_env_when_file_limit_is_hit(tmp_path: Path, monkeypatch):
     assert "README.txt" in names
     assert env["app_version"] == "0.2.1"
     assert env.get("spider_gd")
+    assert "frozen" in env
     assert any("文件上限" in item for item in notes)
     assert len(names) <= 8
+
+
+@pytest.mark.unit
+def test_bundle_keeps_tasks_when_workflows_fill_the_cap(tmp_path: Path, monkeypatch):
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    for index in range(30):
+        (workflows / f"wf-{index:02d}.yml").write_text(f"name: wf-{index}\n", encoding="utf-8")
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    (tasks / "daily.yml").write_text("name: 日常\ncert_password: pin-7788\n", encoding="utf-8")
+    monkeypatch.setattr("spider_gd.gateway.diagnostics_bundle._MAX_FILES", 6)
+    dest = tmp_path / "diag.zip"
+    build_diagnostics_zip(
+        dest,
+        settings={"certPassword": "pin-7788"},
+        workflow_dirs=[workflows],
+        tasks_dir=tasks,
+        app_version="0.2.4",
+        now=datetime(2026, 11, 18, 8, 55, 0),
+    )
+    with zipfile.ZipFile(dest) as archive:
+        names = archive.namelist()
+        env = json.loads(archive.read("env.json").decode("utf-8"))
+        task = archive.read("tasks/daily.yml").decode("utf-8")
+    assert "env.json" in names
+    assert "README.txt" in names
+    assert "tasks/daily.yml" in names
+    assert env["spider_gd"]
+    assert env["app_version"] == "0.2.4"
+    assert "pin-7788" not in task
 
 
 @pytest.mark.unit

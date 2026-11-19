@@ -61,9 +61,10 @@ def test_select_report_notices_deduplicates():
 
 @pytest.mark.unit
 def test_report_search_query_includes_the_year():
-    from spider_gd.core.report_dates import report_file_has_year, report_search_query
     from task_runner import apply_target_date_to_workflow
     from workflow_runner import WorkflowRunner
+
+    from spider_gd.core.report_dates import report_file_has_year, report_search_query
 
     assert report_search_query(date(2026, 11, 13)) == "2026年11月运行日报（11.13）"
     cfg = {
@@ -87,6 +88,38 @@ def test_report_search_query_includes_the_year():
         {"name": "窗口测试", "steps": []}, download_dir="/tmp", target_date=date(2026, 11, 13),
     )
     assert plain._report_query_fill("{target}") == ""
+    login = {
+        "name": "登陆流程测试",
+        "type": "login",
+        "steps": [{"action": "fill", "selector": "#pwd", "value": "${CERT_PASSWORD}"}],
+    }
+    kept = apply_target_date_to_workflow(login, date(2026, 11, 18))
+    assert kept["steps"][0]["value"] == "${CERT_PASSWORD}"
+
+    import sys
+
+    blocked = "spider_gd.core.report_dates"
+    saved = sys.modules.pop(blocked, None)
+
+    class _Block:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == blocked:
+                raise ModuleNotFoundError(fullname)
+            return None
+
+    guard = _Block()
+    sys.meta_path.insert(0, guard)
+    try:
+        login_runner = WorkflowRunner(
+            {"name": "登陆流程测试", "type": "login", "steps": []},
+            download_dir="/tmp",
+            target_date=date(2026, 11, 18),
+        )
+        assert login_runner._report_query_fill("${CERT_PASSWORD}") == ""
+    finally:
+        sys.meta_path.remove(guard)
+        if saved is not None:
+            sys.modules[blocked] = saved
 
     assert report_file_has_year("广东电力现货市场2026年11月运行日报（11.13）.pdf", b"", 2026)
     assert not report_file_has_year("广东电力现货市场2025年11月运行日报（11.13）.pdf", b"", 2026)
