@@ -483,6 +483,13 @@ def create_app(
     async def health() -> dict[str, Any]:
         return await service.health()
 
+    @app.get("/api/runtime")
+    async def runtime_identity_view() -> dict[str, Any]:
+        """正在跑的这份后端的版本、exe 路径和进程号。不探测外网。"""
+        from spider_gd.runtime_info import runtime_identity
+
+        return runtime_identity()
+
     @app.get("/api/schedule/jobs")
     async def list_schedule_jobs() -> dict[str, Any]:
         """列出所有已注册的调度任务（调试用）。"""
@@ -3809,15 +3816,17 @@ def create_app(
             dict[str, Any]: ``path`` 是 zip 路径，``filename`` 是文件名。
         """
         from spider_gd.config.user_home import bundled_workflows_dir, tasks_dir, user_home, user_workflows_dir
-        from spider_gd.gateway.diagnostics_bundle import build_diagnostics_zip
+        from spider_gd.gateway.diagnostics_bundle import build_diagnostics_zip, diagnostic_output_dir
 
         body = payload or {}
         settings = service._ctx.state_store.get_all_settings()
         data_dir = Path(service._ctx.settings.storage.data_dir)
         requested = str(body.get("download_dir") or body.get("downloadDir") or "").strip()
-        dl_dir = Path(requested) if requested else data_dir
-        out_dir = dl_dir / "诊断包"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        saved_download = str(settings.get("downloadDir") or "").strip()
+        try:
+            out_dir, dir_note = diagnostic_output_dir(requested, saved_download, data_dir)
+        except OSError as exc:
+            return {"status": "error", "message": f"诊断包没有可写的目录：{exc}"}
         filename = f"diagnostics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
         zip_path = out_dir / filename
         extra_secrets = _diagnostic_secret_values(service._ctx.state_store)
@@ -3825,7 +3834,6 @@ def create_app(
         download_dirs = [data_dir]
         if requested:
             download_dirs.append(Path(requested))
-        saved_download = str(settings.get("downloadDir") or "").strip()
         if saved_download:
             download_dirs.append(Path(saved_download))
         notes = await asyncio.to_thread(
@@ -3848,7 +3856,8 @@ def create_app(
             ukey=ukey,
         )
         logger.info("诊断包已生成: {} ({})", zip_path, "; ".join(notes) or "ok")
-        return {"status": "ok", "path": str(zip_path), "filename": filename}
+        message = "；".join(item for item in [dir_note, *notes] if item)
+        return {"status": "ok", "path": str(zip_path), "filename": filename, "message": message}
 
     @app.post("/api/executions/{exec_id}/resume/stream")
     async def resume_execution_stream(exec_id: str, body: WorkflowRunRequest | None = None):

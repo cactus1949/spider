@@ -24,6 +24,7 @@ from spider_gd.gateway.execution_bundle import (
 
 _TEXT_SUFFIXES = {".log", ".txt", ".json", ".yml", ".yaml", ".html", ".env", ".md"}
 _META_FILES = ("env.json", "README.txt")
+_ESSENTIAL_PREFIXES = ("tasks/",)
 _SECRET_KEYS = (
     "certPassword",
     "accountPassword",
@@ -39,6 +40,52 @@ _SECRET_KEYS = (
     "token",
     "secret",
 )
+
+
+def _directory_writable(folder: Path) -> bool:
+    """目录已经存在，并且当前进程能在里面写一个临时文件。"""
+    if not folder.is_dir():
+        return False
+    probe = folder / ".spider-gd-write-probe"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def diagnostic_output_dir(requested: str, saved: str, data_dir: Path) -> tuple[Path, str]:
+    """决定诊断包写到哪里。
+
+    不存在的路径不会被创建，避免顺着别的账户留下的桌面路径去建目录。
+    请求目录不可用时，用已经存在的下载目录；再不行就用本程序的数据目录。
+
+    Args:
+        requested: 这次请求里带的下载目录。
+        saved: 设置里保存的下载目录。
+        data_dir: 当前用户的数据目录。
+
+    Returns:
+        tuple[Path, str]: 诊断包目录，以及改道时给人看的说明。
+    """
+    notes: list[str] = []
+    chosen: Path | None = None
+    for label, raw in (("指定的下载目录", requested), ("已保存的下载目录", saved)):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        folder = Path(text)
+        if _directory_writable(folder):
+            chosen = folder
+            break
+        notes.append(f"{label}不可用")
+    if chosen is None:
+        chosen = Path(data_dir)
+        notes.append("已改存到数据目录")
+    target = chosen / "诊断包"
+    target.mkdir(parents=True, exist_ok=True)
+    return target, "；".join(notes)
 
 
 def partial_mask(value: str) -> str:
@@ -256,6 +303,12 @@ def _env_snapshot(ctx_bits: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         versions["playwright"] = "未知"
     versions["chromium"] = "未知"
+    try:
+        from spider_gd.runtime_info import runtime_identity
+
+        backend_identity = runtime_identity()
+    except Exception as exc:
+        backend_identity = {"error": str(exc)}
     screen = "未知"
     if sys.platform == "win32":
         try:
@@ -270,6 +323,8 @@ def _env_snapshot(ctx_bits: dict[str, Any]) -> dict[str, Any]:
         "app_version": ctx_bits.get("app_version", ""),
         "spider_gd": versions["spider_gd"],
         "python": versions["python"],
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "backend": backend_identity,
         "playwright": versions["playwright"],
         "chromium": versions["chromium"],
         "screen": screen,
@@ -354,11 +409,12 @@ def build_diagnostics_zip(
         nonlocal total
         if any(name == arcname for name, _blob in payload):
             return
+        kept = essential or arcname in _META_FILES or arcname.startswith(_ESSENTIAL_PREFIXES)
         content_count = sum(1 for name, _blob in payload if name not in _META_FILES)
-        if not essential and content_count >= _MAX_FILES - len(_META_FILES):
+        if not kept and content_count >= _MAX_FILES - len(_META_FILES):
             notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
             return
-        if not essential and len(payload) >= _MAX_FILES:
+        if not kept and len(payload) >= _MAX_FILES:
             notes.append(f"已达到 {_MAX_FILES} 个文件上限，跳过 {arcname}")
             return
         blob = data
@@ -392,6 +448,17 @@ def build_diagnostics_zip(
         "settings": mask_settings(settings, secrets),
     })
     add_text("env.json", json.dumps(env_doc, ensure_ascii=False, indent=2), essential=True)
+
+    if tasks_dir and tasks_dir.exists():
+        for path in sorted(tasks_dir.glob("*.yml")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            add_text(f"tasks/{path.name}", text, essential=True)
+    if store is not None and hasattr(store, "list_task_configs"):
+        try:
+            rendered = json.dumps(store.list_task_configs(), ensure_ascii=False, indent=2)
+            add_text("tasks/task_configs.json", rendered, essential=True)
+        except Exception as exc:
+            notes.append(f"导出任务配置失败: {exc}")
 
     if log_dir and log_dir.exists():
         for path in sorted(log_dir.rglob("*")):
@@ -433,16 +500,6 @@ def build_diagnostics_zip(
             continue
         for path in sorted(folder.glob("*.yml")):
             add_text(f"workflows/{path.name}", path.read_text(encoding="utf-8", errors="replace"))
-
-    if tasks_dir and tasks_dir.exists():
-        for path in sorted(tasks_dir.glob("*.yml")):
-            add_text(f"tasks/{path.name}", path.read_text(encoding="utf-8", errors="replace"))
-    if store is not None and hasattr(store, "list_task_configs"):
-        try:
-            rendered = json.dumps(store.list_task_configs(), ensure_ascii=False, indent=2)
-            add_text("tasks/task_configs.json", rendered)
-        except Exception as exc:
-            notes.append(f"导出任务配置失败: {exc}")
 
     shot_index = 0
     for root in download_dirs or []:

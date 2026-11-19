@@ -122,10 +122,19 @@ if (!gotLock) {
     })
   })
 
-  app.on('before-quit', () => {
+  let backendStopped = false
+  app.on('before-quit', (event) => {
     isQuitting = true
-    stopBackend()
-    destroyTray()
+    if (backendStopped) {
+      destroyTray()
+      return
+    }
+    event.preventDefault()
+    void stopBackend().finally(() => {
+      backendStopped = true
+      destroyTray()
+      app.quit()
+    })
   })
 
   // 托盘常驻：所有窗口关闭也不退出（macOS 默认如此，Windows 需显式保留）

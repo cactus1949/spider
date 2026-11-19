@@ -18,7 +18,11 @@
     python -m pip install pyinstaller
 """
 
+import ast
 import contextlib
+import importlib
+import importlib.util
+import json
 import os
 import platform
 import shutil
@@ -391,13 +395,110 @@ def _pywin32_search_roots() -> list[Path]:
     return roots
 
 
+def source_package_modules(package: Path | None = None) -> list[str]:
+    """按仓库里的 ``.py`` 文件列出 ``spider_gd`` 模块名。
+
+    不靠当前解释器已经 import 过什么。开发环境能 import，只说明源码在
+    ``sys.path`` 上，不能说明这些文件进了冻结包。
+
+    Args:
+        package: 包目录。默认是仓库里的 ``src/spider_gd``。
+
+    Returns:
+        list[str]: 排序后的模块名。``__init__.py`` 记成包名本身。
+
+    Examples:
+        >>> "spider_gd.core.report_dates" in source_package_modules()
+        True
+    """
+    root = package or PACKAGE
+    names: list[str] = []
+    if not root.is_dir():
+        return names
+    for path in root.rglob("*.py"):
+        if path.name == "__init__.py":
+            rel = path.parent.relative_to(root.parent)
+        else:
+            rel = path.relative_to(root.parent).with_suffix("")
+        parts = [part for part in rel.parts if part]
+        if parts:
+            names.append(".".join(parts))
+    return sorted(set(names))
+
+
+def spider_gd_imports_in(paths: list[Path]) -> list[str]:
+    """读出这些源文件里写到的 ``spider_gd`` 导入。
+
+    函数内部的延迟 import 也算。登录填表就是这样才碰到 ``report_dates`` 的。
+
+    Args:
+        paths: 要扫描的 Python 文件。
+
+    Returns:
+        list[str]: 模块名，排序去重。语法错误的文件跳过。
+
+    Examples:
+        >>> isinstance(spider_gd_imports_in([]), list)
+        True
+    """
+    found: set[str] = set()
+    for path in paths:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            else:
+                continue
+            for name in modules:
+                if name == "spider_gd" or name.startswith("spider_gd."):
+                    found.add(name)
+    return sorted(found)
+
+
+def runtime_tool_imports() -> list[str]:
+    """登录和任务执行会加载的工具脚本里的 ``spider_gd`` 导入。
+
+    Returns:
+        list[str]: 模块名。
+
+    Examples:
+        >>> "spider_gd.core.report_dates" in runtime_tool_imports()
+        True
+    """
+    tools = [ROOT / "tools" / "workflow_runner.py", ROOT / "tools" / "task_runner.py"]
+    return spider_gd_imports_in([path for path in tools if path.is_file()])
+
+
+def missing_repo_modules(imported: list[str], packaged: list[str] | None = None) -> list[str]:
+    """导入了、但仓库源码里没有对应文件的模块。
+
+    Args:
+        imported: ``runtime_tool_imports`` 一类的结果。
+        packaged: ``source_package_modules`` 的结果。空则现扫仓库。
+
+    Returns:
+        list[str]: 源码里不存在的模块名。
+
+    Examples:
+        >>> missing_repo_modules(["spider_gd.core.report_dates"], ["spider_gd.core.report_dates"])
+        []
+    """
+    have = set(packaged if packaged is not None else source_package_modules())
+    return [name for name in imported if name not in have]
+
+
 def spider_gd_pyinstaller_args() -> list[str]:
     """生成把整个 ``spider_gd`` 打进冻结包的参数。
 
-    登录、日报这类模块经常在函数里才 import。只列一部分 hidden-import
-    时，漏掉的模块在现场会报 ``No module named ...``。
-    ``--add-data`` 必须指向 ``src/spider_gd``，不能把 ``src`` 整目录
-    当成 ``spider_gd``，否则冻结目录里会多一层。
+    登录填表会在函数里才 import。只手写几个 hidden-import 时，漏掉的模块
+    在现场就是 ``No module named ...``。这里按仓库里的 ``.py`` 逐个写上。
+    ``--add-data`` 必须指向 ``src/spider_gd``。0.2.0 把整个 ``src`` 标成
+    ``spider_gd``，冻结目录多了一层，``core/report_dates.py`` 对不上导入路径。
 
     Returns:
         list[str]: 追加到 PyInstaller 命令后面的参数。
@@ -406,14 +507,101 @@ def spider_gd_pyinstaller_args() -> list[str]:
         >>> args = spider_gd_pyinstaller_args()
         >>> args[:2]
         ['--collect-submodules', 'spider_gd']
-        >>> "spider_gd.core.report_dates" in args
+        >>> args.count("spider_gd.core.report_dates") >= 1
         True
     """
     args = ["--collect-submodules", "spider_gd"]
-    args += ["--hidden-import", "spider_gd.core.report_dates"]
+    for name in source_package_modules():
+        args += ["--hidden-import", name]
     if PACKAGE.exists():
         args += ["--add-data", f"{PACKAGE}{os.pathsep}spider_gd"]
     return args
+
+
+def current_build_id() -> str:
+    """这次打包的构建身份。同版本不同提交也要能分开。"""
+    try:
+        rev = subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        rev = ""
+    if not rev:
+        rev = "unknown"
+    return rev
+
+
+def install_build_stamp(build_id: str) -> str:
+    """把构建身份写进将被冻结的源码，并返回原来的文件内容。"""
+    path = PACKAGE / "build_stamp.py"
+    original = path.read_text(encoding="utf-8")
+    path.write_text(
+        '"""冻结时写入。运行中的进程读这个常量，不读磁盘上的新文件。"""\n\n'
+        "from __future__ import annotations\n\n"
+        f"BUILD_ID = {build_id!r}\n",
+        encoding="utf-8",
+    )
+    return original
+
+
+def restore_build_stamp(original: str) -> None:
+    """打包结束后把仓库里的构建身份文件放回去。"""
+    (PACKAGE / "build_stamp.py").write_text(original, encoding="utf-8")
+
+
+def assert_frozen_ocr(exe: Path) -> None:
+    """让刚打出来的 exe 自己导入验证码依赖。
+
+    不是构建机直接加载 dll。非 Windows 不运行这个 exe。
+
+    Args:
+        exe: 冻结产物。
+
+    Raises:
+        SystemExit: Windows 上自测失败。
+    """
+    if not IS_WIN:
+        print("[skip] 冻结产物的验证码自测只在 Windows 上运行该 exe")
+        return
+    completed = subprocess.run(
+        [str(exe), "--self-test-ocr"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    if completed.returncode != 0 or not (completed.stdout or "").lstrip().startswith("ok"):
+        raise SystemExit("冻结产物无法加载验证码依赖：\n" + output[-2000:])
+    print("[done] 冻结产物已加载 onnxruntime 扩展和验证码模型")
+
+
+def assert_repo_package_wins() -> None:
+    """打包前确认要收进冻结包的是仓库源码，不是环境里残留的旧安装。
+
+    Raises:
+        SystemExit: ``report_dates`` 解析不到仓库文件时。
+
+    Examples:
+        >>> callable(assert_repo_package_wins)
+        True
+    """
+    src = str(SRC)
+    while src in sys.path:
+        sys.path.remove(src)
+    sys.path.insert(0, src)
+    importlib.invalidate_caches()
+    spec = importlib.util.find_spec("spider_gd.core.report_dates")
+    origin = Path(spec.origin).resolve() if spec and spec.origin else None
+    package = PACKAGE.resolve()
+    if origin is None or package not in origin.parents:
+        raise SystemExit(
+            "打包解析到的 spider_gd.core.report_dates 不在这个仓库的 src 里"
+            f"（实际是 {origin}）。先卸掉过期安装，再从这个仓库打包。"
+        )
 
 
 def certificate_ui_pyinstaller_args(*, is_win: bool) -> list[str]:
@@ -521,28 +709,75 @@ def ocr_pyinstaller_args(package_dir: Path | None) -> list[str]:
     return args
 
 
+def _ocr_file_in_capi(toc_text: str, filename: str) -> bool:
+    """文件名附近要有 ``onnxruntime/capi``，只在别处提到名字不算。"""
+    text = toc_text.replace("\\", "/").lower()
+    needle = filename.lower()
+    window = 220
+    start = 0
+    while True:
+        pos = text.find(needle, start)
+        if pos < 0:
+            return False
+        chunk = text[max(0, pos - window): pos + len(needle) + window]
+        if "onnxruntime/capi" in chunk:
+            return True
+        start = pos + len(needle)
+
+
 def missing_ocr_binaries(toc_text: str) -> list[str]:
-    """检查冻结清单里有没有验证码库的本机文件。
+    """检查冻结清单里，验证码 pyd 和它的 dll 是否都靠着 ``onnxruntime/capi``。
+
+    只出现文件名不算。现场的 ``DLL load failed`` 就是 pyd 旁边没有它要的本机库。
 
     Args:
-        toc_text: PyInstaller toc 文本。
+        toc_text: PyInstaller toc 或打包参数文本。
 
     Returns:
-        list[str]: 缺失的文件名。都在时为空列表。
+        list[str]: 缺失或放错目录的文件。都在时为空列表。
 
     Examples:
-        >>> missing_ocr_binaries("onnxruntime.dll onnxruntime_pybind11_state.pyd")
+        >>> sample = "onnxruntime/capi/onnxruntime.dll capi/onnxruntime_pybind11_state.pyd"
+        >>> missing_ocr_binaries(sample)
         []
         >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd")
         True
     """
-    lowered = toc_text.lower()
     missing: list[str] = []
-    if "onnxruntime.dll" not in lowered:
+    if not _ocr_file_in_capi(toc_text, "onnxruntime.dll"):
         missing.append("onnxruntime.dll")
-    if "onnxruntime_pybind11_state" not in lowered:
+    if not _ocr_file_in_capi(toc_text, "onnxruntime_pybind11_state"):
         missing.append("onnxruntime_pybind11_state.pyd")
     return missing
+
+
+def probe_onnxruntime_dll(dll: Path) -> tuple[bool, str]:
+    """在 Windows 上真正加载 ``onnxruntime.dll``。
+
+    其他系统不加载，也不据此要求安装 VC 运行库。
+
+    Args:
+        dll: 打包前解释器里的 dll。
+
+    Returns:
+        tuple[bool, str]: 第一项为是否加载成功。失败时第二项是系统报错原文。
+
+    Examples:
+        >>> ok, detail = probe_onnxruntime_dll(Path("/no/such.dll"))
+        >>> ok is False and bool(detail)
+        True
+    """
+    if sys.platform != "win32":
+        return False, "当前不是 Windows，没有加载 onnxruntime.dll"
+    if not dll.is_file():
+        return False, f"没有找到 {dll}"
+    import ctypes
+
+    try:
+        ctypes.WinDLL(str(dll))
+    except OSError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def assert_ocr_frozen(workpath: Path) -> None:
@@ -572,15 +807,39 @@ def assert_ocr_frozen(workpath: Path) -> None:
             + "、".join(missing)
             + "。现场会报 DLL load failed while importing onnxruntime_pybind11_state。"
         )
-    print("[done] 验证码本机库已进入冻结清单：onnxruntime.dll、onnxruntime_pybind11_state")
+    package = onnxruntime_package_dir()
+    dll = package / "capi" / "onnxruntime.dll" if package else Path()
+    if IS_WIN:
+        loaded, detail = probe_onnxruntime_dll(dll)
+        if not loaded:
+            raise SystemExit(f"无法加载验证码依赖 {dll}：{detail}")
+        print(f"[done] 已在 Windows 上加载 {dll}")
+    else:
+        print("[done] 验证码本机库已进入冻结清单；Windows 上才会实际加载 onnxruntime.dll")
 
 
-_FROZEN_REQUIRED = (
-    "spider_gd.core.report_dates",
-    "spider_gd.infrastructure.network.wifi_wait",
-    "spider_gd.infrastructure.windows.cert_dialog",
-    "uiautomation",
-)
+def required_frozen_modules(*, include_windows_ui: bool = False) -> list[str]:
+    """冻结包必须能导入的模块。
+
+    源码里的每个 ``spider_gd`` 模块都要在。Windows 上再加证书窗口用的
+    ``uiautomation``。不要只抽查登录当天报错过的那一个名字。
+
+    Args:
+        include_windows_ui: 为 True 时把 ``uiautomation`` 算进必需名单。
+
+    Returns:
+        list[str]: 模块名。
+
+    Examples:
+        >>> "spider_gd.core.report_dates" in required_frozen_modules()
+        True
+        >>> "uiautomation" in required_frozen_modules(include_windows_ui=True)
+        True
+    """
+    names = source_package_modules()
+    if include_windows_ui:
+        names.append("uiautomation")
+    return names
 
 
 def frozen_module_names(exe: Path) -> set[str]:
@@ -616,23 +875,31 @@ def frozen_module_names(exe: Path) -> set[str]:
         blob_path.unlink(missing_ok=True)
 
 
-def missing_frozen_modules(names: set[str]) -> list[str]:
-    """返回登录、切网和证书窗口还不能导入的模块。
+def missing_frozen_modules(
+    names: set[str],
+    *,
+    required: list[str] | None = None,
+) -> list[str]:
+    """返回冻结包里还不能导入的模块。
 
     Args:
-        names: ``frozen_module_names`` 的结果。
+        names: ``frozen_module_names`` 的结果，或测试里的替身集合。
+        required: 必需模块。空则用当前平台的 :func:`required_frozen_modules`。
 
     Returns:
         list[str]: 缺失的模块名。都在时为空列表。
 
     Examples:
-        >>> missing_frozen_modules({"uiautomation", "spider_gd.core.report_dates", "spider_gd.infrastructure.network.wifi_wait", "spider_gd.infrastructure.windows.cert_dialog"})
+        >>> missing_frozen_modules({"a.b"}, required=["a.b"])
         []
-        >>> "uiautomation" in missing_frozen_modules(set())
-        True
+        >>> missing_frozen_modules(set(), required=["a.b"])
+        ['a.b']
     """
+    needed = required if required is not None else required_frozen_modules(
+        include_windows_ui=sys.platform == "win32",
+    )
     missing: list[str] = []
-    for name in _FROZEN_REQUIRED:
+    for name in needed:
         present = name in names or any(item.startswith(name + ".") for item in names)
         if not present:
             missing.append(name)
@@ -655,10 +922,13 @@ def assert_frozen_modules(exe: Path) -> None:
         >>> callable(assert_frozen_modules)
         True
     """
-    missing = missing_frozen_modules(frozen_module_names(exe))
+    missing = missing_frozen_modules(
+        frozen_module_names(exe),
+        required=required_frozen_modules(include_windows_ui=IS_WIN),
+    )
     if missing:
         raise SystemExit("冻结包不能导入：" + "、".join(missing))
-    print("[done] 登录与证书窗口模块已在冻结包中：" + "、".join(_FROZEN_REQUIRED))
+    print("[done] 冻结包已包含仓库里的 spider_gd 模块")
 
 
 def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -691,9 +961,14 @@ def clean_build() -> None:
 
 def run_pyinstaller() -> None:
     print("=== 编译 Python 后端 ===")
+    assert_repo_package_wins()
+    absent = missing_repo_modules(runtime_tool_imports())
+    if absent:
+        raise SystemExit("工具脚本导入了仓库里没有的模块：" + "、".join(absent))
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     clean_build()
+    build_id = current_build_id()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -756,10 +1031,24 @@ def run_pyinstaller() -> None:
             path_parts.insert(0, str(lib_bin))
     env["PATH"] = os.pathsep.join(path_parts)
 
-    subprocess.run(cmd, check=True, env=env)
+    original_stamp = install_build_stamp(build_id)
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    finally:
+        restore_build_stamp(original_stamp)
+    (OUTPUT / "build_stamp.json").write_text(
+        json.dumps({"build_id": build_id}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    exe = OUTPUT / f"{APP_NAME}{EXE_SUFFIX}"
+    if not exe.exists():
+        alt = OUTPUT / APP_NAME
+        exe = alt if alt.exists() else exe
+    if exe.exists():
+        assert_frozen_modules(exe)
+        assert_frozen_ocr(exe)
     if IS_WIN:
         assert_ocr_frozen(BUILD)
-        assert_frozen_modules(OUTPUT / f"{APP_NAME}{EXE_SUFFIX}")
 
     # 复制 .env 模板（UTF-8 编码）
     env_template = OUTPUT / ".env"
@@ -832,11 +1121,11 @@ def main() -> None:
     if with_browsers:
         copy_browsers()
 
-    print(f"\n=== 完成 ===")
+    print("\n=== 完成 ===")
     print(f"  输出: {OUTPUT}")
     if not IS_WIN:
         print(f"  ⚠ 当前平台非 Windows，编译产物只能在 {sys.platform} 运行")
-        print(f"  发布 Windows 版请在 Windows 机器上运行此脚本")
+        print("  发布 Windows 版请在 Windows 机器上运行此脚本")
 
 
 if __name__ == "__main__":

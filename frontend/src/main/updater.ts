@@ -15,6 +15,7 @@
 
 import { autoUpdater } from 'electron-updater'
 import { BrowserWindow, ipcMain } from 'electron'
+import { stopBackend } from './backend'
 
 const UPDATE_FEED_URL = 'http://47.101.175.39:20152/releases'
 
@@ -96,6 +97,7 @@ export function startUpdater(getWindow: () => BrowserWindow | null): void {
   // ── IPC：用户触发安装 ──
   ipcMain.handle('updater:install', async () => {
     try {
+      await stopBackend()
       autoUpdater.quitAndInstall(false, true)
       return { ok: true }
     } catch (err: any) {

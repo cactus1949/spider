@@ -5,12 +5,14 @@
  * 开发环境优先连接已启动的后端，否则使用仓库 .venv 中的 Python。
  */
 import { app, BrowserWindow, net, dialog } from 'electron'
-import { spawn, ChildProcess } from 'child_process'
+import { spawn, ChildProcess, execFile } from 'child_process'
 import { join, resolve } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { backendDecision, killPlan, portAfterStop } from './backendMatch.mjs'
 
 const EXE_NAME = process.platform === 'win32' ? 'spider-gd-service.exe' : 'spider-gd-service'
 const READY_URL = 'http://127.0.0.1:8800/openapi.json'
+const RUNTIME_URL = 'http://127.0.0.1:8800/api/runtime'
 const READY_TITLE = 'spider-gd 控制接口'
 const MAX_RESTART = 3
 const RESTART_INTERVAL = 5000
@@ -81,28 +83,166 @@ function notifyRenderer(win: BrowserWindow | null, status: string) {
   win?.webContents.send('backend:status', { status })
 }
 
-async function isBackendReady(): Promise<boolean> {
+type RuntimeHealth = {
+  runtime: 'ok' | 'missing' | 'foreign'
+  executable?: string
+  pid?: number
+  spider_gd?: string
+  build_id?: string
+  frozen?: boolean
+}
+
+type Listener = { pid: number; executable: string }
+
+function expectedBuildId(exePath: string): string {
+  if (!exePath) return ''
   try {
-    const res = await net.fetch(READY_URL, { signal: AbortSignal.timeout(1500) })
-    if (!res.ok) return false
-    const body = await res.json() as { info?: { title?: string } }
-    return body.info?.title === READY_TITLE
+    const raw = readFileSync(join(resolve(exePath, '..'), 'build_stamp.json'), 'utf8')
+    const parsed = JSON.parse(raw) as { build_id?: string }
+    return String(parsed.build_id || '')
   } catch {
-    return false
+    return ''
   }
+}
+
+async function readOwnRuntime(): Promise<RuntimeHealth | null> {
+  try {
+    const spec = await net.fetch(READY_URL, { signal: AbortSignal.timeout(1500) })
+    if (!spec.ok) return null
+    const body = await spec.json() as { info?: { title?: string } }
+    if (body.info?.title !== READY_TITLE) return { runtime: 'foreign' }
+    const runtime = await net.fetch(RUNTIME_URL, { signal: AbortSignal.timeout(1500) })
+    if (runtime.status === 404 || !runtime.ok) return { runtime: 'missing' }
+    const data = await runtime.json() as Omit<RuntimeHealth, 'runtime'>
+    return { runtime: 'ok', ...data }
+  } catch {
+    return null
+  }
+}
+
+function queryListener(): Promise<Listener | null> {
+  return new Promise((resolvePromise) => {
+    if (process.platform === 'win32') {
+      const script = [
+        "$c = Get-NetTCPConnection -LocalPort 8800 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;",
+        "if (-not $c) { exit 0 }",
+        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\";",
+        "Write-Output \"$($c.OwningProcess)|$($p.ExecutablePath)\"",
+      ].join(' ')
+      execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 4000 }, (err, stdout) => {
+        if (err) { resolvePromise(null); return }
+        resolvePromise(parseListener(String(stdout || '')))
+      })
+      return
+    }
+    execFile('ss', ['-ltnp', 'sport = :8800'], { timeout: 2000 }, (err, stdout) => {
+      if (err) { resolvePromise(null); return }
+      const match = String(stdout || '').match(/pid=(\d+)/)
+      if (!match) { resolvePromise(null); return }
+      const pid = Number(match[1])
+      execFile('readlink', ['-f', `/proc/${pid}/exe`], (linkErr, linkOut) => {
+        if (linkErr) { resolvePromise(null); return }
+        const executable = String(linkOut || '').trim()
+        resolvePromise(executable ? { pid, executable } : null)
+      })
+    })
+  })
+}
+
+function parseListener(text: string): Listener | null {
+  const line = text.split(/\r?\n/).map((item) => item.trim()).find(Boolean) || ''
+  const splitAt = line.indexOf('|')
+  if (splitAt <= 0) return null
+  const pid = Number(line.slice(0, splitAt))
+  const executable = line.slice(splitAt + 1).trim()
+  if (!pid || !executable) return null
+  return { pid, executable }
+}
+
+function stopOwnedPid(pid: number): Promise<void> {
+  return new Promise((resolvePromise) => {
+    if (process.platform === 'win32') {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 8000 }, () => resolvePromise())
+      return
+    }
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch { /* 进程已经不在 */ }
+    resolvePromise()
+  })
+}
+
+async function replaceVerifiedListener(pid: number, executable: string): Promise<string> {
+  let targetPid = pid
+  const targetExe = executable
+  let childKills = 0
+  const before = await queryListener()
+  const plan = killPlan({ reportedPid: targetPid, reportedExe: targetExe, listener: before })
+  if (!plan.kill || plan.pid !== targetPid) return plan.reason || '监听进程已经变化，没有关闭它'
+  await stopOwnedPid(targetPid)
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+    const now = await queryListener()
+    const after = portAfterStop({ oldPid: targetPid, listener: now })
+    if (after.state === 'clear') return ''
+    if (after.state === 'child' && after.pid && after.executable && childKills < 3) {
+      const again = await queryListener()
+      const child = killPlan({
+        reportedPid: after.pid,
+        reportedExe: after.executable,
+        listener: again,
+      })
+      if (!child.kill || child.pid == null) return child.reason || '子进程已经变化，没有继续关闭'
+      childKills += 1
+      targetPid = child.pid
+      await stopOwnedPid(targetPid)
+      continue
+    }
+    if (after.state !== 'still-ours') return after.reason || '端口上的进程已经变化，没有继续关闭'
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+  }
+  return '采集后端没有在时限内退出'
 }
 
 export async function startBackend(win: BrowserWindow | null): Promise<void> {
   if (stopping) return
-  if (await isBackendReady()) {
-    console.log('[backend] 已连接运行中的后端')
-    notifyRenderer(win, 'ready')
-    restartCount = 0
-    return
+  const launch = findBackendLaunch()
+  const running = await readOwnRuntime()
+  if (running) {
+    const expectedExe = launch ? resolve(launch.command) : ''
+    const decision = backendDecision({
+      packaged: app.isPackaged,
+      expectedExe,
+      expectedBuild: expectedBuildId(expectedExe),
+      health: running,
+      listener: await queryListener(),
+    })
+    console.log('[backend]', decision.reason || decision.action, running.executable || '', 'pid=', running.pid || '')
+    if (decision.action === 'attach') {
+      notifyRenderer(win, 'ready')
+      restartCount = 0
+      return
+    }
+    if (decision.action === 'error') {
+      notifyRenderer(win, 'error')
+      if (win) {
+        const show = () => dialog.showErrorBox('后端不是本次安装的程序', decision.reason || '')
+        if (win.isVisible()) show()
+        else win.once('ready-to-show', show)
+      }
+      return
+    }
+    if (decision.action === 'replace' && decision.pid && decision.executable) {
+      const blocked = await replaceVerifiedListener(decision.pid, decision.executable)
+      if (blocked) {
+        notifyRenderer(win, 'error')
+        if (win) dialog.showErrorBox('旧后端没有退出', blocked)
+        return
+      }
+    }
   }
   if (stopping) return
 
-  const launch = findBackendLaunch()
   if (!launch) {
     const msg = app.isPackaged
       ? `未找到打包后端 (${EXE_NAME})\n请检查安装包的 backend 资源。`
@@ -179,8 +319,12 @@ async function waitForReady(win: BrowserWindow | null): Promise<void> {
   const started = Date.now()
 
   while (Date.now() - started < maxWait) {
-    if (await isBackendReady()) {
-      console.log('[backend] 就绪')
+    const running = await readOwnRuntime()
+    const startedByUs = Boolean(
+      running?.runtime === 'ok' && backendProcess?.pid && running.pid === backendProcess.pid,
+    )
+    if (startedByUs) {
+      console.log('[backend] 就绪', running?.executable || '', running?.spider_gd || '', 'pid=', running?.pid)
       notifyRenderer(win, 'ready')
       restartCount = 0
       return
@@ -193,28 +337,42 @@ async function waitForReady(win: BrowserWindow | null): Promise<void> {
   notifyRenderer(win, 'starting')
 }
 
-export function stopBackend(): void {
+export async function stopBackend(): Promise<void> {
   stopping = true
   if (restartTimer) {
     clearTimeout(restartTimer)
     restartTimer = null
   }
-
-  restartCount = MAX_RESTART // 阻止自动重启
-
-  // 优雅关闭我们 spawn 的子进程
-  if (backendProcess && backendProcess.pid) {
-    console.log('[backend] 正在关闭...')
-    try {
+  restartCount = MAX_RESTART
+  const proc = backendProcess
+  backendProcess = null
+  if (!proc?.pid) return Promise.resolve()
+  const pid = proc.pid
+  console.log('[backend] 正在关闭', pid)
+  await new Promise<void>((resolvePromise) => {
+    const timer = setTimeout(() => {
       if (process.platform === 'win32') {
-        // 杀整个进程树
-        const { exec } = require('child_process')
-        exec(`taskkill /PID ${backendProcess.pid} /T /F`, () => {})
-      } else {
-        backendProcess.kill('SIGTERM')
+        void stopOwnedPid(pid).then(() => resolvePromise())
+        return
       }
-    } catch { /* ignore */ }
-    backendProcess = null
+      try { proc.kill('SIGKILL') } catch { /* 已经退出 */ }
+      resolvePromise()
+    }, 4000)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolvePromise()
+    })
+    if (process.platform === 'win32') {
+      execFile('taskkill', ['/PID', String(pid), '/T'], () => {})
+    } else {
+      try { proc.kill('SIGTERM') } catch { /* 已经退出 */ }
+    }
+  })
+  const leftover = portAfterStop({ oldPid: pid, listener: await queryListener() })
+  if ((leftover.state === 'still-ours' || leftover.state === 'child') && leftover.pid && leftover.executable) {
+    const blocked = await replaceVerifiedListener(leftover.pid, leftover.executable)
+    if (blocked) console.error('[backend]', blocked)
+  } else if (leftover.state === 'taken') {
+    console.error('[backend]', leftover.reason)
   }
-
 }

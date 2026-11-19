@@ -12,6 +12,7 @@ import pytest
 from spider_gd.gateway.diagnostics_bundle import (
     build_diagnostics_zip,
     collect_secret_values,
+    diagnostic_output_dir,
     partial_mask,
     redact_known_secrets,
 )
@@ -32,6 +33,23 @@ def test_partial_mask_and_known_secret_strip():
     assert "alice" not in secrets
     text = redact_known_secrets("使用 pin-7788 登录 alice", secrets)
     assert "pin-7788" not in text
+
+
+@pytest.mark.unit
+def test_missing_download_dir_does_not_create_another_users_path(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    saved = tmp_path / "D-download"
+    saved.mkdir()
+    missing = Path("C:/Users/Administrator/Desktop/download/1031根目录")
+    chosen, note = diagnostic_output_dir(str(missing), str(saved), data_dir)
+    assert chosen == saved / "诊断包"
+    assert chosen.is_dir()
+    assert "指定的下载目录不可用" in note
+    assert not Path("C:/Users/Administrator").exists() or chosen != missing / "诊断包"
+    nowhere, fallback = diagnostic_output_dir(str(missing), str(tmp_path / "absent"), data_dir)
+    assert nowhere == data_dir / "诊断包"
+    assert "数据目录" in fallback
 
 
 @pytest.mark.unit
@@ -56,8 +74,40 @@ def test_bundle_keeps_env_when_file_limit_is_hit(tmp_path: Path, monkeypatch):
     assert "README.txt" in names
     assert env["app_version"] == "0.2.1"
     assert env.get("spider_gd")
+    assert "frozen" in env
     assert any("文件上限" in item for item in notes)
     assert len(names) <= 8
+
+
+@pytest.mark.unit
+def test_bundle_keeps_tasks_when_workflows_fill_the_cap(tmp_path: Path, monkeypatch):
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    for index in range(30):
+        (workflows / f"wf-{index:02d}.yml").write_text(f"name: wf-{index}\n", encoding="utf-8")
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    (tasks / "daily.yml").write_text("name: 日常\ncert_password: pin-7788\n", encoding="utf-8")
+    monkeypatch.setattr("spider_gd.gateway.diagnostics_bundle._MAX_FILES", 6)
+    dest = tmp_path / "diag.zip"
+    build_diagnostics_zip(
+        dest,
+        settings={"certPassword": "pin-7788"},
+        workflow_dirs=[workflows],
+        tasks_dir=tasks,
+        app_version="0.2.4",
+        now=datetime(2026, 11, 18, 8, 55, 0),
+    )
+    with zipfile.ZipFile(dest) as archive:
+        names = archive.namelist()
+        env = json.loads(archive.read("env.json").decode("utf-8"))
+        task = archive.read("tasks/daily.yml").decode("utf-8")
+    assert "env.json" in names
+    assert "README.txt" in names
+    assert "tasks/daily.yml" in names
+    assert env["spider_gd"]
+    assert env["app_version"] == "0.2.4"
+    assert "pin-7788" not in task
 
 
 @pytest.mark.unit
@@ -137,3 +187,20 @@ def test_bundle_contains_expected_files_and_redacts_secrets(tmp_path: Path):
     assert "abc123xyz" not in blob
     assert "a***e" in blob or "alice" not in blob
     store.close()
+
+
+@pytest.mark.unit
+def test_existing_unwritable_dir_falls_back_without_creating_it(tmp_path: Path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    try:
+        chosen, note = diagnostic_output_dir(str(locked), "", data_dir)
+    finally:
+        locked.chmod(0o755)
+    assert chosen == data_dir / "诊断包"
+    assert chosen.is_dir()
+    assert "指定的下载目录不可用" in note
+    assert not (locked / "诊断包").exists()

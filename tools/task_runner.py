@@ -600,11 +600,15 @@ def _resolve_relative_date_value(value: object, target: date) -> str:
 
 
 def _report_fill(cfg: dict, value: object, target: date) -> str:
-    """运行日报的查询词。其他工作流返回空字符串，沿用原来的月.日。"""
-    from spider_gd.core.report_dates import is_report_workflow, report_fill_value
+    """运行日报的查询词。其他工作流返回空字符串，沿用原来的月.日。
 
-    if not is_report_workflow(str(cfg.get("name") or cfg.get("_control_name") or "")):
+    名称里没有「运行日报」时不导入日期模块。登录流程的填表也会走到这里。
+    """
+    name = str(cfg.get("name") or cfg.get("_control_name") or "")
+    if "运行日报" not in name:
         return ""
+    from spider_gd.core.report_dates import report_fill_value
+
     return report_fill_value(str(value or ""), target) or ""
 
 
