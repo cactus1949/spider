@@ -10,7 +10,6 @@ import asyncio
 import json
 import shutil
 import sys
-import threading
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -23,7 +22,6 @@ CheckFn = Callable[[], Awaitable[HealthReport]]
 
 # U-Key 枚举单独占一个线程：WMI/COM 挂起时不能占满默认线程池，也不能卡住事件循环。
 _UKEY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ukey-wmi")
-_COM_STATE = threading.local()
 _UKEY_UNAVAILABLE = "U-Key 检测不可用（非 Windows 或 WMI 未安装）"
 _UKEY_QUERY_TIMEOUT = 8.0
 _UKEY_POWERSHELL_TIMEOUT = 6.0
@@ -283,33 +281,6 @@ def classify_ukey_devices(devices: list[dict[str, object]], vid_pid: str = "auto
     )
 
 
-def _ensure_com() -> None:
-    """在当前线程初始化 COM，供 WMI 查询使用。
-
-    线程池线程会被复用，同一线程只初始化一次，避免反复配对
-    ``CoUninitialize`` 把还在用的 COM 对象拆掉。
-
-    Returns:
-        None: 初始化失败时记日志并继续，由后续 WMI 调用暴露真正的错误。
-
-    Raises:
-        ImportError: 没有 ``pythoncom``（pywin32 未安装）。
-
-    Examples:
-        >>> callable(_ensure_com)
-        True
-    """
-    if getattr(_COM_STATE, "ready", False):
-        return
-    import pythoncom
-
-    try:
-        pythoncom.CoInitialize()
-    except Exception as exc:
-        logger.warning("U-Key 检查初始化 COM 失败：{}", exc)
-    _COM_STATE.ready = True
-
-
 def _query_wmi_devices() -> list[dict[str, object]]:
     """用 WMI 列出带 VID/PID 的即插即用设备。
 
@@ -325,9 +296,12 @@ def _query_wmi_devices() -> list[dict[str, object]]:
         >>> callable(_query_wmi_devices)
         True
     """
+    from spider_gd.infrastructure.com_apartment import ensure_com_apartment
+
+    # wmi 的模块正文会立刻 GetObject("winmgmts:")。必须先建 COM 套间。
+    ensure_com_apartment()
     import wmi
 
-    _ensure_com()
     conn = wmi.WMI()
     wql = (
         "SELECT DeviceID, Description, Name, PNPClass, ConfigManagerErrorCode "
@@ -478,11 +452,18 @@ def _load_ukey_devices() -> list[dict[str, object]]:
     try:
         return _query_wmi_devices()
     except Exception as exc:
+        from spider_gd.infrastructure.com_apartment import com_error_kind
+
         if isinstance(exc, ImportError):
             logger.warning(
                 "U-Key 无法导入 WMI：{}（解释器 {}）",
                 exc,
                 sys.executable,
+            )
+        elif com_error_kind(exc) == "uninitialized-com":
+            logger.warning(
+                "U-Key WMI 连接失败（COM 套间未初始化，0x800401E4，不是 WQL），改试 PowerShell：{}",
+                exc,
             )
         else:
             logger.warning("U-Key WMI 查询失败，改试 PowerShell：{}", exc)
