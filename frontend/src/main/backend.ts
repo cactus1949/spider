@@ -6,13 +6,13 @@
  */
 import { app, BrowserWindow, net, dialog } from 'electron'
 import { spawn, ChildProcess, execFile } from 'child_process'
+import { createServer } from 'net'
 import { join, resolve } from 'path'
-import { existsSync, readFileSync } from 'fs'
-import { backendDecision, killPlan, portAfterStop } from './backendMatch.mjs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { killPlan, portAfterStop, startupPort } from './backendMatch.mjs'
 
 const EXE_NAME = process.platform === 'win32' ? 'spider-gd-service.exe' : 'spider-gd-service'
-const READY_URL = 'http://127.0.0.1:8800/openapi.json'
-const RUNTIME_URL = 'http://127.0.0.1:8800/api/runtime'
+const PREFERRED_PORT = 8800
 const READY_TITLE = 'spider-gd 控制接口'
 const MAX_RESTART = 3
 const RESTART_INTERVAL = 5000
@@ -21,6 +21,11 @@ let backendProcess: ChildProcess | null = null
 let restartCount = 0
 let restartTimer: ReturnType<typeof setTimeout> | null = null
 let stopping = false
+let backendPort = PREFERRED_PORT
+let resolvePort: ((port: number) => void) | null = null
+let portReady: Promise<number> = new Promise((resolve) => {
+  resolvePort = resolve
+})
 
 type BackendLaunch = { command: string; args: string[]; cwd: string }
 
@@ -80,7 +85,49 @@ function findBackendLaunch(): BackendLaunch | null {
 }
 
 function notifyRenderer(win: BrowserWindow | null, status: string) {
-  win?.webContents.send('backend:status', { status })
+  win?.webContents.send('backend:status', { status, base: currentBackendBase() })
+}
+
+export function currentBackendBase(): string {
+  return `http://127.0.0.1:${backendPort}`
+}
+
+export function whenBackendPort(): Promise<number> {
+  return portReady
+}
+
+function publishPort(port: number): void {
+  backendPort = port
+  if (resolvePort) {
+    const done = resolvePort
+    resolvePort = null
+    done(port)
+  }
+  try {
+    writeFileSync(join(userDataHome(), 'backend-port.json'), JSON.stringify({ port }), 'utf8')
+  } catch { /* 用户目录还不可写时，界面仍用本次进程里的端口 */ }
+}
+
+function readSavedPort(): number {
+  try {
+    const raw = readFileSync(join(userDataHome(), 'backend-port.json'), 'utf8')
+    const port = Number((JSON.parse(raw) as { port?: number }).port)
+    return Number.isInteger(port) && port > 0 && port < 65536 ? port : 0
+  } catch {
+    return 0
+  }
+}
+
+function allocateFreePort(): Promise<number> {
+  return new Promise((resolvePromise, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close(() => resolvePromise(port))
+    })
+  })
 }
 
 type RuntimeHealth = {
@@ -105,13 +152,13 @@ function expectedBuildId(exePath: string): string {
   }
 }
 
-async function readOwnRuntime(): Promise<RuntimeHealth | null> {
+async function readOwnRuntime(port: number): Promise<RuntimeHealth | null> {
   try {
-    const spec = await net.fetch(READY_URL, { signal: AbortSignal.timeout(1500) })
+    const spec = await net.fetch(`http://127.0.0.1:${port}/openapi.json`, { signal: AbortSignal.timeout(1500) })
     if (!spec.ok) return null
     const body = await spec.json() as { info?: { title?: string } }
     if (body.info?.title !== READY_TITLE) return { runtime: 'foreign' }
-    const runtime = await net.fetch(RUNTIME_URL, { signal: AbortSignal.timeout(1500) })
+    const runtime = await net.fetch(`http://127.0.0.1:${port}/api/runtime`, { signal: AbortSignal.timeout(1500) })
     if (runtime.status === 404 || !runtime.ok) return { runtime: 'missing' }
     const data = await runtime.json() as Omit<RuntimeHealth, 'runtime'>
     return { runtime: 'ok', ...data }
@@ -204,51 +251,65 @@ async function replaceVerifiedListener(pid: number, executable: string): Promise
   return '采集后端没有在时限内退出'
 }
 
+function showBackendError(win: BrowserWindow | null, title: string, message: string): void {
+  notifyRenderer(win, 'error')
+  if (!win || !message) return
+  const show = () => dialog.showErrorBox(title, message)
+  if (win.isVisible()) show()
+  else win.once('ready-to-show', show)
+}
+
 export async function startBackend(win: BrowserWindow | null): Promise<void> {
   if (stopping) return
   const launch = findBackendLaunch()
-  const running = await readOwnRuntime()
-  if (running) {
-    const expectedExe = launch ? resolve(launch.command) : ''
-    const decision = backendDecision({
-      packaged: app.isPackaged,
-      expectedExe,
-      expectedBuild: expectedBuildId(expectedExe),
-      health: running,
-      listener: await queryListener(),
-    })
-    console.log('[backend]', decision.reason || decision.action, running.executable || '', 'pid=', running.pid || '')
-    if (decision.action === 'attach') {
-      notifyRenderer(win, 'ready')
-      restartCount = 0
-      return
+  const expectedExe = launch ? resolve(launch.command) : ''
+  const savedPort = readSavedPort()
+  let foundPort = PREFERRED_PORT
+  let running = await readOwnRuntime(PREFERRED_PORT)
+  if (running?.runtime !== 'ok' && savedPort && savedPort !== PREFERRED_PORT) {
+    const saved = await readOwnRuntime(savedPort)
+    if (saved?.runtime === 'ok') {
+      running = saved
+      foundPort = savedPort
     }
-    if (decision.action === 'error') {
-      notifyRenderer(win, 'error')
-      if (win) {
-        const show = () => dialog.showErrorBox('后端不是本次安装的程序', decision.reason || '')
-        if (win.isVisible()) show()
-        else win.once('ready-to-show', show)
-      }
+  }
+  const choice = startupPort({
+    packaged: app.isPackaged,
+    expectedExe,
+    expectedBuild: expectedBuildId(expectedExe),
+    preferredPort: foundPort,
+    health: running,
+    listener: await queryListener(),
+  })
+  console.log('[backend]', choice.reason || choice.action, running?.executable || '', 'pid=', running?.pid || '')
+  if (choice.action === 'attach') {
+    publishPort(foundPort)
+    notifyRenderer(win, 'ready')
+    restartCount = 0
+    return
+  }
+  if (choice.action === 'error') {
+    publishPort(foundPort)
+    restartCount = MAX_RESTART
+    showBackendError(win, '后端不是本次安装的程序', choice.reason || '')
+    return
+  }
+  if (choice.action === 'replace' && choice.pid && choice.executable) {
+    const blocked = await replaceVerifiedListener(choice.pid, choice.executable)
+    if (blocked) {
+      publishPort(foundPort)
+      showBackendError(win, '旧后端没有退出', blocked)
       return
-    }
-    if (decision.action === 'replace' && decision.pid && decision.executable) {
-      const blocked = await replaceVerifiedListener(decision.pid, decision.executable)
-      if (blocked) {
-        notifyRenderer(win, 'error')
-        if (win) dialog.showErrorBox('旧后端没有退出', blocked)
-        return
-      }
     }
   }
   if (stopping) return
 
   if (!launch) {
+    publishPort(PREFERRED_PORT)
     const msg = app.isPackaged
       ? `未找到打包后端 (${EXE_NAME})\n请检查安装包的 backend 资源。`
       : '未找到开发后端。请在项目根目录创建 .venv 并安装 Python 依赖。'
     console.error('[backend]', msg)
-    // 延迟弹窗，等窗口就绪
     if (win) {
       win.once('ready-to-show', () => {
         dialog.showErrorBox('后端服务未找到', msg)
@@ -257,9 +318,14 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
     return
   }
 
-  console.log('[backend] 启动:', launch.command, ...launch.args)
+  const port = choice.port === 0 ? await allocateFreePort() : choice.port || PREFERRED_PORT
+  backendPort = port
+  notifyRenderer(win, 'starting')
+  console.log('[backend] 启动:', launch.command, 'port=', port, ...launch.args)
 
   const env = backendEnv()
+  env.WEB__PORT = String(port)
+  env.PYTHONUNBUFFERED = '1'
   console.log('[backend] SPIDER_GD_HOME=', env.SPIDER_GD_HOME || '(未设置，使用工作目录)')
   const proc = spawn(launch.command, launch.args, {
     cwd: launch.cwd,
@@ -271,7 +337,14 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
   backendProcess = proc
 
   proc.stdout?.on('data', (data: Buffer) => {
-    console.log(`[backend] ${data.toString().trim()}`)
+    const text = data.toString()
+    console.log(`[backend] ${text.trim()}`)
+    const matched = text.match(/SPIDER_GD_LISTEN=\S+:(\d+)/)
+    if (!matched) return
+    const actual = Number(matched[1])
+    if (!actual) return
+    publishPort(actual)
+    notifyRenderer(win, 'starting')
   })
 
   proc.stderr?.on('data', (data: Buffer) => {
@@ -280,23 +353,19 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
 
   proc.on('error', (err) => {
     console.error('[backend] 启动失败:', err.message)
-    notifyRenderer(win, 'error')
-    attemptRestart(win)
+    void attemptRestart(win)
   })
 
   proc.on('exit', (code, signal) => {
     console.log(`[backend] 进程退出: code=${code} signal=${signal}`)
     backendProcess = null
     notifyRenderer(win, 'stopped')
-
-    // 非主动关闭 → 尝试重启
     if (code !== 0 && code !== null) {
-      attemptRestart(win)
+      void attemptRestart(win)
     }
   })
 
-  // 等待后端就绪后通知渲染进程
-  waitForReady(win)
+  void waitForReady(win)
 }
 
 function attemptRestart(win: BrowserWindow | null): void {
@@ -310,7 +379,7 @@ function attemptRestart(win: BrowserWindow | null): void {
   restartCount++
   console.log(`[backend] ${RESTART_INTERVAL / 1000}s 后第 ${restartCount} 次重试...`)
   restartTimer = setTimeout(() => {
-    startBackend(win)
+    void startBackend(win)
   }, RESTART_INTERVAL)
 }
 
@@ -319,21 +388,20 @@ async function waitForReady(win: BrowserWindow | null): Promise<void> {
   const started = Date.now()
 
   while (Date.now() - started < maxWait) {
-    const running = await readOwnRuntime()
-    const startedByUs = Boolean(
-      running?.runtime === 'ok' && backendProcess?.pid && running.pid === backendProcess.pid,
-    )
-    if (startedByUs) {
-      console.log('[backend] 就绪', running?.executable || '', running?.spider_gd || '', 'pid=', running?.pid)
+    const running = await readOwnRuntime(backendPort)
+    if (running?.runtime === 'ok') {
+      publishPort(backendPort)
+      console.log('[backend] 就绪', running.executable || '', running.spider_gd || '', 'pid=', running.pid, 'port=', backendPort)
       notifyRenderer(win, 'ready')
       restartCount = 0
       return
     }
-    console.log('[backend] 等待服务就绪...')
+    console.log('[backend] 等待服务就绪...', backendPort)
     await new Promise((r) => setTimeout(r, 800))
   }
 
   console.warn('[backend] 启动超时（15s），将继续等待')
+  publishPort(backendPort)
   notifyRenderer(win, 'starting')
 }
 

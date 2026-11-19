@@ -3,7 +3,7 @@ import path, { join } from 'path'
 import { createTray, destroyTray } from './tray'
 import { registerFileIpc } from './files'
 import { startUpdater, manualCheck } from './updater'
-import { startBackend, stopBackend } from './backend'
+import { startBackend, stopBackend, currentBackendBase, whenBackendPort } from './backend'
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
@@ -95,6 +95,10 @@ if (!gotLock) {
     })
 
     ipcMain.handle('app:get-version', () => app.getVersion())
+    ipcMain.handle('backend:get-base', async () => {
+      await whenBackendPort()
+      return currentBackendBase()
+    })
     ipcMain.handle('app:get-data-dir', () => {
       // 开发模式：app.getAppPath() 指向 frontend/ 根
       // 打包模式：app.getAppPath() 指向 app.asar 内

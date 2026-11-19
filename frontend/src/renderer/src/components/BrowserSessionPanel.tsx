@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { Alert, App, Button, Form, Input, Modal, Popconfirm, Select, Space, Tag, Typography } from 'antd'
 import { ChromeOutlined, ReloadOutlined } from '@ant-design/icons'
 
-const BASE = 'http://localhost:8800/api/browser'
+import { backendUrl } from '../services/api'
+
 const DISMISSED_ALERT_KEY = 'spider-gd:dismissed-browser-run-alert'
 const PAGE_LOAD_FAILED = '业务页面加载失败（chrome-error），请在专用浏览器中刷新并确认 U-Key 证书客户端已运行后重新登录'
 type Page = { id: string; title: string; url: string; load_error?: boolean }
@@ -30,13 +31,13 @@ export default function BrowserSessionPanel(): JSX.Element {
   const [form] = Form.useForm()
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE}/status`)
+      const res = await fetch(await backendUrl('/api/browser/status'))
       if (!res.ok) return
       let next: State = await res.json()
       if (next.running) {
-        const result = await fetch(`${BASE}/pages`)
+        const result = await fetch(await backendUrl('/api/browser/pages'))
         if (result.ok) setPages(await result.json())
-        const again = await fetch(`${BASE}/status`)
+        const again = await fetch(await backendUrl('/api/browser/status'))
         if (again.ok) next = await again.json()
       } else setPages([])
       setState(next)
@@ -51,7 +52,7 @@ export default function BrowserSessionPanel(): JSX.Element {
   const action = async (path: string, body?: unknown): Promise<boolean> => {
     setLoading(true)
     try {
-      const res = await fetch(`${BASE}/${path}`, {
+      const res = await fetch(await backendUrl(`/api/browser/${path}`), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body)
       })

@@ -63,11 +63,12 @@ const api = {
   },
 
   // 后端状态
-  onBackendStatus: (cb: (info: { status: string }) => void) => {
-    const listener = (_e: unknown, info: { status: string }) => cb(info)
+  onBackendStatus: (cb: (info: { status: string; base?: string }) => void) => {
+    const listener = (_e: unknown, info: { status: string; base?: string }) => cb(info)
     ipcRenderer.on('backend:status', listener)
     return () => ipcRenderer.removeListener('backend:status', listener)
-  }
+  },
+  getBackendBase: (): Promise<string> => ipcRenderer.invoke('backend:get-base'),
 }
 
 contextBridge.exposeInMainWorld('api', api)

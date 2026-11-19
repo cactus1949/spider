@@ -3388,30 +3388,45 @@ async def register_jobs(
 
 
 async def _serve_web(ctx: AppContext) -> None:
-    """在当前事件循环内启动 REST/Web UI 服务（uvicorn）。"""
-    import socket
+    """启动控制接口；首选端口被占用时改用空闲端口。
 
+    占用首选端口的程序不会被结束。实际端口打印为 ``SPIDER_GD_LISTEN``。
+
+    Args:
+        ctx: 已装配的应用上下文。端口读自 ``ctx.settings.web``，
+            环境变量 ``WEB__PORT`` 优先。
+
+    Returns:
+        None: 服务进程退出时返回。
+
+    Examples:
+        >>> callable(_serve_web)
+        True
+    """
     import uvicorn
 
     from spider_gd.gateway.api.server import create_app
 
-    # 端口预检：旧后端还占着端口时，uvicorn 的绑定失败不会进 app.log，
-    # 现场看起来“启动成功”，实际仍是旧进程在跑旧代码。
-    host, port = ctx.settings.web.host, int(ctx.settings.web.port)
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        probe.bind((host, port))
-    except OSError as exc:
-        logger.error(
-            "控制接口 {}:{} 已被占用：{}。已有后端实例在运行，本次启动不会生效；"
-            "请先结束旧后端（或整个应用）再启动。",
+    # 首选端口被别的程序占用时不退出，改绑一个空闲端口，让前端跟着连。
+    from spider_gd.infrastructure.network.listen_port import choose_listen_port
+    import os
+
+    host = ctx.settings.web.host
+    preferred = int(ctx.settings.web.port)
+    override = os.environ.get("WEB__PORT", "").strip()
+    if override.isdigit():
+        preferred = int(override)
+    port = choose_listen_port(host, preferred)
+    ctx.settings.web.port = port
+    if port != preferred:
+        logger.warning(
+            "控制接口 {}:{} 已被占用，改用 {}:{}。没有结束占用该端口的程序。",
+            host,
+            preferred,
             host,
             port,
-            exc,
         )
-        raise SystemExit(1) from exc
-    finally:
-        probe.close()
+    print(f"SPIDER_GD_LISTEN={host}:{port}", flush=True)
 
     app = create_app(
         ctx.control,  # type: ignore[arg-type]

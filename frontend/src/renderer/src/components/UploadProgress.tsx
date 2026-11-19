@@ -8,7 +8,7 @@ import {
   ReloadOutlined
 } from '@ant-design/icons'
 
-const BASE = 'http://localhost:8800'
+import { backendUrl } from '../services/api'
 
 export interface UploadFileState {
   name: string
@@ -113,7 +113,7 @@ async function readUploadStream(
   onEvent: (event: Record<string, unknown>) => void,
   signal: AbortSignal
 ): Promise<void> {
-  const res = await fetch(`${BASE}/api/data-upload/stream`, {
+  const res = await fetch(await backendUrl('/api/data-upload/stream'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

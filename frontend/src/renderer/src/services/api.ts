@@ -1,4 +1,41 @@
-const BASE = 'http://localhost:8800'
+let currentBase = 'http://127.0.0.1:8800'
+let resolveReady: (() => void) | null = null
+const ready = new Promise<void>((resolve) => {
+  resolveReady = resolve
+})
+
+function rememberBase(base: string | undefined): void {
+  if (!base) return
+  currentBase = base.replace(/\/$/, '')
+  resolveReady?.()
+  resolveReady = null
+}
+
+function bindDesktopBase(): void {
+  const desktop = typeof window === 'undefined' ? undefined : window.api
+  if (!desktop?.getBackendBase) {
+    resolveReady?.()
+    resolveReady = null
+    return
+  }
+  desktop.onBackendStatus((info) => rememberBase(info.base))
+  void desktop.getBackendBase().then((base) => rememberBase(base)).catch(() => {
+    resolveReady?.()
+    resolveReady = null
+  })
+}
+
+bindDesktopBase()
+
+export function backendBase(): string {
+  return currentBase
+}
+
+export async function backendUrl(path: string): Promise<string> {
+  await ready
+  const suffix = path.startsWith('/') ? path : `/${path}`
+  return `${currentBase}${suffix}`
+}
 
 export interface HealthCheck {
   module: string
@@ -373,7 +410,8 @@ export interface DeliveryVerifyResult {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  await ready
+  const res = await fetch(`${backendBase()}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init
   })
@@ -436,7 +474,7 @@ export const api = {
       `/api/workflows/${encodeURIComponent(name)}/record${qs ? '?' + qs : ''}`, { method: 'POST' }
     )
   },
-  exportAllWorkflows: () => `${BASE}/api/workflows/export-all`,
+  exportAllWorkflows: () => backendUrl('/api/workflows/export-all'),
   importWorkflows: (files: { name: string; yaml_text: string }[]) =>
     req<{ status: string; imported: string[]; errors: string[] }>('/api/workflows/import', {
       method: 'POST',
@@ -453,8 +491,9 @@ export const api = {
     }),
   deleteTask: (name: string) =>
     req<{ status: string }>(`/api/tasks/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-  runTaskStream: (name: string, params: Record<string, string>) => {
-    return fetch(`${BASE}/api/tasks/${encodeURIComponent(name)}/run/stream`, {
+  runTaskStream: async (name: string, params: Record<string, string>) => {
+    const url = await backendUrl(`/api/tasks/${encodeURIComponent(name)}/run/stream`)
+    return fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params)
     })
   },
@@ -501,7 +540,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body)
     }),
-  exportAllTaskConfigs: () => `${BASE}/api/task-configs/export-all`,
+  exportAllTaskConfigs: () => backendUrl('/api/task-configs/export-all'),
   importTaskConfigs: (files: Record<string, unknown>[]) =>
     req<{ status: string; imported: string[]; errors: string[] }>('/api/task-configs/import', {
       method: 'POST',

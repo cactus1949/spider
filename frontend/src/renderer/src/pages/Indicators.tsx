@@ -39,7 +39,7 @@ import {
   EyeInvisibleOutlined,
   CalendarOutlined
 } from '@ant-design/icons'
-import { api, settingsStore, type WorkflowInfo, type WorkflowDetail, type WorkflowGroup, type WorkflowOutput } from '../services/api'
+import { api, backendUrl, settingsStore, type WorkflowInfo, type WorkflowDetail, type WorkflowGroup, type WorkflowOutput } from '../services/api'
 import { createDownloadLedger, showExecutionResult } from '../services/executionResult'
 import { filterWorkflowTree, workflowTree, workflowPath, type WorkflowNode } from '../components/workflowTree'
 import { formatDOffset } from '../components/DateWindowSlider'
@@ -493,7 +493,7 @@ steps:
 
   // ---- 导出全部 ----
   const handleExportAll = useCallback(() => {
-    window.open(api.exportAllWorkflows())
+    void api.exportAllWorkflows().then((url) => window.open(url))
   }, [])
 
   // ---- 重命名 ----
@@ -516,11 +516,9 @@ steps:
 
 
   // ---- 共享浏览器 ----
-  const BASE = 'http://localhost:8800'
-
   const checkBrowserStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE}/api/browser/status`)
+      const res = await fetch(await backendUrl('/api/browser/status'))
       const data = await res.json()
       setBrowserRunning(data.running)
       if (data.current_url) setBrowserUrl(data.current_url)
@@ -586,7 +584,7 @@ steps:
       if (mode !== 'single' && disabledSteps.size > 0) {
         params.set('skip_steps', Array.from(disabledSteps).sort((a, b) => a - b).join(','))
       }
-      const url = `${BASE}/api/workflows/${encodeURIComponent(selected)}/step/${stepIndex}/run/stream`
+      const url = await backendUrl(`/api/workflows/${encodeURIComponent(selected)}/step/${stepIndex}/run/stream`)
       const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(Object.fromEntries(params)), signal: abortController.signal })
       if (!res.ok || !res.body) {
@@ -955,8 +953,8 @@ steps:
                     <Button size="small" type="text" danger
                       icon={<PauseCircleOutlined />}
                       onClick={() => {
-                        if (stepRunRef.current) void fetch(`${BASE}/api/browser/cancel`, { method: 'POST',
-                          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: stepRunRef.current }) })
+                        if (stepRunRef.current) void backendUrl('/api/browser/cancel').then((url) => fetch(url, { method: 'POST',
+                          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: stepRunRef.current }) }))
                         stepAbortRef.current?.abort()
                         setPlaying(false)
                         addOutput('⏹ 用户手动停止')

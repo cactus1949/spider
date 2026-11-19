@@ -8,7 +8,7 @@ import {
   PauseCircleOutlined,
   ExclamationCircleOutlined
 } from '@ant-design/icons'
-import { settingsStore } from '../services/api'
+import { backendUrl, settingsStore } from '../services/api'
 import { createDownloadLedger, showExecutionResult, type ExecutionUpload } from '../services/executionResult'
 import { UploadProgressView, type UploadSnapshot } from './UploadProgress'
 
@@ -73,8 +73,6 @@ const INDICATOR_STATUS_TEXT: Record<IndicatorRow['status'], string> = {
   failed: '失败',
   skipped: '跳过'
 }
-
-const BASE = 'http://localhost:8800'
 
 export default function ProgressModal({ open, workflowName, headless, minimized = false, isTask, catchup = null, title, indicatorLabels = {}, resumeExecId = '', onClose }: Props): JSX.Element {
   const [steps, setSteps] = useState<StepProgress[]>([])
@@ -163,10 +161,10 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         const onlySlots = resumeSlotsRef.current
         resumeSlotsRef.current = null
         const url = resumeId
-          ? `${BASE}/api/executions/${encodeURIComponent(resumeId)}/resume/stream`
+          ? await backendUrl(`/api/executions/${encodeURIComponent(resumeId)}/resume/stream`)
           : catchup
-          ? `${BASE}/api/catchup/run/stream`
-          : `${BASE}${basePath}/${encodeURIComponent(workflowName)}/run/stream`
+          ? await backendUrl('/api/catchup/run/stream')
+          : await backendUrl(`${basePath}/${encodeURIComponent(workflowName)}/run/stream`)
         const payload = resumeId
           ? { ...Object.fromEntries(params), slots: onlySlots || [] }
           : catchup
@@ -646,7 +644,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const controlRun = async (action: 'resume' | 'cancel' | 'skip-station'): Promise<void> => {
     if (!runRef.current) return
     try {
-      const res = await fetch(`${BASE}/api/browser/${action}`, {
+      const res = await fetch(await backendUrl(`/api/browser/${action}`), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(runRef.current)
       })
       const result = await res.json()

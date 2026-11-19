@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { backendDecision, killPlan, portAfterStop } from './backendMatch.mjs'
+import { backendDecision, killPlan, portAfterStop, startupPort } from './backendMatch.mjs'
 
 const expected = 'C:\\Users\\admin\\AppData\\Local\\Programs\\spider-gd-desktop\\resources\\backend\\spider-gd-service.exe'
 
@@ -118,6 +118,40 @@ test('an openapi title match does not kill python or an unknown listener', () =>
     listener: { pid: 40, executable: 'C:\\Python311\\python.exe' },
   })
   assert.equal(samePathOtherBuild.action, 'error')
+})
+
+test('a foreign program on 8800 does not stop startup and is not killed', () => {
+  const choice = startupPort({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    preferredPort: 8800,
+    health: null,
+    listener: { pid: 9, executable: 'C:\\Python311\\python.exe' },
+  })
+  assert.equal(choice.action, 'start')
+  assert.equal(choice.port, 0)
+  assert.match(choice.reason, /没有关闭它/)
+  const free = startupPort({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    preferredPort: 8800,
+    health: null,
+    listener: null,
+  })
+  assert.equal(free.action, 'start')
+  assert.equal(free.port, 8800)
+  const foreignApi = startupPort({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    preferredPort: 8800,
+    health: { runtime: 'foreign' },
+    listener: { pid: 8, executable: 'C:\\Chrome\\chrome.exe' },
+  })
+  assert.equal(foreignApi.action, 'start')
+  assert.equal(foreignApi.port, 0)
 })
 
 test('development does not require the frozen exe', () => {

@@ -736,7 +736,7 @@ export default function Tasks(): JSX.Element {
 
   // ---- 导出全部任务配置 ----
   const handleExportAllTaskConfigs = useCallback(() => {
-    window.open(api.exportAllTaskConfigs())
+    void api.exportAllTaskConfigs().then((url) => window.open(url))
   }, [])
 
   return (

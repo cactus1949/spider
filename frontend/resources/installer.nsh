@@ -123,6 +123,8 @@
   !insertmacro spiderUnlockDir "$R9"
   ReadRegStr $R9 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
   !insertmacro spiderUnlockDir "$R9"
+  ; 旧安装可能留下上一版 Chromium。先删掉整个浏览器目录，后面只放入当前版本。
+  RMDir /r "$INSTDIR\resources\backend\playwright_browsers"
   ClearErrors
 !macroend
 

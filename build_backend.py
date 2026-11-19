@@ -709,9 +709,43 @@ def ocr_pyinstaller_args(package_dir: Path | None) -> list[str]:
     return args
 
 
-def _ocr_file_in_capi(toc_text: str, filename: str) -> bool:
-    """文件名附近要有 ``onnxruntime/capi``，只在别处提到名字不算。"""
+def _normalize_toc_text(toc_text: str) -> str:
+    """把清单里的反斜杠和连续斜杠收成单层正斜杠。
+
+    PyInstaller 的 toc 会把 Windows 路径写成双反斜杠。只替换一次时，
+    ``onnxruntime\\\\capi`` 会变成 ``onnxruntime//capi``，后面的目录判断会落空。
+
+    Args:
+        toc_text: PyInstaller toc 或打包参数原文。
+
+    Returns:
+        str: 小写、单斜杠的文本。
+
+    Examples:
+        >>> _normalize_toc_text(r"onnxruntime\\\\capi\\\\onnxruntime.dll")
+        'onnxruntime/capi/onnxruntime.dll'
+    """
     text = toc_text.replace("\\", "/").lower()
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text
+
+
+def _ocr_file_in_capi(toc_text: str, filename: str) -> bool:
+    """文件名附近要有 ``onnxruntime/capi``，只在别处提到名字不算。
+
+    Args:
+        toc_text: PyInstaller toc 或打包参数原文。
+        filename: 要查找的 dll 或 pyd 文件名。
+
+    Returns:
+        bool: 文件名附近能看到 ``onnxruntime/capi`` 时为 True。
+
+    Examples:
+        >>> _ocr_file_in_capi("onnxruntime//capi//onnxruntime.dll", "onnxruntime.dll")
+        True
+    """
+    text = _normalize_toc_text(toc_text)
     needle = filename.lower()
     window = 220
     start = 0
@@ -739,6 +773,9 @@ def missing_ocr_binaries(toc_text: str) -> list[str]:
     Examples:
         >>> sample = "onnxruntime/capi/onnxruntime.dll capi/onnxruntime_pybind11_state.pyd"
         >>> missing_ocr_binaries(sample)
+        []
+        >>> doubled = "onnxruntime//capi//onnxruntime.dll onnxruntime//capi//onnxruntime_pybind11_state.pyd"
+        >>> missing_ocr_binaries(doubled)
         []
         >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd")
         True
@@ -1078,31 +1115,139 @@ def run_pyinstaller() -> None:
             print("[warn] 未找到输出文件，请检查 PyInstaller 日志")
 
 
+def chromium_dir_name(manifest: dict) -> str:
+    """从 Playwright 的 browsers.json 取出当前 Chromium 目录名。
+
+    Args:
+        manifest: ``browsers.json`` 解析后的对象。
+
+    Returns:
+        str: 缓存目录名，例如 ``chromium-1255``。
+
+    Raises:
+        ValueError: 清单里没有带版本号的 chromium。
+
+    Examples:
+        >>> chromium_dir_name({"browsers": [{"name": "chromium", "revision": "1255"}]})
+        'chromium-1255'
+        >>> chromium_dir_name({"browsers": [{"name": "firefox", "revision": "1"}]})
+        Traceback (most recent call last):
+        ValueError: browsers.json 里没有当前 Chromium 版本
+    """
+    for item in manifest.get("browsers", []):
+        if item.get("name") == "chromium" and item.get("revision"):
+            return f"chromium-{item['revision']}"
+    raise ValueError("browsers.json 里没有当前 Chromium 版本")
+
+
+def playwright_manifest_path(package_dir: Path) -> Path:
+    """定位当前 Playwright 安装里的 browsers.json。
+
+    Args:
+        package_dir: ``playwright`` 包目录。
+
+    Returns:
+        Path: 清单文件。
+
+    Raises:
+        SystemExit: 两个已知位置都没有清单。
+
+    Examples:
+        >>> try:
+        ...     playwright_manifest_path(Path("/no/such/playwright"))
+        ... except SystemExit as exc:
+        ...     "browsers.json" in str(exc)
+        True
+    """
+    candidates = [
+        package_dir / "driver" / "package" / "browsers.json",
+        package_dir / "driver" / "browsers.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise SystemExit(f"未找到 Playwright 浏览器清单：{candidates[0]}")
+
+
+def chromium_directory(cache_dir: Path, folder_name: str) -> Path:
+    """确认缓存里有且能启动的那一版 Chromium。
+
+    Args:
+        cache_dir: Playwright 浏览器缓存根目录。
+        folder_name: 当前版本的目录名，例如 ``chromium-1255``。
+
+    Returns:
+        Path: 该版本的目录。
+
+    Raises:
+        SystemExit: 目录不存在，或其中没有 chrome 可执行文件。
+
+    Examples:
+        >>> import tempfile
+        >>> root = Path(tempfile.mkdtemp())
+        >>> folder = root / "chromium-1255" / "chrome-win64"
+        >>> folder.mkdir(parents=True)
+        >>> (folder / "chrome.exe").write_bytes(b"")
+        0
+        >>> chromium_directory(root, "chromium-1255").name
+        'chromium-1255'
+    """
+    directory = cache_dir / folder_name
+    if not directory.is_dir():
+        raise SystemExit(f"未找到当前 Playwright 所需的浏览器：{directory}")
+    executables = [
+        path for path in directory.rglob("*")
+        if path.is_file() and path.name.lower() in {"chrome.exe", "chrome", "chromium"}
+    ]
+    if not executables:
+        raise SystemExit(f"浏览器目录里没有可执行文件：{directory}")
+    return directory
+
+
 def copy_browsers() -> None:
-    """复制 Playwright Chromium 浏览器到输出目录。"""
+    """只复制当前 Playwright 所需的那一版 Chromium。
+
+    缓存里的旧版本不会进入安装包。输出目录已有浏览器时先清空再复制。
+
+    Returns:
+        None: 复制完成时返回。
+
+    Raises:
+        SystemExit: 没有缓存、没有清单，或没有当前版本的浏览器。
+
+    Examples:
+        >>> callable(copy_browsers)
+        True
+    """
     cache_dir = None
     for candidate in [
-        Path.home() / "AppData" / "Local" / "ms-playwright",        # Windows
-        Path.home() / ".cache" / "ms-playwright",                   # Linux
-        Path.home() / "Library" / "Caches" / "ms-playwright",       # macOS
+        Path.home() / "AppData" / "Local" / "ms-playwright",
+        Path.home() / ".cache" / "ms-playwright",
+        Path.home() / "Library" / "Caches" / "ms-playwright",
     ]:
         if candidate.exists():
             cache_dir = candidate
             break
+    if cache_dir is None:
+        raise SystemExit("未找到 Playwright 浏览器缓存，请先运行: playwright install chromium")
 
-    if not cache_dir:
-        print("[warn] 未找到 Playwright 浏览器缓存，请先运行: playwright install chromium")
-        return
+    import playwright
 
+    package_dir = Path(playwright.__file__).resolve().parent
+    manifest = json.loads(playwright_manifest_path(package_dir).read_text(encoding="utf-8"))
+    folder_name = chromium_dir_name(manifest)
+    source = chromium_directory(cache_dir, folder_name)
     target = OUTPUT / "playwright_browsers"
     if target.exists():
-        print(f"[skip] {target} 已存在")
-        return
-
-    print(f"复制 Playwright 浏览器: {cache_dir} -> {target}")
-    shutil.copytree(cache_dir, target, dirs_exist_ok=True)
-    total_size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
-    print(f"[done] Playwright 浏览器已复制 ({total_size / (1024*1024):.0f} MB)")
+        shutil.rmtree(target)
+    destination = target / folder_name
+    print(f"复制 Playwright 浏览器: {source} -> {destination}")
+    shutil.copytree(source, destination)
+    copied = sorted(path.name for path in target.glob("chromium-*") if path.is_dir())
+    if copied != [folder_name]:
+        raise SystemExit(f"浏览器目录应只有 {folder_name}，实际是 {copied}")
+    total_size = sum(path.stat().st_size for path in destination.rglob("*") if path.is_file())
+    print(f"[done] Playwright 浏览器已复制 {folder_name} ({total_size / (1024 * 1024):.0f} MB)")
 
 
 def main() -> None:

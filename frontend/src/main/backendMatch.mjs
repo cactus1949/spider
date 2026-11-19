@@ -49,6 +49,31 @@ export function portAfterStop(input) {
   return { state: 'child', pid: Number(listener.pid), executable: listener.executable }
 }
 
+export function startupPort(input) {
+  const decision = backendDecision(input)
+  const preferred = Number(input.preferredPort) || 8800
+  if (decision.action === 'attach' || decision.action === 'replace') {
+    return { ...decision, port: preferred }
+  }
+  if (input.health && input.health.runtime === 'ok') {
+    return { ...decision, port: preferred }
+  }
+  const listener = input.listener
+  const occupiedByOther = Boolean(
+    listener && listener.pid && listener.executable && !ownServiceName(listener.executable)
+  )
+  if (occupiedByOther || (input.health && input.health.runtime === 'foreign')) {
+    const owner = listener && listener.executable ? listener.executable : '其他程序'
+    return {
+      action: 'start',
+      port: 0,
+      reason: `8800 已被 ${owner} 占用，改用空闲端口，没有关闭它`,
+    }
+  }
+  if (decision.action === 'error') return { ...decision, port: preferred }
+  return { action: 'start', port: preferred, reason: decision.reason || '' }
+}
+
 /**
  * @param {{
  *   packaged: boolean,
@@ -56,6 +81,7 @@ export function portAfterStop(input) {
  *   expectedBuild: string,
  *   health: { runtime?: string, executable?: string, pid?: number, spider_gd?: string, build_id?: string } | null,
  *   listener?: { pid?: number, executable?: string } | null,
+ *   preferredPort?: number,
  * }} input
  */
 export function backendDecision(input) {
