@@ -121,6 +121,21 @@ def test_report_search_query_includes_the_year():
         if saved is not None:
             sys.modules[blocked] = saved
 
+    class _Page:
+        url = "https://pm.gd.csg.cn/portal/#/powerEnterprise"
+
+        def is_closed(self) -> bool:
+            return False
+
+    landed = WorkflowRunner(
+        {"name": "登陆流程测试", "type": "login", "steps": []},
+        download_dir="/tmp",
+    )
+    landed.pages = [_Page()]
+    assert landed._skip_login_submit_because_workbench() is True
+    landed.config["_force_login"] = True
+    assert landed._skip_login_submit_because_workbench() is False
+
     assert report_file_has_year("广东电力现货市场2026年11月运行日报（11.13）.pdf", b"", 2026)
     assert not report_file_has_year("广东电力现货市场2025年11月运行日报（11.13）.pdf", b"", 2026)
     titled = b"/Title (2026\xe5\xb9\xb4\xe6\x97\xa5\xe6\x8a\xa5)"

@@ -647,28 +647,75 @@ def ocr_pyinstaller_args(package_dir: Path | None) -> list[str]:
     return args
 
 
+def _ocr_file_in_capi(toc_text: str, filename: str) -> bool:
+    """文件名附近要有 ``onnxruntime/capi``，只在别处提到名字不算。"""
+    text = toc_text.replace("\\", "/").lower()
+    needle = filename.lower()
+    window = 220
+    start = 0
+    while True:
+        pos = text.find(needle, start)
+        if pos < 0:
+            return False
+        chunk = text[max(0, pos - window): pos + len(needle) + window]
+        if "onnxruntime/capi" in chunk:
+            return True
+        start = pos + len(needle)
+
+
 def missing_ocr_binaries(toc_text: str) -> list[str]:
-    """检查冻结清单里有没有验证码库的本机文件。
+    """检查冻结清单里，验证码 pyd 和它的 dll 是否都靠着 ``onnxruntime/capi``。
+
+    只出现文件名不算。现场的 ``DLL load failed`` 就是 pyd 旁边没有它要的本机库。
 
     Args:
-        toc_text: PyInstaller toc 文本。
+        toc_text: PyInstaller toc 或打包参数文本。
 
     Returns:
-        list[str]: 缺失的文件名。都在时为空列表。
+        list[str]: 缺失或放错目录的文件。都在时为空列表。
 
     Examples:
-        >>> missing_ocr_binaries("onnxruntime.dll onnxruntime_pybind11_state.pyd")
+        >>> sample = "onnxruntime/capi/onnxruntime.dll capi/onnxruntime_pybind11_state.pyd"
+        >>> missing_ocr_binaries(sample)
         []
         >>> "onnxruntime.dll" in missing_ocr_binaries("onnxruntime_pybind11_state.pyd")
         True
     """
-    lowered = toc_text.lower()
     missing: list[str] = []
-    if "onnxruntime.dll" not in lowered:
+    if not _ocr_file_in_capi(toc_text, "onnxruntime.dll"):
         missing.append("onnxruntime.dll")
-    if "onnxruntime_pybind11_state" not in lowered:
+    if not _ocr_file_in_capi(toc_text, "onnxruntime_pybind11_state"):
         missing.append("onnxruntime_pybind11_state.pyd")
     return missing
+
+
+def probe_onnxruntime_dll(dll: Path) -> tuple[bool, str]:
+    """在 Windows 上真正加载 ``onnxruntime.dll``。
+
+    其他系统不加载，也不据此要求安装 VC 运行库。
+
+    Args:
+        dll: 打包前解释器里的 dll。
+
+    Returns:
+        tuple[bool, str]: 第一项为是否加载成功。失败时第二项是系统报错原文。
+
+    Examples:
+        >>> ok, detail = probe_onnxruntime_dll(Path("/no/such.dll"))
+        >>> ok is False and bool(detail)
+        True
+    """
+    if sys.platform != "win32":
+        return False, "当前不是 Windows，没有加载 onnxruntime.dll"
+    if not dll.is_file():
+        return False, f"没有找到 {dll}"
+    import ctypes
+
+    try:
+        ctypes.WinDLL(str(dll))
+    except OSError as exc:
+        return False, str(exc)
+    return True, ""
 
 
 def assert_ocr_frozen(workpath: Path) -> None:
@@ -698,7 +745,15 @@ def assert_ocr_frozen(workpath: Path) -> None:
             + "、".join(missing)
             + "。现场会报 DLL load failed while importing onnxruntime_pybind11_state。"
         )
-    print("[done] 验证码本机库已进入冻结清单：onnxruntime.dll、onnxruntime_pybind11_state")
+    package = onnxruntime_package_dir()
+    dll = package / "capi" / "onnxruntime.dll" if package else Path()
+    if IS_WIN:
+        loaded, detail = probe_onnxruntime_dll(dll)
+        if not loaded:
+            raise SystemExit(f"无法加载验证码依赖 {dll}：{detail}")
+        print(f"[done] 已在 Windows 上加载 {dll}")
+    else:
+        print("[done] 验证码本机库已进入冻结清单；Windows 上才会实际加载 onnxruntime.dll")
 
 
 def required_frozen_modules(*, include_windows_ui: bool = False) -> list[str]:

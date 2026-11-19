@@ -12,6 +12,7 @@ import pytest
 from spider_gd.gateway.diagnostics_bundle import (
     build_diagnostics_zip,
     collect_secret_values,
+    diagnostic_output_dir,
     partial_mask,
     redact_known_secrets,
 )
@@ -32,6 +33,23 @@ def test_partial_mask_and_known_secret_strip():
     assert "alice" not in secrets
     text = redact_known_secrets("使用 pin-7788 登录 alice", secrets)
     assert "pin-7788" not in text
+
+
+@pytest.mark.unit
+def test_missing_download_dir_does_not_create_another_users_path(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    saved = tmp_path / "D-download"
+    saved.mkdir()
+    missing = Path("C:/Users/Administrator/Desktop/download/1031根目录")
+    chosen, note = diagnostic_output_dir(str(missing), str(saved), data_dir)
+    assert chosen == saved / "诊断包"
+    assert chosen.is_dir()
+    assert "指定的下载目录不可用" in note
+    assert not Path("C:/Users/Administrator").exists() or chosen != missing / "诊断包"
+    nowhere, fallback = diagnostic_output_dir(str(missing), str(tmp_path / "absent"), data_dir)
+    assert nowhere == data_dir / "诊断包"
+    assert "数据目录" in fallback
 
 
 @pytest.mark.unit
