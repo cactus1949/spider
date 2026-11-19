@@ -22,6 +22,7 @@ import ast
 import contextlib
 import importlib
 import importlib.util
+import json
 import os
 import platform
 import shutil
@@ -517,6 +518,67 @@ def spider_gd_pyinstaller_args() -> list[str]:
     return args
 
 
+def current_build_id() -> str:
+    """这次打包的构建身份。同版本不同提交也要能分开。"""
+    try:
+        rev = subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        rev = ""
+    if not rev:
+        rev = "unknown"
+    return rev
+
+
+def install_build_stamp(build_id: str) -> str:
+    """把构建身份写进将被冻结的源码，并返回原来的文件内容。"""
+    path = PACKAGE / "build_stamp.py"
+    original = path.read_text(encoding="utf-8")
+    path.write_text(
+        '"""冻结时写入。运行中的进程读这个常量，不读磁盘上的新文件。"""\n\n'
+        "from __future__ import annotations\n\n"
+        f"BUILD_ID = {build_id!r}\n",
+        encoding="utf-8",
+    )
+    return original
+
+
+def restore_build_stamp(original: str) -> None:
+    """打包结束后把仓库里的构建身份文件放回去。"""
+    (PACKAGE / "build_stamp.py").write_text(original, encoding="utf-8")
+
+
+def assert_frozen_ocr(exe: Path) -> None:
+    """让刚打出来的 exe 自己导入验证码依赖。
+
+    不是构建机直接加载 dll。非 Windows 不运行这个 exe。
+
+    Args:
+        exe: 冻结产物。
+
+    Raises:
+        SystemExit: Windows 上自测失败。
+    """
+    if not IS_WIN:
+        print("[skip] 冻结产物的验证码自测只在 Windows 上运行该 exe")
+        return
+    completed = subprocess.run(
+        [str(exe), "--self-test-ocr"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    if completed.returncode != 0 or not (completed.stdout or "").lstrip().startswith("ok"):
+        raise SystemExit("冻结产物无法加载验证码依赖：\n" + output[-2000:])
+    print("[done] 冻结产物已加载 onnxruntime 扩展和验证码模型")
+
+
 def assert_repo_package_wins() -> None:
     """打包前确认要收进冻结包的是仓库源码，不是环境里残留的旧安装。
 
@@ -906,6 +968,7 @@ def run_pyinstaller() -> None:
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     clean_build()
+    build_id = current_build_id()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -968,13 +1031,22 @@ def run_pyinstaller() -> None:
             path_parts.insert(0, str(lib_bin))
     env["PATH"] = os.pathsep.join(path_parts)
 
-    subprocess.run(cmd, check=True, env=env)
+    original_stamp = install_build_stamp(build_id)
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    finally:
+        restore_build_stamp(original_stamp)
+    (OUTPUT / "build_stamp.json").write_text(
+        json.dumps({"build_id": build_id}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     exe = OUTPUT / f"{APP_NAME}{EXE_SUFFIX}"
     if not exe.exists():
         alt = OUTPUT / APP_NAME
         exe = alt if alt.exists() else exe
     if exe.exists():
         assert_frozen_modules(exe)
+        assert_frozen_ocr(exe)
     if IS_WIN:
         assert_ocr_frozen(BUILD)
 

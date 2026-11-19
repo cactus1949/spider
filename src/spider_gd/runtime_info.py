@@ -21,9 +21,16 @@ def runtime_identity() -> dict[str, object]:
         from spider_gd import __version__ as package_version
     except Exception:
         package_version = ""
+    try:
+        from spider_gd.build_stamp import BUILD_ID
+
+        stamp = str(BUILD_ID or "")
+    except Exception:
+        stamp = ""
     executable = Path(sys.executable).resolve()
     return {
         "spider_gd": str(package_version or ""),
+        "build_id": stamp,
         "frozen": bool(getattr(sys, "frozen", False)),
         "executable": str(executable),
         "pid": os.getpid(),

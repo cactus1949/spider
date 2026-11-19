@@ -1,43 +1,132 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { backendDecision, ownServiceName } from './backendMatch.mjs'
+import { backendDecision, killPlan, portAfterStop } from './backendMatch.mjs'
 
-test('packaged app attaches only when the exe path matches', () => {
-  const expected = 'C:\\Users\\admin\\AppData\\Local\\Programs\\spider-gd-desktop\\resources\\backend\\spider-gd-service.exe'
+const expected = 'C:\\Users\\admin\\AppData\\Local\\Programs\\spider-gd-desktop\\resources\\backend\\spider-gd-service.exe'
+
+test('same path but a different build is not treated as the new install', () => {
   const decision = backendDecision({
     packaged: true,
     expectedExe: expected,
-    health: { executable: expected, pid: 12, spider_gd: '0.2.4' },
+    expectedBuild: 'newbuild123',
+    health: {
+      runtime: 'ok',
+      executable: expected,
+      pid: 40,
+      spider_gd: '0.2.4',
+      build_id: 'oldbuild999',
+    },
+    listener: { pid: 40, executable: expected },
   })
-  assert.equal(decision.action, 'attach')
+  assert.equal(decision.action, 'replace')
+  assert.equal(decision.pid, 40)
 })
 
-test('packaged app replaces another copy of its own service and does not touch python', () => {
-  const old = backendDecision({
+test('matching build attaches only when the listening process agrees', () => {
+  const ok = backendDecision({
     packaged: true,
-    expectedExe: 'C:\\new\\resources\\backend\\spider-gd-service.exe',
-    health: {
-      executable: 'C:\\old\\resources\\backend\\spider-gd-service.exe',
-      pid: 44,
-      spider_gd: '0.2.0',
-    },
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'ok', executable: expected, pid: 40, build_id: 'newbuild123' },
+    listener: { pid: 40, executable: expected },
   })
-  assert.equal(old.action, 'replace')
-  assert.equal(old.pid, 44)
+  assert.equal(ok.action, 'attach')
+  const mismatch = backendDecision({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'ok', executable: expected, pid: 40, build_id: 'newbuild123' },
+    listener: { pid: 99, executable: 'C:\\Python311\\python.exe' },
+  })
+  assert.equal(mismatch.action, 'error')
+})
+
+test('an old backend without runtime is replaced only from the OS listener', () => {
+  const replace = backendDecision({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'missing' },
+    listener: { pid: 7, executable: expected },
+  })
+  assert.equal(replace.action, 'replace')
+  assert.equal(replace.pid, 7)
+  const unknown = backendDecision({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'missing' },
+    listener: null,
+  })
+  assert.equal(unknown.action, 'error')
   const foreign = backendDecision({
     packaged: true,
-    expectedExe: 'C:\\new\\resources\\backend\\spider-gd-service.exe',
-    health: { executable: 'C:\\Python311\\python.exe', pid: 9, spider_gd: '0.2.0' },
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'foreign' },
+    listener: { pid: 8, executable: 'C:\\Chrome\\chrome.exe' },
   })
   assert.equal(foreign.action, 'error')
-  assert.equal(ownServiceName('C:\\Python311\\python.exe'), false)
+})
+
+test('a reported pid is not killed when the listener is something else', () => {
+  const plan = killPlan({
+    reportedPid: 40,
+    reportedExe: expected,
+    listener: { pid: 41, executable: 'C:\\Windows\\System32\\svchost.exe' },
+  })
+  assert.equal(plan.kill, false)
+})
+
+test('after quit, a leftover child can be stopped and a foreign pid cannot', () => {
+  assert.deepEqual(portAfterStop({ oldPid: 40, listener: null }), { state: 'clear' })
+  assert.equal(portAfterStop({
+    oldPid: 40,
+    listener: { pid: 40, executable: expected },
+  }).state, 'still-ours')
+  assert.equal(portAfterStop({
+    oldPid: 40,
+    listener: { pid: 41, executable: expected },
+  }).state, 'child')
+  const taken = portAfterStop({
+    oldPid: 40,
+    listener: { pid: 88, executable: 'C:\\Chrome\\chrome.exe' },
+  })
+  assert.equal(taken.state, 'taken')
+})
+
+test('an openapi title match does not kill python or an unknown listener', () => {
+  const python = backendDecision({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: { runtime: 'missing' },
+    listener: { pid: 9, executable: 'C:\\Python311\\python.exe' },
+  })
+  assert.equal(python.action, 'error')
+  const samePathOtherBuild = backendDecision({
+    packaged: true,
+    expectedExe: expected,
+    expectedBuild: 'newbuild123',
+    health: {
+      runtime: 'ok',
+      executable: expected,
+      pid: 40,
+      spider_gd: '0.2.4',
+      build_id: 'oldbuild999',
+    },
+    listener: { pid: 40, executable: 'C:\\Python311\\python.exe' },
+  })
+  assert.equal(samePathOtherBuild.action, 'error')
 })
 
 test('development does not require the frozen exe', () => {
   const decision = backendDecision({
     packaged: false,
     expectedExe: '',
-    health: { executable: 'C:\\repo\\.venv\\Scripts\\python.exe', pid: 3, spider_gd: '0.2.4' },
+    expectedBuild: '',
+    health: { runtime: 'ok', executable: 'C:\\repo\\.venv\\Scripts\\python.exe', pid: 3, build_id: 'source' },
+    listener: null,
   })
   assert.equal(decision.action, 'attach')
 })

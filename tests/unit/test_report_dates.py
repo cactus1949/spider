@@ -62,7 +62,7 @@ def test_select_report_notices_deduplicates():
 @pytest.mark.unit
 def test_report_search_query_includes_the_year():
     from task_runner import apply_target_date_to_workflow
-    from workflow_runner import WorkflowRunner
+    from workflow_runner import WorkflowRunner, login_submit_decision
 
     from spider_gd.core.report_dates import report_file_has_year, report_search_query
 
@@ -121,20 +121,15 @@ def test_report_search_query_includes_the_year():
         if saved is not None:
             sys.modules[blocked] = saved
 
-    class _Page:
-        url = "https://pm.gd.csg.cn/portal/#/powerEnterprise"
-
-        def is_closed(self) -> bool:
-            return False
-
-    landed = WorkflowRunner(
-        {"name": "登陆流程测试", "type": "login", "steps": []},
-        download_dir="/tmp",
-    )
-    landed.pages = [_Page()]
-    assert landed._skip_login_submit_because_workbench() is True
-    landed.config["_force_login"] = True
-    assert landed._skip_login_submit_because_workbench() is False
+    assert login_submit_decision(
+        force_login=False, is_login=True, on_workbench=True, popup_left=False,
+    ) == "skip"
+    assert login_submit_decision(
+        force_login=False, is_login=True, on_workbench=True, popup_left=True,
+    ) == "popup"
+    assert login_submit_decision(
+        force_login=True, is_login=True, on_workbench=True, popup_left=False,
+    ) == "continue"
 
     assert report_file_has_year("广东电力现货市场2026年11月运行日报（11.13）.pdf", b"", 2026)
     assert not report_file_has_year("广东电力现货市场2025年11月运行日报（11.13）.pdf", b"", 2026)

@@ -108,6 +108,20 @@ def _dispatch_picker(argv: list[str]) -> int | None:
     return int(picker_main(forwarded))
 
 
+def _dispatch_ocr_self_test(argv: list[str]) -> int | None:
+    """冻结产物用 ``--self-test-ocr`` 自己加载验证码依赖。"""
+    if "--self-test-ocr" not in argv:
+        return None
+    try:
+        from spider_gd.core.crawler.ocr_probe import ocr_self_test
+
+        print(ocr_self_test())
+    except Exception:
+        traceback.print_exc()
+        return 1
+    return 0
+
+
 def main() -> int:
     """启动采集后端；参数属于场站窗口时只弹窗。
 
@@ -121,6 +135,9 @@ def main() -> int:
         True
     """
     _fix_console()
+    ocr_code = _dispatch_ocr_self_test(sys.argv)
+    if ocr_code is not None:
+        return ocr_code
     picker_code = _dispatch_picker(sys.argv)
     if picker_code is not None:
         return picker_code

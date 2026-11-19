@@ -756,6 +756,40 @@ def captcha_refresh_delay_s(step: dict, rng: random.Random | None = None) -> flo
     return delay_ms / 1000
 
 
+def login_submit_decision(
+    *,
+    force_login: bool,
+    is_login: bool,
+    on_workbench: bool,
+    popup_left: bool,
+) -> str:
+    """决定立即登录这一步是跳过、停下，还是照常点。
+
+    工作台地址本身不是登录完成。弹窗还在时必须停下来。强制重新登录时，
+    上一站的工作台也不能跳过。
+
+    Args:
+        force_login: 这一站必须重新登录。
+        is_login: 当前步骤属于登录流程。
+        on_workbench: 当前页已经是工作台。
+        popup_left: 关过一轮之后弹窗还在。
+
+    Returns:
+        str: ``skip``、``popup`` 或 ``continue``。
+
+    Examples:
+        >>> login_submit_decision(force_login=True, is_login=True, on_workbench=True, popup_left=False)
+        'continue'
+        >>> login_submit_decision(force_login=False, is_login=True, on_workbench=True, popup_left=True)
+        'popup'
+    """
+    if force_login or not is_login or not on_workbench:
+        return "continue"
+    if popup_left:
+        return "popup"
+    return "skip"
+
+
 class WorkflowRunner:
     """解析 YAML 工作流，通过 CDP 操控 Chrome 逐步执行。"""
 
@@ -3276,22 +3310,36 @@ class WorkflowRunner:
             f"登录提交后 {timeout_ms}ms 内没有进入工作台（检查页：{checked}）"
         )
 
-    def _skip_login_submit_because_workbench(self) -> bool:
-        """人工继续后如果已经在工作台，就不要再点立即登录。
+    async def _workbench_login_submit_state(self) -> str:
+        """人工继续后，工作台没有待处理弹窗才跳过立即登录。
 
         多场站强制重新登录时，上一站的工作台不能当成这一站已经登录。
-        只看当前地址，不再额外查询页面。
+        弹窗还在时不把这一步记成登录完成。
 
         Returns:
-            bool: 可以跳过这次登录提交时为 True。
+            str: ``skip`` 才跳过。``popup`` 表示弹窗还在。``continue`` 照常点击。
         """
-        if self.config.get("_force_login"):
-            return False
-        if self.config.get("type") != "login":
-            return False
         from workbench_tabs import is_workbench_url
 
-        return is_workbench_url(self._page_url(self.page))
+        on_workbench = is_workbench_url(self._page_url(self.page))
+        preliminary = login_submit_decision(
+            force_login=bool(self.config.get("_force_login")),
+            is_login=self.config.get("type") == "login",
+            on_workbench=on_workbench,
+            popup_left=False,
+        )
+        if preliminary != "skip":
+            return preliminary
+        await self.dismiss_workbench_popups()
+        from spider_gd.core.crawler.workbench_popup import read_workbench_popup
+
+        popup = await read_workbench_popup(self.page)
+        return login_submit_decision(
+            force_login=bool(self.config.get("_force_login")),
+            is_login=self.config.get("type") == "login",
+            on_workbench=on_workbench,
+            popup_left=bool(popup),
+        )
 
     def _start_certificate_watch(self):
         """在点击「立即登录」之前开始看原生证书窗口。
@@ -3366,10 +3414,14 @@ class WorkflowRunner:
         watch_login = (
             self.config.get("type") == "login" and "立即登录" in str(selector)
         )
-        if watch_login and self._skip_login_submit_because_workbench():
-            self._skip_remaining_login_steps = True
-            logger.info("  当前已在工作台，不再点立即登录")
-            return
+        if watch_login:
+            submit_state = await self._workbench_login_submit_state()
+            if submit_state == "popup":
+                raise WorkflowExecutionError("工作台仍有待处理弹窗，不能当作登录完成")
+            if submit_state == "skip":
+                self._skip_remaining_login_steps = True
+                logger.info("  当前已在工作台且没有待处理弹窗，不再点立即登录")
+                return
         if watch_login:
             self._login_generation += 1
             self._login_watch_at = time.monotonic()

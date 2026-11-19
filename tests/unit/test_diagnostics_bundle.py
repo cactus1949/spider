@@ -187,3 +187,20 @@ def test_bundle_contains_expected_files_and_redacts_secrets(tmp_path: Path):
     assert "abc123xyz" not in blob
     assert "a***e" in blob or "alice" not in blob
     store.close()
+
+
+@pytest.mark.unit
+def test_existing_unwritable_dir_falls_back_without_creating_it(tmp_path: Path):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    try:
+        chosen, note = diagnostic_output_dir(str(locked), "", data_dir)
+    finally:
+        locked.chmod(0o755)
+    assert chosen == data_dir / "诊断包"
+    assert chosen.is_dir()
+    assert "指定的下载目录不可用" in note
+    assert not (locked / "诊断包").exists()
