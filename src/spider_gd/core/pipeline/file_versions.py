@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from spider_gd.config.user_home import validate_write_path
+
 
 @dataclass(frozen=True)
 class VersionedSaveResult:
@@ -28,16 +30,26 @@ def file_sha256(path: str | Path) -> str:
 
 
 def save_versioned_bytes(dest: str | Path, data: bytes) -> VersionedSaveResult:
-    dest_path = Path(dest)
+    dest_path = validate_write_path(dest, "版本文件输出")
+    validate_write_path(dest_path.parent, "版本文件输出目录")
+    tmp_path = validate_write_path(
+        dest_path.parent / f".{dest_path.name}.{datetime.now().strftime('%Y%m%d%H%M%S%f')}.tmp",
+        "版本文件临时输出",
+    )
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_path.parent / f".{dest_path.name}.{datetime.now().strftime('%Y%m%d%H%M%S%f')}.tmp"
     tmp_path.write_bytes(data)
     return save_versioned_file(tmp_path, dest_path)
 
 
 def save_versioned_file(source: str | Path, dest: str | Path) -> VersionedSaveResult:
-    source_path = Path(source)
-    dest_path = Path(dest)
+    source_path = validate_write_path(source, "版本文件临时来源")
+    dest_path = validate_write_path(dest, "版本文件输出")
+    # move/unlink 会修改父目录中的条目，不能消费目录外指向目录内的符号链接。
+    validate_write_path(source_path.parent, "版本文件临时来源目录")
+    validate_write_path(dest_path.parent, "版本文件输出目录")
+    # 已知的清单目标必须先检查，避免拒绝时已经消费临时文件或替换旧输出。
+    manifest_path = validate_write_path(dest_path.parent / ".file_versions.json", "版本文件清单")
+    validate_write_path(manifest_path.with_suffix(".json.tmp"), "版本文件临时清单")
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     new_hash = file_sha256(source_path)
     archived: Path | None = None
@@ -65,7 +77,7 @@ def save_versioned_file(source: str | Path, dest: str | Path) -> VersionedSaveRe
 
 
 def _archive_existing(path: Path, sha256: str) -> Path:
-    version_dir = path.parent / "_versions"
+    version_dir = validate_write_path(path.parent / "_versions", "版本文件归档目录")
     version_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     archived = version_dir / f"{path.stem}_{stamp}_{sha256[:12]}{path.suffix}"
@@ -73,6 +85,7 @@ def _archive_existing(path: Path, sha256: str) -> Path:
     while archived.exists():
         archived = version_dir / f"{path.stem}_{stamp}_{sha256[:12]}_{counter}{path.suffix}"
         counter += 1
+    archived = validate_write_path(archived, "版本文件归档")
     shutil.copy2(path, archived)
     return archived
 
@@ -84,7 +97,8 @@ def _record_manifest(
     archived_path: Path | None = None,
     archived_sha256: str = "",
 ) -> None:
-    manifest_path = path.parent / ".file_versions.json"
+    manifest_path = validate_write_path(path.parent / ".file_versions.json", "版本文件清单")
+    tmp = validate_write_path(manifest_path.with_suffix(".json.tmp"), "版本文件临时清单")
     now = datetime.now().isoformat(timespec="seconds")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -102,6 +116,5 @@ def _record_manifest(
             "sha256": archived_sha256,
             "archived_at": now,
         })
-    tmp = manifest_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(manifest_path)

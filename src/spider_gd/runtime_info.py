@@ -27,12 +27,20 @@ def runtime_identity() -> dict[str, object]:
         stamp = str(BUILD_ID or "")
     except Exception:
         stamp = ""
+    from spider_gd.release_channel import runtime_release
+
+    release = runtime_release()
     executable = Path(sys.executable).resolve()
+    from spider_gd.config.user_home import user_home
+
+    data_home = (user_home() or Path.cwd()).resolve()
     return {
-        "spider_gd": str(package_version or ""),
+        "spider_gd": str(release["version"] or package_version or ""),
+        "channel": release["channel"],
         "build_id": stamp,
         "frozen": bool(getattr(sys, "frozen", False)),
         "executable": str(executable),
         "pid": os.getpid(),
         "cwd": str(Path.cwd()),
+        "data_home": str(data_home),
     }

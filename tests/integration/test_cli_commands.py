@@ -164,10 +164,18 @@ delivery:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["stable", "beta"])
 @respx.mock
-def test_delivery_test_send_file_respects_explicit_task_id(tmp_path: Path, capsys):
+def test_delivery_test_send_file_respects_explicit_task_id(tmp_path, capsys, monkeypatch, channel):
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", channel)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    home = tmp_path / "beta-home" if channel == "beta" else tmp_path
+    if channel == "beta":
+        home.mkdir()
+        monkeypatch.setenv("SPIDER_GD_HOME", str(home))
     webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc"
-    db_path = tmp_path / "spider.db"
+    db_path = home / "spider.db"
     sample = tmp_path / "result.zip"
     sample.write_bytes(b"123456")
     cfg = tmp_path / "delivery_send_explicit_id.yaml"
@@ -175,7 +183,7 @@ def test_delivery_test_send_file_respects_explicit_task_id(tmp_path: Path, capsy
         f"""
 storage:
   sqlite_path: "{db_path}"
-  data_dir: "{tmp_path / 'data'}"
+  data_dir: "{home / 'data'}"
 log:
   persist_to_file: false
 delivery:

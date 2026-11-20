@@ -39,7 +39,7 @@ import {
   EyeInvisibleOutlined,
   CalendarOutlined
 } from '@ant-design/icons'
-import { api, backendUrl, settingsStore, type WorkflowInfo, type WorkflowDetail, type WorkflowGroup, type WorkflowOutput } from '../services/api'
+import { api, backendUrl, cancelBrowserRun, settingsStore, type WorkflowInfo, type WorkflowDetail, type WorkflowGroup, type WorkflowOutput } from '../services/api'
 import { createDownloadLedger, showExecutionResult } from '../services/executionResult'
 import { filterWorkflowTree, workflowTree, workflowPath, type WorkflowNode } from '../components/workflowTree'
 import { formatDOffset } from '../components/DateWindowSlider'
@@ -953,8 +953,9 @@ steps:
                     <Button size="small" type="text" danger
                       icon={<PauseCircleOutlined />}
                       onClick={() => {
-                        if (stepRunRef.current) void backendUrl('/api/browser/cancel').then((url) => fetch(url, { method: 'POST',
-                          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: stepRunRef.current }) }))
+                        if (stepRunRef.current) cancelBrowserRun(stepRunRef.current, (error) => {
+                          message.warning(`停止请求未送达后端：${String(error)}`)
+                        })
                         stepAbortRef.current?.abort()
                         setPlaying(false)
                         addOutput('⏹ 用户手动停止')

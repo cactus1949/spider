@@ -6,13 +6,15 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from spider_gd.infrastructure.proc import run_capture
 
@@ -23,10 +25,11 @@ _USB_PROBE_BUDGET = 8.0
 _DOWNLOAD_BUDGET = 14.0
 _HEX_ID = re.compile(r"(?i)(?:VID_|0x)?([0-9A-F]{4})")
 # Windows 给没有序列号的设备编的插口位置，例如 6&256A9945&0&0000。
-_LOCATION_SERIAL = re.compile(r"^\d+&[0-9A-F]+&\d+&\d+$", re.IGNORECASE)
+_LOCATION_SERIAL = re.compile(r"^\d+&[0-9A-F]+&\d+&[0-9A-F]+$", re.IGNORECASE)
+_COMPOSITE_NAME = re.compile(r"复合设备|USB Composite Device", re.IGNORECASE)
 _SKIP_NAME = re.compile(
     r"根集线器|主机控制器|Host Controller|Root Hub|集线器|USB Hub|Generic Hub|"
-    r"Bluetooth|蓝牙|Camera|摄像头|FaceTime|红外|Ambient Light|"
+    r"Bluetooth|蓝牙|Camera|摄像头|FaceTime|红外|Ambient Light|Fingerprint|指纹|"
     r"复合设备|USB Composite Device|USB 复合设备",
     re.IGNORECASE,
 )
@@ -58,6 +61,7 @@ class UsbDevice:
     ukey_candidate: bool = False
     serial: str = ""
     parent: str = ""
+    member_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, str | bool]:
         """转成接口返回的字段。
@@ -122,6 +126,7 @@ def parse_pnp_devices(raw: str) -> list[UsbDevice]:
     data = json.loads(text)
     rows = data if isinstance(data, list) else [data]
     devices: list[UsbDevice] = []
+    topology: list[UsbDevice] = []
     seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -132,13 +137,19 @@ def parse_pnp_devices(raw: str) -> list[UsbDevice]:
         parent = str(row.get("Parent") or "")
         if not device_id or not name or device_id in seen:
             continue
-        if not is_external_usb(name, device_id, pnp_class=pnp_class, parent=parent):
-            continue
         seen.add(device_id)
         vid, pid = _vid_pid(device_id)
         serial = usb_serial(device_id)
-        devices.append(_device(device_id, name, vid, pid, serial, parent))
-    return _with_unique_labels(_collapse_interfaces(devices))
+        device = _device(device_id, name, vid, pid, serial, parent)
+        if is_external_usb(name, device_id, pnp_class=pnp_class, parent=parent):
+            devices.append(device)
+        elif (
+            device_id.upper().startswith("USB\\VID_")
+            and "&MI_" not in device_id.upper()
+            and _COMPOSITE_NAME.search(name)
+        ):
+            topology.append(device)
+    return _with_unique_labels(_collapse_interfaces(devices, topology))
 
 
 def parse_macos_usb(raw: str) -> list[UsbDevice]:
@@ -198,6 +209,79 @@ def _command_text(command: list[str], timeout: float, label: str) -> tuple[bool,
             merged = f"{merged}\n{detail}".strip()
         return False, merged or f"失败：{label}：退出码 {result.returncode}"
     return True, text or "（没有输出）"
+
+
+def _read_windows_parents(device_ids: list[str], *, deadline: float) -> dict[str, str]:
+    if sys.platform != "win32" or not device_ids or time.monotonic() >= deadline:
+        return {}
+    # Win32 DWORD/DEVINST 始终是 32 位，不能使用宿主平台的 c_ulong。
+    dword = ctypes.c_uint32
+    pdword = ctypes.POINTER(dword)
+    try:
+        cfgmgr = ctypes.WinDLL("cfgmgr32")
+        locate = cfgmgr.CM_Locate_DevNodeW
+        locate.argtypes = [pdword, ctypes.c_wchar_p, dword]
+        locate.restype = dword
+        get_parent = cfgmgr.CM_Get_Parent
+        get_parent.argtypes = [pdword, dword, dword]
+        get_parent.restype = dword
+        get_size = cfgmgr.CM_Get_Device_ID_Size
+        get_size.argtypes = [pdword, dword, dword]
+        get_size.restype = dword
+        get_id = cfgmgr.CM_Get_Device_IDW
+        get_id.argtypes = [dword, ctypes.POINTER(ctypes.c_wchar), dword, dword]
+        get_id.restype = dword
+    except (AttributeError, OSError):
+        return {}
+    parents: dict[str, str] = {}
+    for device_id in dict.fromkeys(device_ids):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            node, parent, size = dword(), dword(), dword()
+            if locate(ctypes.byref(node), device_id, 0) != 0:
+                continue
+            if time.monotonic() >= deadline:
+                break
+            if get_parent(ctypes.byref(parent), node, 0) != 0:
+                continue
+            if time.monotonic() >= deadline:
+                break
+            if get_size(ctypes.byref(size), parent, 0) != 0 or not size.value:
+                continue
+            buffer = ctypes.create_unicode_buffer(size.value + 1)
+            if time.monotonic() >= deadline:
+                break
+            if get_id(parent, buffer, len(buffer), 0) == 0 and buffer.value:
+                parents[device_id] = buffer.value
+        except Exception:
+            continue
+    return parents
+
+
+def _windows_pnp_text(command: list[str], timeout: float, label: str) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout
+    ok, text = _command_text(command, timeout, label)
+    if not ok:
+        return ok, text
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return ok, text
+    rows = data if isinstance(data, list) else [data]
+    device_ids = [
+        str(row.get("InstanceId") or row.get("DeviceID") or "").strip()
+        for row in rows if isinstance(row, dict) and not row.get("Parent")
+    ]
+    parents = _read_windows_parents([item for item in device_ids if item], deadline=deadline)
+    if not parents:
+        return ok, text
+    for row in rows:
+        if isinstance(row, dict) and not row.get("Parent"):
+            device_id = str(row.get("InstanceId") or row.get("DeviceID") or "").strip()
+            if device_id in parents:
+                row["Parent"] = parents[device_id]
+    return ok, json.dumps(data, ensure_ascii=False)
 
 
 def _powershell(script: str) -> list[str]:
@@ -364,7 +448,7 @@ def _windows_usb_sections() -> list[tuple[str, bool, str]]:
         True
     """
     def cim() -> tuple[bool, str]:
-        return _command_text(_cim_usb_command(), _FAST_PROBE_TIMEOUT, "Get-CimInstance")
+        return _windows_pnp_text(_cim_usb_command(), _FAST_PROBE_TIMEOUT, "Get-CimInstance")
 
     def pnputil() -> tuple[bool, str]:
         return _command_text(_pnputil_command(), _FAST_PROBE_TIMEOUT, "pnputil")
@@ -373,7 +457,7 @@ def _windows_usb_sections() -> list[tuple[str, bool, str]]:
     rows = run_named_probes(fast, budget=_USB_PROBE_BUDGET)
     if any(ok for _name, ok, _text in rows):
         return rows
-    ok, text = _command_text(_pnp_fallback_command(), _FALLBACK_PROBE_TIMEOUT, "Get-PnpDevice")
+    ok, text = _windows_pnp_text(_pnp_fallback_command(), _FALLBACK_PROBE_TIMEOUT, "Get-PnpDevice")
     rows.append(("Get-PnpDevice", ok, text))
     return rows
 
@@ -421,7 +505,7 @@ def _list_windows() -> list[UsbDevice]:
         ("Get-CimInstance", _cim_usb_command(), _FAST_PROBE_TIMEOUT),
         ("Get-PnpDevice", _pnp_fallback_command(), _FALLBACK_PROBE_TIMEOUT),
     ):
-        ok, text = _command_text(command, timeout, label)
+        ok, text = _windows_pnp_text(command, timeout, label)
         if not ok:
             notes.append(text)
             continue
@@ -655,7 +739,7 @@ def is_external_usb(
     if _SKIP_NAME.search(name or ""):
         return False
     kind = (pnp_class or "").lower()
-    if kind in {"bluetooth", "camera", "softwaredevice", "system", "computer"}:
+    if kind in {"bluetooth", "camera", "biometric", "softwaredevice", "system", "computer"}:
         return False
     upper = (device_id or "").upper()
     parent_upper = (parent or "").upper()
@@ -764,12 +848,15 @@ def _with_unique_labels(devices: list[UsbDevice]) -> list[UsbDevice]:
                 pid=device.pid,
                 ukey_candidate=device.ukey_candidate,
                 serial=device.serial,
+                member_ids=device.member_ids,
             )
         )
     return sorted(labeled, key=lambda item: (not item.ukey_candidate, item.label))
 
 
-def _collapse_interfaces(devices: list[UsbDevice]) -> list[UsbDevice]:
+def _collapse_interfaces(
+    devices: list[UsbDevice], topology: list[UsbDevice] | None = None,
+) -> list[UsbDevice]:
     """把同一把设备的多个接口收成一行。
 
     有稳定序列号的接口按序列号合并。没有序列号时，HID 子节点顺着 Parent
@@ -789,7 +876,7 @@ def _collapse_interfaces(devices: list[UsbDevice]) -> list[UsbDevice]:
         >>> len(_collapse_interfaces(rows))
         1
     """
-    by_id = {device.device_id.upper(): device for device in devices}
+    by_id = {device.device_id.upper(): device for device in devices + (topology or [])}
 
     def _root(device: UsbDevice) -> UsbDevice:
         seen: set[str] = set()
@@ -802,22 +889,32 @@ def _collapse_interfaces(devices: list[UsbDevice]) -> list[UsbDevice]:
             current = by_id[parent]
 
     grouped: dict[str, UsbDevice] = {}
+    members: dict[str, list[str]] = {}
     order: list[str] = []
     for device in devices:
         top = _root(device)
         serial = top.serial or device.serial
         if serial and not _LOCATION_SERIAL.match(serial):
+            device = replace(device, serial=serial)
             key = f"sn:{top.vid}:{top.pid}:{serial}"
         else:
             key = f"id:{top.device_id.upper()}"
+        members.setdefault(key, []).extend((
+            device.device_id, *device.member_ids, top.device_id, *top.member_ids,
+        ))
         current = grouped.get(key)
         if current is None:
-            grouped[key] = top if _device_rank(top) >= _device_rank(device) else device
+            grouped[key] = device
             order.append(key)
             continue
-        challenger = top if _device_rank(top) >= _device_rank(device) else device
-        grouped[key] = current if _device_rank(current) >= _device_rank(challenger) else challenger
-    return [grouped[key] for key in order]
+        grouped[key] = current if _device_rank(current) >= _device_rank(device) else device
+    return [
+        replace(
+            grouped[key], device_id=_root(grouped[key]).device_id,
+            member_ids=tuple(dict.fromkeys(members[key])),
+        )
+        for key in order
+    ]
 
 
 def _device_rank(device: UsbDevice) -> tuple[bool, bool]:
@@ -906,7 +1003,7 @@ def ukeys_are_distinguishable(ukeys: list[UsbDevice], organizations: list[str]) 
         organizations: 证书里的单位名称，已去重。
 
     Returns:
-        bool: 序列号互不相同，或证书单位至少有两个时为 True。
+        bool: 至少两把 UKey 均有互不相同的稳定序列号时为 True。
 
     Examples:
         >>> key_a = _device("A", "钥匙", "096E", "0317", "SN-A")
@@ -915,12 +1012,10 @@ def ukeys_are_distinguishable(ukeys: list[UsbDevice], organizations: list[str]) 
         True
         >>> blank = _device("C", "钥匙", "096E", "0317", "")
         >>> ukeys_are_distinguishable([key_a, blank], ["阳江", "浈江"])
-        True
+        False
     """
     serials = [device.serial for device in ukeys]
-    if len(ukeys) >= 2 and all(serials) and len(set(serials)) == len(serials):
-        return True
-    return len(organizations) >= 2
+    return len(ukeys) >= 2 and all(serials) and len(set(serials)) == len(serials)
 
 
 def ukey_summary(ukeys: list[UsbDevice], organizations: list[str], error: str = "") -> str:
@@ -955,16 +1050,20 @@ def ukey_summary(ukeys: list[UsbDevice], organizations: list[str], error: str = 
     if stable:
         lines.append("序列号各不相同，可以把序列号当作特征码，用来区分这几把钥匙。")
     elif len(ukeys) >= 2:
-        lines.append("系统没有给出各不相同的序列号。这些编号可能只是插口位置，换 USB 口后会变。")
+        lines.append("系统没有给出各不相同的稳定序列号，不能声明这些钥匙可按硬件稳定区分。")
     else:
         lines.append("目前只有一把。要确认能不能区分，请把第二把也插上再检测一次。")
+    if "" in unique_serials:
+        lines.append("没有序列号时，可以选择当前插口特征码，但换 USB 口后可能改变。")
     if len(organizations) >= 2:
         joined = "；".join(organizations)
-        lines.append(f"证书单位也不相同：{joined}。可以在场站里用单位名称里的一段字来匹配。")
+        lines.append(f"证书单位不相同：{joined}。")
     elif len(organizations) == 1:
-        lines.append(f"证书单位目前都是「{organizations[0]}」，单靠单位名称还分不开。")
+        lines.append(f"证书单位目前都是「{organizations[0]}」。")
     else:
         lines.append("没有读到证书单位。Windows 上插着钥匙时再检测，才能看到单位和颁发者。")
+    if organizations:
+        lines.append("证书单位仅用于证书窗口匹配，不会自动关联到实体 UKey。")
     return "".join(lines)
 
 

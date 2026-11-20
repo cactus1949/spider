@@ -1,166 +1,71 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { backendDecision, killPlan, portAfterStop, startupPort } from './backendMatch.mjs'
+import { backendDecision, killPlan, portAfterStop, startupPort, normalizePath } from './backendMatch.mjs'
 
-const expected = 'C:\\Users\\admin\\AppData\\Local\\Programs\\spider-gd-desktop\\resources\\backend\\spider-gd-service.exe'
-
-test('same path but a different build is not treated as the new install', () => {
-  const decision = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: {
-      runtime: 'ok',
-      executable: expected,
-      pid: 40,
-      spider_gd: '0.2.4',
-      build_id: 'oldbuild999',
-    },
-    listener: { pid: 40, executable: expected },
-  })
-  assert.equal(decision.action, 'replace')
-  assert.equal(decision.pid, 40)
+const expected = 'C:\\安装\\resources\\backend\\spider-gd-service.exe'
+const input = (changes = {}) => ({
+  packaged: true, expectedExe: expected, expectedBuild: 'new', expectedChannel: 'stable',
+  expectedCwd: 'C:\\安装\\resources\\backend', expectedHome: 'C:\\用户',
+  health: { runtime: 'ok', executable: expected, pid: 40, build_id: 'new', channel: 'stable', cwd: 'C:\\安装\\resources\\backend', data_home: 'C:\\用户' },
+  listener: { pid: 40, executable: expected }, ...changes,
 })
 
-test('matching build attaches only when the listening process agrees', () => {
-  const ok = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'ok', executable: expected, pid: 40, build_id: 'newbuild123' },
-    listener: { pid: 40, executable: expected },
-  })
-  assert.equal(ok.action, 'attach')
-  const mismatch = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'ok', executable: expected, pid: 40, build_id: 'newbuild123' },
-    listener: { pid: 99, executable: 'C:\\Python311\\python.exe' },
-  })
-  assert.equal(mismatch.action, 'error')
+test('same installation and channel attaches only to matching running build and OS listener', () => {
+  assert.equal(backendDecision(input()).action, 'attach')
+  assert.equal(backendDecision(input({ health: { ...input().health, build_id: 'old' } })).action, 'replace')
+  for (const listener of [null, { pid: 99, executable: expected }, { pid: 40, executable: 'C:\\else\\spider-gd-service.exe' }]) {
+    assert.equal(backendDecision(input({ listener })).action, 'error')
+  }
 })
 
-test('an old backend without runtime is replaced only from the OS listener', () => {
-  const replace = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'missing' },
-    listener: { pid: 7, executable: expected },
-  })
-  assert.equal(replace.action, 'replace')
-  assert.equal(replace.pid, 7)
-  const unknown = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'missing' },
-    listener: null,
-  })
-  assert.equal(unknown.action, 'error')
-  const foreign = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'foreign' },
-    listener: { pid: 8, executable: 'C:\\Chrome\\chrome.exe' },
-  })
-  assert.equal(foreign.action, 'error')
+test('other installations and channels are never attached or replaced regardless of build', () => {
+  for (const build of ['new', 'old']) {
+    const executable = 'D:\\他安装\\spider-gd-service.exe'
+    assert.equal(backendDecision(input({ health: { ...input().health, executable, build_id: build }, listener: { pid: 40, executable } })).action, 'error')
+    assert.equal(startupPort(input({ health: { ...input().health, executable, build_id: build }, listener: { pid: 40, executable } })).port, 0)
+    assert.equal(backendDecision(input({ health: { ...input().health, channel: 'beta', build_id: build } })).action, 'error')
+  }
 })
 
-test('a reported pid is not killed when the listener is something else', () => {
-  const plan = killPlan({
-    reportedPid: 40,
-    reportedExe: expected,
-    listener: { pid: 41, executable: 'C:\\Windows\\System32\\svchost.exe' },
-  })
-  assert.equal(plan.kill, false)
+test('legacy missing runtime can only replace the actual expected installation executable', () => {
+  assert.equal(backendDecision(input({ health: { runtime: 'missing' } })).action, 'replace')
+  for (const listener of [null, { pid: 40, executable: 'D:\\else\\spider-gd-service.exe' }, { pid: 40, executable: 'C:\\Python\\python.exe' }]) {
+    assert.equal(backendDecision(input({ health: { runtime: 'missing' }, listener })).action, 'error')
+  }
 })
 
-test('after quit, a leftover child can be stopped and a foreign pid cannot', () => {
-  assert.deepEqual(portAfterStop({ oldPid: 40, listener: null }), { state: 'clear' })
-  assert.equal(portAfterStop({
-    oldPid: 40,
-    listener: { pid: 40, executable: expected },
-  }).state, 'still-ours')
-  assert.equal(portAfterStop({
-    oldPid: 40,
-    listener: { pid: 41, executable: expected },
-  }).state, 'child')
-  const taken = portAfterStop({
-    oldPid: 40,
-    listener: { pid: 88, executable: 'C:\\Chrome\\chrome.exe' },
-  })
-  assert.equal(taken.state, 'taken')
+test('kill requires exact expected path as well as reported PID/path', () => {
+  const plan = { expectedExe: expected, reportedPid: 40, reportedExe: expected, listener: input().listener }
+  assert.equal(killPlan(plan).kill, true)
+  assert.equal(killPlan({ ...plan, expectedExe: 'D:\\else\\spider-gd-service.exe' }).kill, false)
+  assert.equal(killPlan({ ...plan, reportedPid: 99 }).kill, false)
+  assert.equal(killPlan({ ...plan, listener: null }).kill, false)
+  assert.equal(killPlan({ listener: input().listener }).kill, false)
 })
 
-test('an openapi title match does not kill python or an unknown listener', () => {
-  const python = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: { runtime: 'missing' },
-    listener: { pid: 9, executable: 'C:\\Python311\\python.exe' },
-  })
-  assert.equal(python.action, 'error')
-  const samePathOtherBuild = backendDecision({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    health: {
-      runtime: 'ok',
-      executable: expected,
-      pid: 40,
-      spider_gd: '0.2.4',
-      build_id: 'oldbuild999',
-    },
-    listener: { pid: 40, executable: 'C:\\Python311\\python.exe' },
-  })
-  assert.equal(samePathOtherBuild.action, 'error')
+test('a later same-name PID is not evidence of a child and is never chased', () => {
+  assert.equal(portAfterStop({ oldPid: 40, expectedExe: expected, listener: null }).state, 'clear')
+  assert.equal(portAfterStop({ oldPid: 40, expectedExe: expected, listener: input().listener }).state, 'still-ours')
+  assert.equal(portAfterStop({ oldPid: 40, expectedExe: expected, listener: { pid: 41, executable: expected } }).state, 'taken')
+  assert.equal(portAfterStop({ oldPid: 40, expectedExe: expected, listener: { pid: 40, executable: 'D:\\else.exe' } }).state, 'taken')
 })
 
-test('a foreign program on 8800 does not stop startup and is not killed', () => {
-  const choice = startupPort({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    preferredPort: 8800,
-    health: null,
-    listener: { pid: 9, executable: 'C:\\Python311\\python.exe' },
-  })
-  assert.equal(choice.action, 'start')
-  assert.equal(choice.port, 0)
-  assert.match(choice.reason, /没有关闭它/)
-  const free = startupPort({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    preferredPort: 8800,
-    health: null,
-    listener: null,
-  })
-  assert.equal(free.action, 'start')
-  assert.equal(free.port, 8800)
-  const foreignApi = startupPort({
-    packaged: true,
-    expectedExe: expected,
-    expectedBuild: 'newbuild123',
-    preferredPort: 8800,
-    health: { runtime: 'foreign' },
-    listener: { pid: 8, executable: 'C:\\Chrome\\chrome.exe' },
-  })
-  assert.equal(foreignApi.action, 'start')
-  assert.equal(foreignApi.port, 0)
+test('confirmed free preferred port is used; occupied or failed OS query uses a dynamic port', () => {
+  assert.equal(startupPort(input({ preferredPort: 8801, health: null, listener: null })).port, 8801)
+  assert.equal(startupPort(input({ preferredPort: 8801, health: null })).port, 0)
+  assert.equal(startupPort(input({ preferredPort: 8801, health: null, listener: null, listenerError: 'denied' })).port, 0)
 })
 
-test('development does not require the frozen exe', () => {
-  const decision = backendDecision({
-    packaged: false,
-    expectedExe: '',
-    expectedBuild: '',
-    health: { runtime: 'ok', executable: 'C:\\repo\\.venv\\Scripts\\python.exe', pid: 3, build_id: 'source' },
-    listener: null,
-  })
-  assert.equal(decision.action, 'attach')
+test('development requires canonical interpreter, same repository, HOME, channel and OS PID', () => {
+  const dev = input({ packaged: false, expectedExe: '/opt/miniconda3/bin/python3.13', expectedBuild: 'source', expectedCwd: '/repo', expectedHome: '/home/beta', expectedChannel: 'beta', listener: { pid: 5, executable: '/opt/miniconda3/bin/python3.13' }, health: { runtime: 'ok', pid: 5, executable: '/opt/miniconda3/bin/python3.13', cwd: '/repo', data_home: '/home/beta', channel: 'beta', build_id: 'source' } })
+  assert.equal(backendDecision(dev).action, 'attach')
+  assert.equal(backendDecision({ ...dev, listener: null }).action, 'error')
+  for (const change of [{ cwd: '/other' }, { data_home: '/stable' }, { channel: 'stable' }, { executable: '/other/python' }]) {
+    assert.equal(backendDecision({ ...dev, health: { ...dev.health, ...change } }).action, 'error')
+  }
+})
+
+test('Windows paths ignore case and separators, POSIX paths retain case', () => {
+  assert.equal(normalizePath('C:/安装/Backend/APP.exe'), normalizePath('c:\\安装\\backend\\app.EXE'))
+  assert.notEqual(normalizePath('/Repo/App'), normalizePath('/repo/app'))
 })

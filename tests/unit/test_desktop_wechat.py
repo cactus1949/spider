@@ -262,6 +262,28 @@ def test_bound_mode_loads_profile_and_passes_it_to_powershell(tmp_path: Path):
 
 
 @pytest.mark.unit
+def test_beta_bind_rejects_foreign_profile_before_native_operation(tmp_path, monkeypatch):
+    home = tmp_path / "beta"
+    home.mkdir()
+    formal = tmp_path / "formal.json"
+    formal.write_text('{"targets": {}}', encoding="utf-8")
+    profile = home / "wechat_targets.json"
+    profile.symlink_to(formal)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+
+    def forbidden_runner(*args, **kwargs):
+        pytest.fail("越界的绑定文件不能触发桌面操作")
+
+    sender = DesktopWechatSender(platform_name="Windows", runner=forbidden_runner)
+    with pytest.raises(ValueError, match="测试版"):
+        sender.bind(target="文件传输助手", profile_path=profile)
+
+    assert formal.read_text(encoding="utf-8") == '{"targets": {}}'
+    assert profile.is_symlink()
+
+
+@pytest.mark.unit
 def test_bind_writes_target_profile(tmp_path: Path):
     profile_path = tmp_path / "wechat_targets.json"
     stdout = """{

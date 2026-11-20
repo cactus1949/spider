@@ -40,6 +40,10 @@ def read_version() -> str:
     """
     candidates = [Path(__file__).resolve().parents[2] / "VERSION"]
     if getattr(sys, "frozen", False):
+        from spider_gd.build_stamp import RELEASE_VERSION
+
+        if RELEASE_VERSION:
+            return RELEASE_VERSION
         candidates.insert(0, Path(getattr(sys, "_MEIPASS", "")) / "VERSION")
     for path in candidates:
         if path.is_file():

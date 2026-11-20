@@ -28,6 +28,7 @@ from spider_gd.infrastructure.storage.database import TaskStateStore
 from spider_gd.interfaces.alert import AlertLevel, IAlertGateway
 from spider_gd.interfaces.crawler import EndpointConfig
 from spider_gd.interfaces.storage import ExecutionLogRecord, TaskItemRecord, TaskRecord
+from spider_gd.release_channel import runtime_release
 
 _DELIVERY_RETRY_STALE_SEC = 600
 _WECOM_ROBOT_FILE_MAX_BYTES = 20 * 1024 * 1024
@@ -353,10 +354,14 @@ def _file_sha256(path: str | Path) -> str:
 
 
 def create_delivery_sample_zip(base_dir: str | Path) -> Path:
+    from spider_gd.config.user_home import validate_write_path
+
     root = Path(base_dir).expanduser().resolve() / "_stable_delivery" / "samples"
-    root.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     zip_path = root / f"delivery_sample_{ts}.zip"
+    validate_write_path(root, "发送样例目录")
+    validate_write_path(zip_path, "发送样例压缩包")
+    root.mkdir(parents=True, exist_ok=True)
     payload = (
         "spider-gd stable delivery sample\n"
         f"created_at={datetime.now().isoformat(timespec='seconds')}\n"
@@ -510,6 +515,9 @@ def write_delivery_receipt(
     }
     if extra:
         payload.update(extra)
+    from spider_gd.config.user_home import validate_write_path
+
+    validate_write_path(path, "发送回执")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -969,22 +977,25 @@ async def _send_desktop_wechat_delivery(
     message: str,
     file_path: str | Path | None = None,
     dry_run: bool = False,
+    hardware_lease=None,
 ):
     from spider_gd.gateway.delivery.desktop_wechat import DesktopWechatSender
+    from spider_gd.infrastructure.hardware_lease import hardware_operation, run_hardware_blocking
 
-    options = _desktop_wechat_options(
-        settings,
-        message=message,
-        file_path=file_path,
-        dry_run=dry_run,
-    )
-    result = await asyncio.to_thread(DesktopWechatSender().send, options)
-    if not result.ok:
-        raise RuntimeError(result.error_msg or "本机微信 PoC 发送失败")
-    return result
+    with hardware_operation(hardware_lease):
+        options = _desktop_wechat_options(
+            settings,
+            message=message,
+            file_path=file_path,
+            dry_run=dry_run,
+        )
+        result = await run_hardware_blocking(DesktopWechatSender().send, options)
+        if not result.ok:
+            raise RuntimeError(result.error_msg or "本机微信 PoC 发送失败")
+        return result
 
 
-def _build_delivery_hook(ctx: AppContext):
+def _build_delivery_hook(ctx: AppContext, *, hardware_lease=None):
     settings = _effective_delivery_settings(ctx)
     if not settings.enabled:
         return None
@@ -1248,6 +1259,7 @@ def _build_delivery_hook(ctx: AppContext):
                     message=message_text,
                     file_path=desktop_file_path,
                     dry_run=False,
+                    hardware_lease=hardware_lease,
                 )
                 ok = result.ok
                 if desktop_file_path:
@@ -1267,19 +1279,24 @@ def _build_delivery_hook(ctx: AppContext):
     return _delivery_hook
 
 
-def _build_reliable_delivery_hook(ctx: AppContext):
+def _build_reliable_delivery_hook(
+    ctx: AppContext, *, manual: bool = False, hardware_lease=None
+):
     async def _delivery_hook(
         task_id: str,
         task_dir: str,
         zip_path: str,
         summary: dict[str, object],
     ) -> None:
+        if not manual and runtime_release()["channel"] == "beta":
+            logger.info("测试版产物仅保存在本地，请手动发送：task={} file={}", task_id, zip_path)
+            return
         effective_summary = dict(summary)
         zip_identity = _delivery_zip_identity(zip_path)
         reader = getattr(ctx.state_store, "get_delivery_outbox", None)
         enqueue = getattr(ctx.state_store, "enqueue_delivery_outbox", None)
         try:
-            raw_hook = _build_delivery_hook(ctx)
+            raw_hook = _build_delivery_hook(ctx, hardware_lease=hardware_lease)
             if raw_hook is None:
                 logger.info("稳定发送未启用，跳过发送：task={} file={}", task_id, zip_path)
                 return
@@ -2020,10 +2037,14 @@ def _zip_download_files(
     """
     if not files:
         return None
+    from spider_gd.config.user_home import validate_write_path
+
     root = Path(download_dir)
     export_dir = root / "_stable_delivery"
-    export_dir.mkdir(parents=True, exist_ok=True)
     zip_path = export_dir / f"{_safe_artifact_name(task_name)}_{exec_id}.zip"
+    validate_write_path(export_dir, "发送压缩包目录")
+    validate_write_path(zip_path, "发送压缩包")
+    export_dir.mkdir(parents=True, exist_ok=True)
     written = 0
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in files:
@@ -2050,6 +2071,7 @@ async def deliver_task_runner_downloads(
     before: dict[str, tuple[int, int]],
     task_status: str = "success",
     reason: str = "",
+    hardware_lease=None,
 ) -> str | None:
     """把 TaskRunner 本次新增/变更下载文件打包，并走可靠发送链路。"""
     files = _changed_download_files(download_dir, before)
@@ -2065,7 +2087,7 @@ async def deliver_task_runner_downloads(
     if zip_path is None:
         logger.info("TaskRunner 未生成稳定发送 zip，跳过：exec={}", exec_id)
         return None
-    delivery_hook = _build_reliable_delivery_hook(ctx)
+    delivery_hook = _build_reliable_delivery_hook(ctx, hardware_lease=hardware_lease)
     if delivery_hook is None:
         logger.info("稳定发送未启用，TaskRunner zip 已保留在本地：{}", zip_path)
         return zip_path
@@ -2275,6 +2297,10 @@ def build_delivery_test_plan(
 
 def assemble(settings: AppSettings) -> AppContext:
     """根据配置装配各模块（DI 在此集中完成）。"""
+    if runtime_release()["channel"] == "beta":
+        from spider_gd.config.user_home import rebase_user_paths
+
+        settings = rebase_user_paths(settings)
     setup_logging(
         settings.log.file_dir,
         persist_to_file=settings.log.persist_to_file,
@@ -2568,6 +2594,26 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             )
         )
 
+        from spider_gd.infrastructure.hardware_lease import HardwareLease
+
+        hardware_lease = HardwareLease.try_acquire()
+        if hardware_lease is None:
+            ctx.state_store.update_execution_log(
+                exec_id, status="failed",
+                reason="另一个安装或任务正在使用共享硬件（证书、浏览器或网络），请稍后重试",
+                updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return
+        try:
+            await _owned_operation(cfg, exec_id, task_name, hardware_lease)
+        finally:
+            hardware_lease.close()
+
+    async def _owned_operation(cfg, exec_id, task_name, hardware_lease):
+        import time as _time
+
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
+
         def _fmt_event(data: dict) -> str:
             evt = data.get("event", "")
             if evt == "task_step":
@@ -2641,7 +2687,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 return f"  ⛔ 错误暂停: {msg}"
             return ""
 
-        net_ok, net_message, net_details = ensure_dual_nic_ready(ctx)
+        net_ok, net_message, net_details = await run_hardware_blocking(ensure_dual_nic_ready, ctx)
         net_label = network_preflight_label(net_message, net_details)
         try:
             ctx.state_store.append_execution_log_detail(exec_id, f"🌐 {net_label}: {net_message}")
@@ -2839,7 +2885,8 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             logger.warning("场站设置无法读取，定时任务不按场站切换: {}", exc)
         selected_ids = configured_ukey_ids(task_cfg)
         if saved_profiles or selected_ids:
-            ukey_plan = collect_runtime_plan(
+            ukey_plan = await run_hardware_blocking(
+                collect_runtime_plan,
                 saved_profiles,
                 selected_ids=selected_ids,
                 mode="scheduled",
@@ -2919,17 +2966,8 @@ def _task_runner_job(ctx: AppContext, task_id: str):
 
         final_status = "success"
         final_reason = ""
-        from spider_gd.core.ukey_plan import acquire_ukey_run, release_ukey_run
-        hold_ukey = bool(station_queue)
-        if hold_ukey and not acquire_ukey_run():
-            reason = "另一个任务正在使用证书或网络"
-            ctx.state_store.update_execution_log(
-                exec_id, status="failed", reason=reason,
-                updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
-            )
-            return
         try:
-            await runner.run(on_event=_capture_events)
+            await runner.run(on_event=_capture_events, hardware_lease=hardware_lease)
             if errors:
                 final_status = "failed"
                 final_reason = "; ".join(errors[:5])
@@ -2941,8 +2979,6 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             final_reason = str(e)[:200]
             logger.error("❌ 定时任务异常: {} - {}", task_id, str(e)[:500])
         finally:
-            if hold_ukey:
-                release_ukey_run()
             zip_path = None
             try:
                 zip_path = await deliver_task_runner_downloads(
@@ -2954,6 +2990,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                     before=download_snapshot,
                     task_status=final_status,
                     reason=final_reason,
+                    hardware_lease=hardware_lease,
                 )
                 if zip_path:
                     for line in delivery_execution_log_lines(ctx, exec_id, zip_path=zip_path):
@@ -2981,6 +3018,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                     download_dir=str(dl_dir),
                     before=download_snapshot,
                     interface_name=str(ctx.state_store.get_setting("wifiInterfaceName") or ""),
+                    hardware_lease=hardware_lease,
                 )
             except Exception as upload_exc:
                 logger.warning("定时任务自动上传失败但不影响任务结果：{}", upload_exc)
@@ -3300,6 +3338,10 @@ async def register_jobs(
     """注册所有调度任务：YAML crawl_cron + tasks/ 目录下的启用任务 + 补漏 + 清理。"""
     from spider_gd.interfaces.scheduler import JobSpec
 
+    if runtime_release()["channel"] == "beta":
+        logger.info("测试版不注册自动任务，请在界面手动执行")
+        return []
+
     crawl_handler = crawl_handler or _default_crawl_job(ctx)
     backfill_handler = backfill_handler or _default_backfill_job(ctx)
     retention_handler = retention_handler or _default_retention_job(ctx)
@@ -3446,15 +3488,16 @@ def run_app(settings: AppSettings) -> int:
     ctx = assemble(settings)
 
     async def _main() -> None:
-        try:
-            retry_result = await retry_pending_deliveries(
-                ctx,
-                include_recoverable_failed=True,
-            )
-            if int(retry_result.get("retried", 0)):
-                logger.info("启动时已处理待补发任务产物：{}", retry_result)
-        except Exception as exc:
-            logger.warning("启动时处理待补发任务产物失败：{}", exc)
+        if runtime_release()["channel"] == "stable":
+            try:
+                retry_result = await retry_pending_deliveries(
+                    ctx,
+                    include_recoverable_failed=True,
+                )
+                if int(retry_result.get("retried", 0)):
+                    logger.info("启动时已处理待补发任务产物：{}", retry_result)
+            except Exception as exc:
+                logger.warning("启动时处理待补发任务产物失败：{}", exc)
 
         if settings.modules.scheduler:
             await register_jobs(ctx)

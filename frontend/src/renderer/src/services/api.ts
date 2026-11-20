@@ -1,40 +1,72 @@
-let currentBase = 'http://127.0.0.1:8800'
+const desktop = typeof window === 'undefined' ? undefined : window.api
+let currentBase: string | null = desktop?.getBackendBase ? null : ''
+let backendError: Error | null = null
 let resolveReady: (() => void) | null = null
-const ready = new Promise<void>((resolve) => {
-  resolveReady = resolve
-})
+let ready = desktop?.getBackendBase ? pendingReady() : Promise.resolve()
+let statusRevision = 0
 
-function rememberBase(base: string | undefined): void {
-  if (!base) return
-  currentBase = base.replace(/\/$/, '')
+function pendingReady(): Promise<void> {
+  return new Promise((resolve) => { resolveReady = resolve })
+}
+
+function unavailable(error: Error): void {
+  currentBase = null
+  backendError = error
+  // Waiters wake to inspect the error; no eagerly rejected singleton promise.
   resolveReady?.()
   resolveReady = null
 }
 
-function bindDesktopBase(): void {
-  const desktop = typeof window === 'undefined' ? undefined : window.api
-  if (!desktop?.getBackendBase) {
-    resolveReady?.()
-    resolveReady = null
+function rememberReadyBase(base: string | undefined): void {
+  const matched = /^http:\/\/127\.0\.0\.1:([1-9]\d*)\/?$/.exec(base || '')
+  if (!matched || Number(matched[1]) > 65535) {
+    unavailable(new Error('后端就绪地址无效'))
     return
   }
-  desktop.onBackendStatus((info) => rememberBase(info.base))
-  void desktop.getBackendBase().then((base) => rememberBase(base)).catch(() => {
-    resolveReady?.()
-    resolveReady = null
+  currentBase = matched[0].replace(/\/$/, '')
+  backendError = null
+  resolveReady?.()
+  resolveReady = null
+}
+
+if (desktop?.getBackendBase) {
+  desktop.onBackendStatus((info) => {
+    statusRevision++
+    if (info.status === 'ready') rememberReadyBase(info.base)
+    else if (info.status === 'starting') {
+      currentBase = null
+      backendError = null
+      if (!resolveReady) ready = pendingReady()
+    } else if (['error', 'stopped', 'failed'].includes(info.status)) {
+      unavailable(new Error('后端不可用，请检查后端服务状态'))
+    }
+  })
+  const revision = statusRevision
+  void desktop.getBackendBase().then((base) => {
+    // IPC is fulfilled only after main verifies ready, but a later stop wins.
+    if (revision === statusRevision) rememberReadyBase(base)
+  }).catch((error: unknown) => {
+    if (revision === statusRevision) unavailable(error instanceof Error ? error : new Error(String(error)))
   })
 }
 
-bindDesktopBase()
-
 export function backendBase(): string {
+  if (backendError) throw backendError
+  if (currentBase === null) throw new Error('后端尚未核实就绪')
   return currentBase
 }
 
 export async function backendUrl(path: string): Promise<string> {
   await ready
   const suffix = path.startsWith('/') ? path : `/${path}`
-  return `${currentBase}${suffix}`
+  return `${backendBase()}${suffix}`
+}
+
+/** Stop controls are fire-and-forget; consume connection failures at the UI boundary. */
+export function cancelBrowserRun(runId: string, reportError: (error: unknown) => void): void {
+  void backendUrl('/api/browser/cancel').then((url) => fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: runId })
+  })).catch(reportError)
 }
 
 export interface HealthCheck {

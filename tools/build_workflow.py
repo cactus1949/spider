@@ -974,6 +974,10 @@ def _safe_export_name(name: str) -> str:
 
 
 def _pack_export_zip(zip_path: Path, files: list[Path]) -> Path:
+    from spider_gd.config.user_home import validate_write_path
+
+    validate_write_path(zip_path, "工坊 ZIP 导出")
+    validate_write_path(zip_path.parent, "工坊 ZIP 导出目录")
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for fp in files:

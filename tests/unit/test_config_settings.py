@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +50,38 @@ def test_load_config_online_mode_enables_alert():
     settings = load_config("configs/mode_a_wired.yaml")
     assert settings.deploy_mode == DeployMode.STANDALONE_WIRED
     assert settings.modules.alert_gateway is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("channel", "default_port"), [("stable", 8800), ("beta", 8801)])
+@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize(
+    ("override", "expected_port"), [(None, None), ("yaml", 9123), ("env", 9234)],
+)
+def test_load_config_web_port_uses_channel_only_as_default(
+    tmp_path: Path, monkeypatch, channel, default_port, frozen, override, expected_port
+):
+    from spider_gd import build_stamp
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("WEB__PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setattr(
+        build_stamp, "RELEASE_VERSION", "0.2.8-beta.7" if channel == "beta" else "0.2.8",
+    )
+    opposite = "stable" if channel == "beta" else "beta"
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", opposite if frozen else channel)
+    config = tmp_path / "mode.yaml"
+    config.write_text(
+        "web:\n  port: 9123\n" if override == "yaml" else "web:\n  host: 127.0.0.1\n",
+        encoding="utf-8",
+    )
+    if override == "env":
+        monkeypatch.setenv("WEB__PORT", "9234")
+    assert load_config(config).web.port == (expected_port or default_port)
 
 
 @pytest.mark.unit
@@ -114,3 +148,92 @@ delivery:
     assert settings.delivery.retry_attempts == 3
     assert settings.delivery.retry_delay_sec == 1.5
     assert settings.delivery.title == "采集结果"
+
+
+@pytest.fixture
+def isolated_env_config(tmp_path: Path, monkeypatch):
+    from spider_gd import build_stamp
+
+    install = tmp_path / "install"
+    install.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config = install / "mode.yaml"
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(install)
+    monkeypatch.setattr(os, "environ", {
+        "SPIDER_GD_HOME": str(home),
+        "NO_PROXY": "*",
+        "no_proxy": "*",
+    })
+
+    def identity(channel: str, frozen: bool):
+        monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+        monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+        monkeypatch.setattr(
+            build_stamp, "RELEASE_VERSION", "0.2.8-beta.7" if channel == "beta" else "0.2.8",
+        )
+        opposite = "stable" if channel == "beta" else "beta"
+        monkeypatch.setenv("SPIDER_GD_CHANNEL", opposite if frozen else channel)
+
+    return install, home, config, identity
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("encoding", ["gbk", "utf-8", "utf-8-sig"])
+@pytest.mark.parametrize("linked", [False, True], ids=["file", "foreign-symlink"])
+@pytest.mark.parametrize("frozen", [False, True], ids=["source", "frozen"])
+def test_load_config_beta_env_is_read_only(
+    tmp_path: Path, isolated_env_config, encoding: str, linked: bool, frozen: bool,
+):
+    install, home, config, identity = isolated_env_config
+    identity("beta", frozen)
+    env_path = install / ".env"
+    source = tmp_path / "foreign.env" if linked else env_path
+    original = "CRAWLER__PASSWORD=测试密码\n".encode(encoding)
+    source.write_bytes(original)
+    if linked:
+        env_path.symlink_to(source)
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    settings = load_config(config)
+
+    assert settings.crawler.password == "测试密码"
+    assert settings.storage.sqlite_path == str(home / "data" / "spider.db")
+    assert source.read_bytes() == original
+    assert env_path.is_symlink() == linked
+    if linked:
+        assert env_path.readlink() == source
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+    assert "CRAWLER__PASSWORD" not in os.environ
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("frozen", [False, True], ids=["source", "frozen"])
+def test_load_config_stable_keeps_default_env_encoding(isolated_env_config, frozen: bool):
+    install, home, config, identity = isolated_env_config
+    identity("stable", frozen)
+    # HOME 与安装目录相同，避免旧版迁移行为预先灌入凭据。
+    os.environ["SPIDER_GD_HOME"] = str(install)
+    env_path = install / ".env"
+    original = "CRAWLER__PASSWORD=测试密码\n".encode("gbk")
+    env_path.write_bytes(original)
+
+    with pytest.raises(UnicodeDecodeError):
+        load_config(config)
+
+    assert env_path.read_bytes() == original
+    assert list(home.iterdir()) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("frozen", [False, True], ids=["source", "frozen"])
+def test_load_config_beta_without_env_does_not_create_it(isolated_env_config, frozen: bool):
+    install, home, config, identity = isolated_env_config
+    identity("beta", frozen)
+
+    settings = load_config(config)
+
+    assert settings.crawler.password == ""
+    assert not (install / ".env").exists()
+    assert list(home.iterdir()) == []

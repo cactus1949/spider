@@ -7,3 +7,5 @@
 from __future__ import annotations
 
 BUILD_ID = "source"
+RELEASE_CHANNEL = "stable"
+RELEASE_VERSION = ""

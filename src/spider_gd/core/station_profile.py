@@ -240,27 +240,13 @@ def profiles_for_window(
 
 
 def same_ukey(saved_code: str, plugged_code: str) -> bool:
-    """判断设置里的特征码和当前插入的设备是不是同一把。
-
-    Args:
-        saved_code: 设置里保存的特征码。
-        plugged_code: 当前插入设备的实例编号。
-
-    Returns:
-        bool: 完全相同，或其中较长的一段包含另一段时为 True。短于 4 位的片段不做包含匹配。
-
-    Examples:
-        >>> same_ukey("SN1-PORT", "USB\\\\VID_096E\\\\SN1-PORT")
-        True
-        >>> same_ukey("A", "USB\\\\VID_096E\\\\OTHER")
-        False
-    """
     saved = saved_code.strip()
     plugged = plugged_code.strip()
     if not saved or not plugged:
         return False
     return saved == plugged or (
-        len(saved) >= 4 and (saved in plugged or plugged in saved)
+        "\\" not in saved and len(saved) >= 4
+        and saved == plugged.rsplit("\\", 1)[-1]
     )
 
 

@@ -26,8 +26,10 @@ from spider_gd.gateway.upload_profiles import (
     resolve_submitted_profile,
     save_profiles,
 )
+from spider_gd.infrastructure.hardware_lease import HardwareLease, hardware_operation
 from spider_gd.infrastructure.network.wifi_connector import WifiConnector
 from spider_gd.interfaces.storage import ExecutionLogRecord
+from spider_gd.release_channel import runtime_release
 
 EventSink = Callable[[dict[str, Any]], None]
 
@@ -91,6 +93,7 @@ async def maybe_upload_after_run(
     wifi: object | None = None,
     client: object | None = None,
     retry_delay_sec: float = 0.5,
+    hardware_lease: HardwareLease | None = None,
 ) -> dict[str, Any] | None:
     """采集跑完后，按任务上的上传配置处理本次产物。
 
@@ -129,6 +132,9 @@ async def maybe_upload_after_run(
         ... )) is None
         True
     """
+    if auto_upload and runtime_release()["channel"] == "beta":
+        _log(store, exec_id, "测试版不会自动上传，请在结果里手动上传")
+        auto_upload = False
     selected = (profile_id or "").strip()
     if not selected and not auto_upload:
         return None
@@ -168,6 +174,7 @@ async def maybe_upload_after_run(
         client=client,
         retry_delay_sec=retry_delay_sec,
         create_log=False,
+        hardware_lease=hardware_lease,
     )
     offer = _offer(
         profile.id,
@@ -194,6 +201,7 @@ async def upload_selected_paths(
     client: object | None = None,
     retry_delay_sec: float = 0.5,
     log_name: str = "数据上传",
+    hardware_lease: HardwareLease | None = None,
 ) -> UploadJobResult:
     """文件中心或结果弹窗里的手动上传。
 
@@ -231,6 +239,7 @@ async def upload_selected_paths(
         client=client,
         retry_delay_sec=retry_delay_sec,
         create_log=not (exec_id or "").strip(),
+        hardware_lease=hardware_lease,
     )
 
 
@@ -278,7 +287,8 @@ def run_test_wifi(store: object, payload: dict[str, Any], wifi: object | None = 
     """
     profile = resolve_submitted_profile(store, payload)
     port = wifi if wifi is not None else WifiConnector()
-    return probe_wifi_switch(profile, port, interface_name)  # type: ignore[arg-type]
+    with hardware_operation():
+        return probe_wifi_switch(profile, port, interface_name)  # type: ignore[arg-type]
 
 
 async def iter_upload_events(
@@ -370,6 +380,7 @@ async def _upload_profile_paths(
     client: object | None,
     retry_delay_sec: float,
     create_log: bool,
+    hardware_lease: HardwareLease | None = None,
 ) -> UploadJobResult:
     """执行上传并把关键节点写进执行日志。
 
@@ -424,6 +435,7 @@ async def _upload_profile_paths(
         wifi=wifi,  # type: ignore[arg-type]
         interface_name=interface_name,
         switch_wifi=True,
+        hardware_lease=hardware_lease,
         retry_delay_sec=retry_delay_sec,
         on_progress=observe,
     )

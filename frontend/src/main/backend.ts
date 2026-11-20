@@ -1,446 +1,402 @@
-/**
- * 采集后端进程管理：启动、监控、优雅关闭。
- *
- * 生产环境运行 extraResources/backend/ 下的服务程序。
- * 开发环境优先连接已启动的后端，否则使用仓库 .venv 中的 Python。
- */
+/** 后端生命周期：只有运行身份和 OS 监听归属均核实后才向界面公布地址。 */
 import { app, BrowserWindow, net, dialog } from 'electron'
 import { spawn, ChildProcess, execFile } from 'child_process'
 import { createServer } from 'net'
-import { join, resolve } from 'path'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { killPlan, portAfterStop, startupPort } from './backendMatch.mjs'
+import { join, resolve, dirname } from 'path'
+import { existsSync, readFileSync, readlinkSync, writeFileSync } from 'fs'
+import { backendDecision, killPlan, normalizePath, portAfterStop, startupPort, type BackendInput, type Listener, type RuntimeHealth } from './backendMatch.mjs'
+import { backendEnvironment, resolveBackendDataDir } from '../../release-channel.mjs'
+import { releaseIdentity } from './release'
 
-const EXE_NAME = process.platform === 'win32' ? 'spider-gd-service.exe' : 'spider-gd-service'
-const PREFERRED_PORT = 8800
+const EXE_NAME = `${releaseIdentity.serviceName}${process.platform === 'win32' ? '.exe' : ''}`
+const PREFERRED_PORT = releaseIdentity.preferredPort
 const READY_TITLE = 'spider-gd 控制接口'
-const MAX_RESTART = 3
-const RESTART_INTERVAL = 5000
-
-let backendProcess: ChildProcess | null = null
-let restartCount = 0
-let restartTimer: ReturnType<typeof setTimeout> | null = null
-let stopping = false
-let backendPort = PREFERRED_PORT
-let resolvePort: ((port: number) => void) | null = null
-let portReady: Promise<number> = new Promise((resolve) => {
-  resolvePort = resolve
-})
-
 type BackendLaunch = { command: string; args: string[]; cwd: string }
+type Run = { generation: number; proc: ChildProcess; expected: Omit<BackendInput, 'health' | 'listener'>; port: number; verified?: Listener; cleanup?: Promise<boolean>; exited?: boolean }
+type Connection = { generation: number; expected: Run['expected']; port: number; listener: Listener }
+let active: Run | null = null
+let connection: Connection | null = null
+let connectionTimer: ReturnType<typeof setTimeout> | null = null
+let statusWindow: BrowserWindow | null = null
+let generation = 0
+let stopping = false
+let starting = false
+let replacingPid: number | null = null
+let stopPromise: Promise<void> | null = null
+let readyPort: number | null = null
+let connectionFailures = 0
+let portResolve: ((port: number) => void) | undefined
+let portReject: ((error: Error) => void) | undefined
+function pendingPort(): Promise<number> {
+  const promise = new Promise<number>((resolvePort, rejectPort) => { portResolve = resolvePort; portReject = rejectPort })
+  // IPC/renderer may subscribe later. Keep the original promise rejected for callers,
+  // but don't produce an unhandled rejection before the first subscription.
+  void promise.catch(() => {})
+  return promise
+}
+let portReady = pendingPort()
 
 function userDataHome(): string {
-  try {
-    return app.getPath('userData')
-  } catch {
-    const base = process.env.APPDATA || app.getPath('home')
-    return join(base, 'SpiderGD')
-  }
+  try { return app.getPath('userData') }
+  catch { return join(process.env.APPDATA || app.getPath('home'), 'SpiderGD') }
 }
-
 function backendEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env }
-  // 打包后把用户数据放到 Electron userData，避免升级时被安装目录清掉。
-  // 开发环境不设置，后端继续使用仓库工作目录。
-  if (app.isPackaged && !env.SPIDER_GD_HOME) {
-    env.SPIDER_GD_HOME = userDataHome()
-  }
-  return env
+  return backendEnvironment(releaseIdentity, app.isPackaged, userDataHome())
 }
-
 function findBackendLaunch(): BackendLaunch | null {
-  const envPath = process.env['SPIDER_GD_BACKEND_EXE']
-  if (envPath && existsSync(envPath)) {
-    return { command: envPath, args: [], cwd: resolve(envPath, '..') }
-  }
-
-  // 打包环境：electron-builder 的 extraResources
-  const resourcesPath = process.resourcesPath
-  const prodPath = resourcesPath ? join(resourcesPath, 'backend', EXE_NAME) : ''
-  if (app.isPackaged) {
-    return prodPath && existsSync(prodPath)
-      ? { command: prodPath, args: [], cwd: resolve(prodPath, '..') }
-      : null
-  }
-
-  // 开发环境可使用已有的打包服务，通常直接运行仓库中的 Python 后端。
-  const devPath = join(app.getAppPath(), 'resources', 'backend', EXE_NAME)
-  if (existsSync(devPath)) {
-    return { command: devPath, args: [], cwd: resolve(devPath, '..') }
-  }
-
-  const projectRoot = resolve(app.getAppPath(), '..')
-  const python = process.platform === 'win32'
-    ? join(projectRoot, '.venv', 'Scripts', 'python.exe')
-    : join(projectRoot, '.venv', 'bin', 'python')
-  if (existsSync(python) && existsSync(join(projectRoot, 'main.py'))) {
-    return {
-      command: python,
-      args: ['main.py', '--config', 'configs/mode_dev.yaml', 'run'],
-      cwd: projectRoot,
-    }
-  }
-
-  return null
+  const override = process.env.SPIDER_GD_BACKEND_EXE
+  if (override && existsSync(override)) return { command: override, args: [], cwd: dirname(resolve(override)) }
+  const prod = process.resourcesPath ? join(process.resourcesPath, 'backend', EXE_NAME) : ''
+  if (app.isPackaged) return prod && existsSync(prod) ? { command: prod, args: [], cwd: dirname(prod) } : null
+  const dev = join(app.getAppPath(), 'resources', 'backend', EXE_NAME)
+  if (existsSync(dev)) return { command: dev, args: [], cwd: dirname(dev) }
+  const root = resolve(app.getAppPath(), '..')
+  const python = process.platform === 'win32' ? join(root, '.venv', 'Scripts', 'python.exe') : join(root, '.venv', 'bin', 'python')
+  return existsSync(python) && existsSync(join(root, 'main.py'))
+    ? { command: python, args: ['main.py', '--config', 'configs/mode_dev.yaml', 'run'], cwd: root } : null
 }
-
-function notifyRenderer(win: BrowserWindow | null, status: string) {
-  win?.webContents.send('backend:status', { status, base: currentBackendBase() })
+export function currentBackendLaunchCwd(): string {
+  return findBackendLaunch()?.cwd ?? (app.isPackaged ? resolve(process.resourcesPath, 'backend') : resolve(app.getAppPath(), '..'))
 }
-
+export function currentBackendDataDir(): string {
+  const cwd = currentBackendLaunchCwd()
+  return resolveBackendDataDir(backendEnv().SPIDER_GD_HOME, cwd, app.isPackaged || releaseIdentity.channel === 'beta' ? userDataHome() : cwd)
+}
 export function currentBackendBase(): string {
-  return `http://127.0.0.1:${backendPort}`
+  if (readyPort === null) throw new Error('后端尚未核实就绪或已停止')
+  return `http://127.0.0.1:${readyPort}`
 }
-
-export function whenBackendPort(): Promise<number> {
-  return portReady
+export function whenBackendPort(): Promise<number> { return portReady }
+function notifyRenderer(win: BrowserWindow | null, status: string): void {
+  win?.webContents.send('backend:status', status === 'ready' ? { status, base: currentBackendBase() } : { status })
 }
-
-function publishPort(port: number): void {
-  backendPort = port
-  if (resolvePort) {
-    const done = resolvePort
-    resolvePort = null
-    done(port)
-  }
-  try {
-    writeFileSync(join(userDataHome(), 'backend-port.json'), JSON.stringify({ port }), 'utf8')
-  } catch { /* 用户目录还不可写时，界面仍用本次进程里的端口 */ }
+function invalidate(message: string): void {
+  if (connectionTimer) clearTimeout(connectionTimer)
+  connectionTimer = null
+  connection = null
+  readyPort = null
+  portReject?.(new Error(message))
+  portResolve = undefined; portReject = undefined
+  portReady = Promise.reject(new Error(message))
+  void portReady.catch(() => {})
 }
-
+function fail(win: BrowserWindow | null, message: string): void {
+  invalidate(message)
+  notifyRenderer(win, 'error')
+  if (win) dialog.showErrorBox('后端服务不可用', message)
+}
+function publishPort(port: number, win: BrowserWindow | null): void {
+  readyPort = port
+  portResolve?.(port)
+  portResolve = undefined; portReject = undefined
+  try { writeFileSync(join(userDataHome(), 'backend-port.json'), JSON.stringify({ port }), 'utf8') } catch { /* 不影响本次已核实连接 */ }
+  notifyRenderer(win, 'ready')
+}
 function readSavedPort(): number {
   try {
-    const raw = readFileSync(join(userDataHome(), 'backend-port.json'), 'utf8')
-    const port = Number((JSON.parse(raw) as { port?: number }).port)
-    return Number.isInteger(port) && port > 0 && port < 65536 ? port : 0
-  } catch {
-    return 0
-  }
+    const port = Number((JSON.parse(readFileSync(join(userDataHome(), 'backend-port.json'), 'utf8')) as { port?: number }).port)
+    return validPort(port) ? port : 0
+  } catch { return 0 }
 }
-
+function validPort(port: number): boolean { return Number.isInteger(port) && port > 0 && port < 65536 }
 function allocateFreePort(): Promise<number> {
-  return new Promise((resolvePromise, reject) => {
+  return new Promise((done, reject) => {
     const server = createServer()
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       const address = server.address()
       const port = typeof address === 'object' && address ? address.port : 0
-      server.close(() => resolvePromise(port))
+      server.close(() => validPort(port) ? done(port) : reject(new Error('无法分配后端端口')))
     })
   })
 }
-
-type RuntimeHealth = {
-  runtime: 'ok' | 'missing' | 'foreign'
-  executable?: string
-  pid?: number
-  spider_gd?: string
-  build_id?: string
-  frozen?: boolean
+function expectedBuildId(launch: BackendLaunch): string {
+  if (launch.args.includes('main.py')) return 'source'
+  try { return String((JSON.parse(readFileSync(join(dirname(launch.command), 'build_stamp.json'), 'utf8')) as { build_id?: string }).build_id || '') }
+  catch { return '' }
 }
-
-type Listener = { pid: number; executable: string }
-
-function expectedBuildId(exePath: string): string {
-  if (!exePath) return ''
-  try {
-    const raw = readFileSync(join(resolve(exePath, '..'), 'build_stamp.json'), 'utf8')
-    const parsed = JSON.parse(raw) as { build_id?: string }
-    return String(parsed.build_id || '')
-  } catch {
-    return ''
-  }
-}
-
 async function readOwnRuntime(port: number): Promise<RuntimeHealth | null> {
   try {
     const spec = await net.fetch(`http://127.0.0.1:${port}/openapi.json`, { signal: AbortSignal.timeout(1500) })
     if (!spec.ok) return null
-    const body = await spec.json() as { info?: { title?: string } }
-    if (body.info?.title !== READY_TITLE) return { runtime: 'foreign' }
-    const runtime = await net.fetch(`http://127.0.0.1:${port}/api/runtime`, { signal: AbortSignal.timeout(1500) })
-    if (runtime.status === 404 || !runtime.ok) return { runtime: 'missing' }
-    const data = await runtime.json() as Omit<RuntimeHealth, 'runtime'>
-    return { runtime: 'ok', ...data }
-  } catch {
+    if ((await spec.json() as { info?: { title?: string } }).info?.title !== READY_TITLE) return { runtime: 'foreign' }
+    const response = await net.fetch(`http://127.0.0.1:${port}/api/runtime`, { signal: AbortSignal.timeout(1500) })
+    if (response.status === 404) return { runtime: 'missing' }
+    if (!response.ok) return null
+    return { ...await response.json() as Omit<RuntimeHealth, 'runtime'>, runtime: 'ok' }
+  } catch { return null }
+}
+
+const PS_UTF8 = "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding;"
+function output(command: string, args: string[], noMatchIsEmpty = false): Promise<string> {
+  return new Promise((done, reject) => {
+    execFile(command, args, { timeout: 12000, encoding: 'utf8', windowsHide: true }, (error, stdout, stderr) => {
+      if (error) {
+        if (noMatchIsEmpty && error.code === 1 && !stdout.trim() && !stderr.trim()) { done(''); return }
+        reject(error); return
+      }
+      done(stdout.trim())
+    })
+  })
+}
+function parseProcess(text: string): Listener {
+  const data = JSON.parse(text) as Listener
+  if (!Number.isInteger(data.pid) || data.pid <= 0 || !data.executable || !Number.isInteger(data.parentPid)) throw new Error('OS 未返回完整进程身份')
+  return data
+}
+async function queryProcess(pid: number): Promise<Listener> {
+  if (process.platform === 'win32') {
+    return parseProcess(await output('powershell', ['-NoProfile', '-NonInteractive', '-Command', `${PS_UTF8} $p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if (-not $p -or -not $p.ExecutablePath) { throw 'Process identity unavailable' }; @{pid=[int]$p.ProcessId; executable=$p.ExecutablePath; parentPid=[int]$p.ParentProcessId} | ConvertTo-Json -Compress`]))
+  }
+  if (process.platform === 'linux') {
+    const executable = readlinkSync(`/proc/${pid}/exe`)
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const parentPid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[1])
+    if (!executable || !Number.isInteger(parentPid)) throw new Error('无法读取 /proc 进程身份')
+    return { pid, executable, parentPid }
+  }
+  const text = await output('ps', ['-ww', '-p', String(pid), '-o', 'ppid=', '-o', 'comm='])
+  const match = text.match(/^(\d+)\s+(.+)$/)
+  if (!match) throw new Error('无法读取 macOS 进程身份')
+  return { pid, parentPid: Number(match[1]), executable: match[2] }
+}
+/** null means a successful, explicitly empty OS query; errors remain errors. */
+export async function queryListener(port: number): Promise<Listener | null> {
+  if (!validPort(port)) throw new Error('监听端口无效')
+  if (process.platform === 'win32') {
+    // Enumerate successfully before filtering: "no matching connection" is not a CIM failure.
+    const text = await output('powershell', ['-NoProfile', '-NonInteractive', '-Command', `${PS_UTF8} $c = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${port} -and $_.State -eq 'Listen' }); $owners = @($c.OwningProcess | Select-Object -Unique); if ($owners.Count -eq 0) { exit 0 }; if ($owners.Count -ne 1) { throw 'Ambiguous listener' }; $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($owners[0])"; if (-not $p.ExecutablePath) { throw 'Listener identity unavailable' }; @{pid=[int]$p.ProcessId; executable=$p.ExecutablePath; parentPid=[int]$p.ParentProcessId} | ConvertTo-Json -Compress`])
+    return text ? parseProcess(text) : null
+  }
+  const text = process.platform === 'darwin'
+    ? await output('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp'], true)
+    : await output('ss', ['-ltnp', `sport = :${port}`])
+  const pids = [...new Set([...text.matchAll(process.platform === 'darwin' ? /^p(\d+)$/gm : /pid=(\d+)/g)].map((m) => Number(m[1])))]
+  if (pids.length > 1) throw new Error('端口有多个监听进程')
+  if (!pids.length) {
+    if (process.platform !== 'darwin' && /LISTEN/.test(text)) throw new Error('OS 隐藏了监听进程身份')
     return null
   }
+  return queryProcess(pids[0])
 }
-
-function queryListener(): Promise<Listener | null> {
-  return new Promise((resolvePromise) => {
-    if (process.platform === 'win32') {
-      const script = [
-        "$c = Get-NetTCPConnection -LocalPort 8800 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1;",
-        "if (-not $c) { exit 0 }",
-        "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($c.OwningProcess)\";",
-        "Write-Output \"$($c.OwningProcess)|$($p.ExecutablePath)\"",
-      ].join(' ')
-      execFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 4000 }, (err, stdout) => {
-        if (err) { resolvePromise(null); return }
-        resolvePromise(parseListener(String(stdout || '')))
-      })
+async function inspect(port: number, expected: Run['expected']): Promise<BackendInput> {
+  try {
+    const listener = await queryListener(port)
+    const health = listener && normalizePath(listener.executable) === normalizePath(expected.expectedExe) ? await readOwnRuntime(port) : null
+    return { ...expected, preferredPort: port, listener, health }
+  } catch (error) {
+    return { ...expected, preferredPort: port, listener: null, health: null, listenerError: String(error) }
+  }
+}
+function watchConnection(current: Connection, win: BrowserWindow | null): void {
+  connection = current
+  connectionFailures = 0
+  connectionTimer = setTimeout(() => { void verifyConnection(current, win) }, 2000)
+}
+async function verifyConnection(current: Connection, win: BrowserWindow | null): Promise<void> {
+  const candidate = await inspect(current.port, current.expected)
+  if (stopping || generation !== current.generation || connection !== current) return
+  const unchanged = killPlan({ expectedExe: current.expected.expectedExe, reportedPid: current.listener.pid, reportedExe: current.listener.executable, listener: candidate.listener })
+  if (!unchanged.kill || backendDecision(candidate).action !== 'attach') {
+    // 单次复核失败可能只是 OS 查询超时或一时无法读取进程身份；
+    // 连续多次才判定失效，避免把瞬时抖动升级成永久错误。
+    connectionFailures += 1
+    if (connectionFailures < 3) {
+      connectionTimer = setTimeout(() => { void verifyConnection(current, win) }, 2000)
       return
     }
-    execFile('ss', ['-ltnp', 'sport = :8800'], { timeout: 2000 }, (err, stdout) => {
-      if (err) { resolvePromise(null); return }
-      const match = String(stdout || '').match(/pid=(\d+)/)
-      if (!match) { resolvePromise(null); return }
-      const pid = Number(match[1])
-      execFile('readlink', ['-f', `/proc/${pid}/exe`], (linkErr, linkOut) => {
-        if (linkErr) { resolvePromise(null); return }
-        const executable = String(linkOut || '').trim()
-        resolvePromise(executable ? { pid, executable } : null)
-      })
-    })
-  })
+    fail(win, '后端连接已失效，无法再次核实监听归属')
+    return
+  }
+  watchConnection(current, win)
 }
-
-function parseListener(text: string): Listener | null {
-  const line = text.split(/\r?\n/).map((item) => item.trim()).find(Boolean) || ''
-  const splitAt = line.indexOf('|')
-  if (splitAt <= 0) return null
-  const pid = Number(line.slice(0, splitAt))
-  const executable = line.slice(splitAt + 1).trim()
-  if (!pid || !executable) return null
-  return { pid, executable }
+function processHasExited(pid: number): boolean {
+  try { process.kill(pid, 0); return false } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ESRCH') return true
+    throw error
+  }
 }
-
-function stopOwnedPid(pid: number): Promise<void> {
-  return new Promise((resolvePromise) => {
-    if (process.platform === 'win32') {
-      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 8000 }, () => resolvePromise())
-      return
-    }
-    try {
-      process.kill(pid, 'SIGTERM')
-    } catch { /* 进程已经不在 */ }
-    resolvePromise()
-  })
-}
-
-async function replaceVerifiedListener(pid: number, executable: string): Promise<string> {
-  let targetPid = pid
-  const targetExe = executable
-  let childKills = 0
-  const before = await queryListener()
-  const plan = killPlan({ reportedPid: targetPid, reportedExe: targetExe, listener: before })
-  if (!plan.kill || plan.pid !== targetPid) return plan.reason || '监听进程已经变化，没有关闭它'
-  await stopOwnedPid(targetPid)
+async function stopPid(pid: number): Promise<void> {
+  if (process.platform === 'win32') { await output('taskkill', ['/PID', String(pid), '/F']); return }
+  process.kill(pid, 'SIGTERM')
   const deadline = Date.now() + 8000
   while (Date.now() < deadline) {
-    const now = await queryListener()
-    const after = portAfterStop({ oldPid: targetPid, listener: now })
-    if (after.state === 'clear') return ''
-    if (after.state === 'child' && after.pid && after.executable && childKills < 3) {
-      const again = await queryListener()
-      const child = killPlan({
-        reportedPid: after.pid,
-        reportedExe: after.executable,
-        listener: again,
-      })
-      if (!child.kill || child.pid == null) return child.reason || '子进程已经变化，没有继续关闭'
-      childKills += 1
-      targetPid = child.pid
-      await stopOwnedPid(targetPid)
-      continue
-    }
-    if (after.state !== 'still-ours') return after.reason || '端口上的进程已经变化，没有继续关闭'
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+    if (processHasExited(pid)) return
+    await new Promise((done) => setTimeout(done, 400))
   }
-  return '采集后端没有在时限内退出'
+  throw new Error('后端进程未及时退出')
 }
-
-function showBackendError(win: BrowserWindow | null, title: string, message: string): void {
-  notifyRenderer(win, 'error')
-  if (!win || !message) return
-  const show = () => dialog.showErrorBox(title, message)
-  if (win.isVisible()) show()
-  else win.once('ready-to-show', show)
+async function replaceVerifiedListener(port: number, pid: number, executable: string, token: number): Promise<string> {
+  try {
+    const plan = killPlan({ expectedExe: executable, reportedPid: pid, reportedExe: executable, listener: await queryListener(port) })
+    if (stopping || token !== generation) return '启动已取消'
+    if (!plan.kill) return plan.reason || '监听进程已变化'
+    replacingPid = pid
+    await stopPid(pid)
+    replacingPid = null
+    const deadline = Date.now() + 8000
+    while (!stopping && token === generation && Date.now() < deadline) {
+      const after = portAfterStop({ oldPid: pid, expectedExe: executable, listener: await queryListener(port) })
+      if (after.state === 'clear') return ''
+      if (after.state === 'taken') return after.reason || '端口归属已变化'
+      await new Promise((done) => setTimeout(done, 400))
+    }
+    return '旧后端未及时退出'
+  } catch (error) { return `无法再次核实或关闭旧后端：${String(error)}` }
 }
-
-export async function startBackend(win: BrowserWindow | null): Promise<void> {
-  if (stopping) return
-  const launch = findBackendLaunch()
-  const expectedExe = launch ? resolve(launch.command) : ''
-  const savedPort = readSavedPort()
-  let foundPort = PREFERRED_PORT
-  let running = await readOwnRuntime(PREFERRED_PORT)
-  if (running?.runtime !== 'ok' && savedPort && savedPort !== PREFERRED_PORT) {
-    const saved = await readOwnRuntime(savedPort)
-    if (saved?.runtime === 'ok') {
-      running = saved
-      foundPort = savedPort
+function cleanupRun(run: Run): Promise<boolean> {
+  run.cleanup ??= Promise.resolve().then(async () => {
+    if (!run.proc.pid) return true
+    let complete = true
+    let stoppedPid: number | undefined
+    try {
+      const listener = await queryListener(run.port)
+      const target = run.verified || listener
+      const owned = target && killPlan({ expectedExe: run.expected.expectedExe, reportedPid: target.pid, reportedExe: target.executable, listener }).kill
+        && (run.verified || await spawnedOwner(run, target))
+      if (owned && target) {
+        const confirmed = await queryListener(run.port)
+        const plan = killPlan({ expectedExe: run.expected.expectedExe, reportedPid: target.pid, reportedExe: target.executable, listener: confirmed })
+        if (plan.kill && confirmed && (run.verified || await spawnedOwner(run, confirmed))) {
+          await stopPid(target.pid)
+          stoppedPid = target.pid
+        } else { complete = false; console.warn('[backend]', plan.reason || '启动进程归属已变化') }
+      } else if (run.verified) { complete = false; console.warn('[backend] 已核实的监听进程已变化') }
+    } catch (error) { complete = false; console.warn('[backend] 无法核实监听进程', String(error)) }
+    try {
+      if (!run.exited && run.verified?.pid !== run.proc.pid && stoppedPid !== run.proc.pid) {
+        const parent = await queryProcess(run.proc.pid)
+        if (!run.exited) {
+          const plan = killPlan({ expectedExe: run.expected.expectedExe, reportedPid: run.proc.pid, listener: parent })
+          if (plan.kill) await stopPid(run.proc.pid)
+          else { complete = false; console.warn('[backend]', plan.reason) }
+        }
+      }
+    } catch (error) {
+      if (!run.exited) { complete = false; console.warn('[backend] 无法核实启动进程', String(error)) }
     }
-  }
-  const choice = startupPort({
-    packaged: app.isPackaged,
-    expectedExe,
-    expectedBuild: expectedBuildId(expectedExe),
-    preferredPort: foundPort,
-    health: running,
-    listener: await queryListener(),
+    return complete
   })
-  console.log('[backend]', choice.reason || choice.action, running?.executable || '', 'pid=', running?.pid || '')
-  if (choice.action === 'attach') {
-    publishPort(foundPort)
-    notifyRenderer(win, 'ready')
-    restartCount = 0
-    return
-  }
-  if (choice.action === 'error') {
-    publishPort(foundPort)
-    restartCount = MAX_RESTART
-    showBackendError(win, '后端不是本次安装的程序', choice.reason || '')
-    return
-  }
-  if (choice.action === 'replace' && choice.pid && choice.executable) {
-    const blocked = await replaceVerifiedListener(choice.pid, choice.executable)
-    if (blocked) {
-      publishPort(foundPort)
-      showBackendError(win, '旧后端没有退出', blocked)
-      return
-    }
-  }
-  if (stopping) return
-
-  if (!launch) {
-    publishPort(PREFERRED_PORT)
-    const msg = app.isPackaged
-      ? `未找到打包后端 (${EXE_NAME})\n请检查安装包的 backend 资源。`
-      : '未找到开发后端。请在项目根目录创建 .venv 并安装 Python 依赖。'
-    console.error('[backend]', msg)
-    if (win) {
-      win.once('ready-to-show', () => {
-        dialog.showErrorBox('后端服务未找到', msg)
-      })
-    }
-    return
-  }
-
-  const port = choice.port === 0 ? await allocateFreePort() : choice.port || PREFERRED_PORT
-  backendPort = port
-  notifyRenderer(win, 'starting')
-  console.log('[backend] 启动:', launch.command, 'port=', port, ...launch.args)
-
-  const env = backendEnv()
-  env.WEB__PORT = String(port)
-  env.PYTHONUNBUFFERED = '1'
-  console.log('[backend] SPIDER_GD_HOME=', env.SPIDER_GD_HOME || '(未设置，使用工作目录)')
-  const proc = spawn(launch.command, launch.args, {
-    cwd: launch.cwd,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  })
-
-  backendProcess = proc
-
-  proc.stdout?.on('data', (data: Buffer) => {
-    const text = data.toString()
-    console.log(`[backend] ${text.trim()}`)
-    const matched = text.match(/SPIDER_GD_LISTEN=\S+:(\d+)/)
-    if (!matched) return
-    const actual = Number(matched[1])
-    if (!actual) return
-    publishPort(actual)
-    notifyRenderer(win, 'starting')
-  })
-
-  proc.stderr?.on('data', (data: Buffer) => {
-    console.error(`[backend:err] ${data.toString().trim()}`)
-  })
-
-  proc.on('error', (err) => {
-    console.error('[backend] 启动失败:', err.message)
-    void attemptRestart(win)
-  })
-
-  proc.on('exit', (code, signal) => {
-    console.log(`[backend] 进程退出: code=${code} signal=${signal}`)
-    backendProcess = null
-    notifyRenderer(win, 'stopped')
-    if (code !== 0 && code !== null) {
-      void attemptRestart(win)
-    }
-  })
-
-  void waitForReady(win)
+  return run.cleanup
 }
-
-function attemptRestart(win: BrowserWindow | null): void {
-  if (stopping) return
-  if (restartCount >= MAX_RESTART) {
-    console.error(`[backend] 已重启 ${MAX_RESTART} 次，放弃`)
-    notifyRenderer(win, 'failed')
-    return
-  }
-
-  restartCount++
-  console.log(`[backend] ${RESTART_INTERVAL / 1000}s 后第 ${restartCount} 次重试...`)
-  restartTimer = setTimeout(() => {
-    void startBackend(win)
-  }, RESTART_INTERVAL)
+async function failRun(run: Run, win: BrowserWindow | null, message: string): Promise<void> {
+  if (!isCurrent(run)) return
+  ++generation
+  fail(win, message)
+  const complete = await cleanupRun(run)
+  if (complete && active === run) active = null
 }
-
-async function waitForReady(win: BrowserWindow | null): Promise<void> {
-  const maxWait = 15_000
-  const started = Date.now()
-
-  while (Date.now() - started < maxWait) {
-    const running = await readOwnRuntime(backendPort)
-    if (running?.runtime === 'ok') {
-      publishPort(backendPort)
-      console.log('[backend] 就绪', running.executable || '', running.spider_gd || '', 'pid=', running.pid, 'port=', backendPort)
-      notifyRenderer(win, 'ready')
-      restartCount = 0
-      return
-    }
-    console.log('[backend] 等待服务就绪...', backendPort)
-    await new Promise((r) => setTimeout(r, 800))
-  }
-
-  console.warn('[backend] 启动超时（15s），将继续等待')
-  publishPort(backendPort)
-  notifyRenderer(win, 'starting')
+function isCurrent(run: Run): boolean { return !stopping && active === run && generation === run.generation }
+async function spawnedOwner(run: Run, listener: Listener): Promise<boolean> {
+  if (listener.pid === run.proc.pid) return true
+  if (!run.proc.pid || listener.parentPid !== run.proc.pid) return false
+  const parent = await queryProcess(run.proc.pid)
+  return parent.pid === run.proc.pid && normalizePath(parent.executable) === normalizePath(run.expected.expectedExe)
 }
-
-export async function stopBackend(): Promise<void> {
-  stopping = true
-  if (restartTimer) {
-    clearTimeout(restartTimer)
-    restartTimer = null
-  }
-  restartCount = MAX_RESTART
-  const proc = backendProcess
-  backendProcess = null
-  if (!proc?.pid) return Promise.resolve()
-  const pid = proc.pid
-  console.log('[backend] 正在关闭', pid)
-  await new Promise<void>((resolvePromise) => {
-    const timer = setTimeout(() => {
-      if (process.platform === 'win32') {
-        void stopOwnedPid(pid).then(() => resolvePromise())
+async function waitForReady(run: Run, win: BrowserWindow | null): Promise<void> {
+  // 现场机器装完包后杀软扫描/系统繁忙时，PowerShell 查监听可能要数秒；
+  // 15s 会把"查询慢"当成"启动失败"直接杀掉后端。给查询和整体就绪都留足余量。
+  const deadline = Date.now() + 30000
+  while (isCurrent(run) && Date.now() < deadline) {
+    const port = run.port
+    const candidate = await inspect(port, run.expected)
+    if (!isCurrent(run)) return
+    if (port !== run.port) continue
+    if (backendDecision(candidate).action === 'attach' && candidate.listener && await spawnedOwner(run, candidate.listener).catch(() => false)) {
+      // Recheck after HTTP and parent inspection, so stale runtime/PID evidence cannot publish.
+      const listener = await queryListener(port).catch(() => null)
+      if (!isCurrent(run)) return
+      if (port === run.port && killPlan({ expectedExe: run.expected.expectedExe, reportedPid: candidate.listener.pid, reportedExe: candidate.listener.executable, listener }).kill) {
+        run.verified = listener || undefined
+        watchConnection({ generation: run.generation, expected: run.expected, port, listener: listener! }, win)
+        publishPort(port, win)
         return
       }
-      try { proc.kill('SIGKILL') } catch { /* 已经退出 */ }
-      resolvePromise()
-    }, 4000)
-    proc.once('exit', () => {
-      clearTimeout(timer)
-      resolvePromise()
-    })
-    if (process.platform === 'win32') {
-      execFile('taskkill', ['/PID', String(pid), '/T'], () => {})
-    } else {
-      try { proc.kill('SIGTERM') } catch { /* 已经退出 */ }
     }
-  })
-  const leftover = portAfterStop({ oldPid: pid, listener: await queryListener() })
-  if ((leftover.state === 'still-ours' || leftover.state === 'child') && leftover.pid && leftover.executable) {
-    const blocked = await replaceVerifiedListener(leftover.pid, leftover.executable)
-    if (blocked) console.error('[backend]', blocked)
-  } else if (leftover.state === 'taken') {
-    console.error('[backend]', leftover.reason)
+    await new Promise((done) => setTimeout(done, 800))
   }
+  if (isCurrent(run)) await failRun(run, win, '后端启动超时，未能核实监听归属')
+}
+export async function startBackend(win: BrowserWindow | null): Promise<void> {
+  if (stopping || starting || active || connection) return
+  starting = true
+  const token = ++generation
+  statusWindow = win
+  readyPort = null
+  // Keep the initial pending promise for IPC calls that arrived before startup.
+  if (!portResolve) portReady = pendingPort()
+  notifyRenderer(win, 'starting')
+  try {
+    if (replacingPid !== null) {
+      if (!processHasExited(replacingPid)) { fail(win, '旧后端仍在退出，不能重新启动'); return }
+      replacingPid = null
+    }
+    const launch = findBackendLaunch()
+    if (!launch) { fail(win, `未找到后端服务 (${EXE_NAME})`); return }
+    const expected: Run['expected'] = { packaged: app.isPackaged, expectedExe: normalizePath(launch.command), expectedBuild: expectedBuildId(launch), expectedChannel: releaseIdentity.channel, expectedCwd: normalizePath(launch.cwd), expectedHome: normalizePath(dirname(currentBackendDataDir())) }
+    const saved = readSavedPort()
+    const ports = [...new Set([PREFERRED_PORT, ...(saved ? [saved] : [])])]
+    const candidates: BackendInput[] = []
+    for (const port of ports) {
+      candidates.push(await inspect(port, expected))
+      if (stopping || token !== generation) return
+    }
+    const attached = candidates.find((c) => backendDecision(c).action === 'attach')
+    if (attached) {
+      const listener = await queryListener(attached.preferredPort!).catch(() => null)
+      if (stopping || token !== generation) return
+      if (listener && killPlan({ expectedExe: expected.expectedExe, reportedPid: attached.health?.pid, reportedExe: attached.health?.executable, listener }).kill) {
+        watchConnection({ generation: token, expected, port: attached.preferredPort!, listener }, win)
+        publishPort(attached.preferredPort!, win); return
+      }
+    }
+    const replacement = candidates.find((c) => backendDecision(c).action === 'replace')
+    let port = startupPort(candidates[0]).port
+    if (replacement) {
+      const choice = backendDecision(replacement)
+      const blocked = await replaceVerifiedListener(replacement.preferredPort!, choice.pid!, choice.executable!, token)
+      if (stopping || token !== generation) return
+      if (blocked) { fail(win, blocked); return }
+      port = replacement.preferredPort!
+    } else if (attached) port = 0
+    if (!port) port = await allocateFreePort()
+    if (stopping || token !== generation) return
+    const env = { ...backendEnv(), WEB__PORT: String(port), PYTHONUNBUFFERED: '1' }
+    const proc = spawn(launch.command, launch.args, { cwd: launch.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    const run: Run = { generation: token, proc, expected, port }
+    active = run
+    let stdout = ''
+    proc.stdout?.on('data', (data: Buffer) => {
+      if (!isCurrent(run) || run.verified) return
+      stdout = (stdout + data.toString()).slice(-4096)
+      for (const match of stdout.matchAll(/SPIDER_GD_LISTEN=\S+:(\d+)(?:\r?\n|$)/g)) {
+        const actual = Number(match[1])
+        if (validPort(actual)) run.port = actual
+      }
+    })
+    proc.stderr?.on('data', (data: Buffer) => console.error(`[backend:err] ${data.toString().trim()}`))
+    proc.on('error', (error) => {
+      if (!isCurrent(run)) return
+      active = null; ++generation
+      fail(win, `后端启动失败：${error.message}`)
+    })
+    proc.on('exit', () => {
+      run.exited = true
+      if (active !== run || token !== generation) return
+      active = null; ++generation
+      invalidate('后端已退出'); notifyRenderer(win, 'stopped')
+    })
+    void waitForReady(run, win).catch((error: unknown) => failRun(run, win, String(error)))
+  } catch (error) {
+    if (!stopping && token === generation) fail(win, `无法启动后端：${String(error)}`)
+  } finally { starting = false }
+}
+export function stopBackend(): Promise<void> {
+  if (stopPromise) return stopPromise
+  stopping = true; ++generation
+  invalidate('后端已停止')
+  notifyRenderer(statusWindow, 'stopped')
+  const run = active; active = null
+  stopPromise = Promise.resolve().then(async () => { if (run) await cleanupRun(run) })
+  return stopPromise
 }

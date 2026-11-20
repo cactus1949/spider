@@ -540,6 +540,32 @@ async def run_upload(
     retry_delay_sec: float = 0.5,
     on_progress: ProgressCallback | None = None,
     work_dir: Path | None = None,
+    hardware_lease=None,
+) -> UploadJobResult:
+    from contextlib import nullcontext
+    from spider_gd.infrastructure.hardware_lease import hardware_operation
+
+    operation = hardware_operation(hardware_lease) if switch_wifi else nullcontext()
+    with operation:
+        return await _run_upload_owned(
+            profile, paths, client=client, wifi=wifi, interface_name=interface_name,
+            switch_wifi=switch_wifi, max_attempts=max_attempts,
+            retry_delay_sec=retry_delay_sec, on_progress=on_progress, work_dir=work_dir,
+        )
+
+
+async def _run_upload_owned(
+    profile: UploadProfile,
+    paths: list[str | Path],
+    *,
+    client: httpx.AsyncClient | None,
+    wifi: WifiPort | None,
+    interface_name: str,
+    switch_wifi: bool,
+    max_attempts: int,
+    retry_delay_sec: float,
+    on_progress: ProgressCallback | None,
+    work_dir: Path | None,
 ) -> UploadJobResult:
     """按打包规则准备一个文件、按需切换 WiFi，再上传。
 
@@ -600,58 +626,70 @@ async def run_upload(
             message = failed[0]["message"] if failed else "没有可上传的文件"
             return UploadJobResult(False, message, 0, states)
 
-        hop = WifiHop(True, True, False, False, "", "", interface_name)
-        if switch_wifi:
-            hop = await asyncio.to_thread(switch_to_upload_wifi, profile, port, interface_name)
-            if on_progress is not None:
-                on_progress(
-                    {
-                        "event": "upload_progress",
-                        "phase": "wifi",
-                        "message": hop.message,
-                        "ok": None if hop.ok else False,
-                        "attempt": 0,
-                        "done": 0,
-                        "total": len(states),
-                        "percent": 15,
-                        "files": states,
-                    }
-                )
-            if not hop.ok:
-                for item in states:
-                    if item["status"] != "failed":
-                        item["status"] = "failed"
-                        item["message"] = hop.message
-                return UploadJobResult(False, hop.message, 0, states, wifi_message=hop.message)
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
 
-        result = await upload_prepared_files(
-            profile,
-            prepared,
-            client=client,
-            max_attempts=max_attempts,
-            retry_delay_sec=retry_delay_sec,
-            on_progress=_merge_failed(failed, on_progress),
-        )
-        result.files = [*failed, *result.files]
-        result.wifi_message = hop.message
-        if switch_wifi and hop.switched:
-            restored = await asyncio.to_thread(restore_original_wifi, hop, port)
-            result.restore_message = restored.message
-            if on_progress is not None:
-                on_progress(
-                    {
-                        "event": "upload_progress",
-                        "phase": "restore",
-                        "message": restored.message,
-                        "ok": result.ok,
-                        "attempt": result.attempts,
-                        "done": sum(1 for item in result.files if item["status"] == "success"),
-                        "total": len(result.files),
-                        "percent": 100 if result.ok else 96,
-                        "files": result.files,
-                    }
-                )
-        return result
+        hop = WifiHop(True, True, False, False, "", "", interface_name)
+        result = None
+
+        def switch():
+            nonlocal hop
+            # Publish the hop before worker exit, even when its await is cancelled.
+            hop = switch_to_upload_wifi(profile, port, interface_name)
+
+        try:
+            if switch_wifi:
+                await run_hardware_blocking(switch)
+                if on_progress is not None:
+                    on_progress(
+                        {
+                            "event": "upload_progress",
+                            "phase": "wifi",
+                            "message": hop.message,
+                            "ok": None if hop.ok else False,
+                            "attempt": 0,
+                            "done": 0,
+                            "total": len(states),
+                            "percent": 15,
+                            "files": states,
+                        }
+                    )
+                if not hop.ok:
+                    for item in states:
+                        if item["status"] != "failed":
+                            item["status"] = "failed"
+                            item["message"] = hop.message
+                    return UploadJobResult(False, hop.message, 0, states, wifi_message=hop.message)
+
+            result = await upload_prepared_files(
+                profile,
+                prepared,
+                client=client,
+                max_attempts=max_attempts,
+                retry_delay_sec=retry_delay_sec,
+                on_progress=_merge_failed(failed, on_progress),
+            )
+            result.files = [*failed, *result.files]
+            result.wifi_message = hop.message
+            return result
+        finally:
+            if switch_wifi and hop.switched:
+                restored = await run_hardware_blocking(restore_original_wifi, hop, port)
+                if result is not None:
+                    result.restore_message = restored.message
+                    if on_progress is not None:
+                        on_progress(
+                            {
+                                "event": "upload_progress",
+                                "phase": "restore",
+                                "message": restored.message,
+                                "ok": result.ok,
+                                "attempt": result.attempts,
+                                "done": sum(1 for item in result.files if item["status"] == "success"),
+                                "total": len(result.files),
+                                "percent": 100 if result.ok else 96,
+                                "files": result.files,
+                            }
+                        )
     finally:
         if own_dir:
             import shutil

@@ -351,14 +351,15 @@ class _AuthPage:
         return "login"
 
 
-async def test_continue_without_token_does_not_skip_login(tmp_path):
+async def test_continue_without_business_auth_does_not_skip_login(tmp_path):
     page = _AuthPage()
+    page.url = "https://pm.gd.csg.cn/portal/#/user/login"
     session = SharedBrowser()
     session._config["target_origin"] = "https://pm.gd.csg.cn"
     session._config["success_selector"] = ".el-menu"
     auth = await session.check_auth(page, require_storage_keys=["pfxh-token"])
-    assert auth["state"] != "authenticated"
-    assert "pfxh-token" in auth["reason"]
+    assert auth["state"] == "unauthenticated"
+    assert "尚未进入工作台" in auth["reason"]
 
     runner = WorkflowRunner({
         "name": "登陆流程测试",
@@ -588,6 +589,10 @@ class _LoginFormPage(DomProbeFakePage):
         self.reloads = 0
 
     def probe_visible(self, selector, index=None):
+        from spider_gd.core.crawler.shared_browser import GD_LOGIN_SUCCESS_SELECTOR
+
+        if selector == GD_LOGIN_SUCCESS_SELECTOR:
+            return "text=现货交易" in self.visible
         return selector in self.visible or selector in {
             "button:has-text('登 录')", "text=证书登录", "input[type='password']",
             "button:has-text('立即登录')",
@@ -614,6 +619,12 @@ class _LoginFormPage(DomProbeFakePage):
 
             async def is_visible(self, **_kwargs) -> bool:
                 return selector in page.visible
+
+            async def count(self) -> int:
+                return int(selector in page.visible)
+
+            def nth(self, _index):
+                return self
 
             async def click(self, **_kwargs) -> None:
                 page.clicked.append(selector)
@@ -731,17 +742,16 @@ async def test_login_gateway_400_pauses_without_refresh(tmp_path):
     assert page.clicks == []
 
 
-async def test_unreadable_token_is_not_authenticated(tmp_path):
-    from unittest.mock import AsyncMock
+async def test_unreadable_document_is_not_authenticated():
+    from unittest.mock import AsyncMock, Mock
 
     page = _AuthPage()
-    page.evaluate = AsyncMock(side_effect=RuntimeError('document changed'))
-    runner = WorkflowRunner({'steps': []}, download_dir=str(tmp_path))
-    runner.pages = [page]
-    assert await runner._missing_storage_keys(['pfxh-token']) == ['pfxh-token']
+    page.evaluate = AsyncMock(side_effect=RuntimeError("document changed"))
+    page.locator = Mock(side_effect=RuntimeError("document changed"))
     session = SharedBrowser()
-    page.evaluate = AsyncMock(return_value=[])
-    assert await session._missing_storage_keys(page, ['pfxh-token']) == ['pfxh-token']
+    auth = await session.check_auth(page)
+    assert auth["state"] == "unknown"
+    assert "document changed" in auth["reason"]
 
 
 def test_verified_login_executes_and_indicators_only_reuse_session():

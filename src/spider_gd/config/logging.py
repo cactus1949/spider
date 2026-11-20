@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import re
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
+from time import time_ns
 from typing import Any
 
 from loguru import logger
+
+from spider_gd.config.user_home import validate_write_path
+from spider_gd.release_channel import runtime_release
 
 LOG_FORMAT = (
     "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
@@ -63,6 +68,18 @@ def _size_mb(path: Path) -> float:
     ) / (1024 * 1024)
 
 
+def _compress_beta_log(path: str) -> None:
+    source = validate_write_path(path, "轮转日志文件")
+    target = validate_write_path(f"{source}.zip", "日志压缩包")
+    if target.exists():
+        target = validate_write_path(
+            target.with_name(f"{target.stem}.{time_ns()}.zip"), "日志压缩包",
+        )
+    with zipfile.ZipFile(target, "x", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(source, source.name)
+    source.unlink()
+
+
 def setup_logging(
     log_dir: Path | str = "./logs",
     *,
@@ -72,6 +89,10 @@ def setup_logging(
     retention_days: int = DEFAULT_RETENTION_DAYS,
 ) -> None:
     """初始化全局日志（进程入口处调用一次）。"""
+    if persist_to_file:
+        validate_write_path(log_dir, "日志目录")
+        for name in ("app.log", "error.log"):
+            validate_write_path(Path(log_dir) / name, "日志文件")
     logger.remove()
     logger.configure(extra={"task": "-"})
 
@@ -90,6 +111,7 @@ def setup_logging(
 
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
+    compression = _compress_beta_log if runtime_release()["channel"] == "beta" else "zip"
 
     # 主日志：按天轮转 + 单文件大小上限（双保险，先触发的生效）
     logger.add(
@@ -98,7 +120,7 @@ def setup_logging(
         format=LOG_FORMAT,
         rotation=f"{DEFAULT_APP_LOG_MAX_SIZE_MB} MB",  # 50MB 就切
         retention=f"{max(retention_days, 30)} days",
-        compression="zip",
+        compression=compression,
         encoding="utf-8",
         enqueue=True,
         filter=_mask_sensitive,
@@ -111,7 +133,7 @@ def setup_logging(
         format=LOG_FORMAT,
         rotation="00:00",
         retention=f"{max(retention_days, 90)} days",
-        compression="zip",
+        compression=compression,
         encoding="utf-8",
         enqueue=True,
         filter=_mask_sensitive,
@@ -140,8 +162,10 @@ def attach_task_sink(
     """
     now = datetime.now()
     day_dir = Path(log_dir) / now.strftime("%Y-%m-%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
     file_path = day_dir / f"{task_name}_{now.strftime('%Y%m%d_%H%M%S')}.log"
+    validate_write_path(day_dir, "任务日志目录")
+    validate_write_path(file_path, "任务日志文件")
+    day_dir.mkdir(parents=True, exist_ok=True)
 
     return logger.add(
         file_path,

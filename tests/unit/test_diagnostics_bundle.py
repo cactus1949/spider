@@ -21,6 +21,86 @@ from spider_gd.interfaces.storage import ExecutionLogRecord
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("kind", ["diagnostics", "execution", "ukey", "receipt"])
+def test_beta_exports_reject_foreign_output_links(monkeypatch, tmp_path: Path, kind: str):
+    from spider_gd.app import write_delivery_receipt
+    from spider_gd.gateway.execution_bundle import build_execution_zip, build_ukey_zip
+
+    home = tmp_path / "beta"
+    home.mkdir()
+    formal = tmp_path / "formal"
+    formal.write_bytes(b"formal data")
+    output = home / ("receipt.json" if kind == "receipt" else "report.zip")
+    output.symlink_to(formal)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    if kind == "diagnostics":
+        operation, args, kwargs = build_diagnostics_zip, (output,), {"settings": {}}
+    elif kind == "execution":
+        operation, args, kwargs = build_execution_zip, (output,), {
+            "execution_text": "fixture", "app_log_text": "", "summary": {},
+        }
+    elif kind == "ukey":
+        operation, args, kwargs = build_ukey_zip, (output,), {
+            "report": {}, "raw_usb": "", "raw_certificates": "",
+        }
+    else:
+        operation, args, kwargs = write_delivery_receipt, (home, {}), {"output_path": output}
+
+    with pytest.raises(ValueError, match="测试版"):
+        operation(*args, **kwargs)
+
+    assert formal.read_bytes() == b"formal data"
+    assert output.is_symlink()
+    own = home / ("own.json" if kind == "receipt" else "own.zip")
+    if kind == "receipt":
+        kwargs["output_path"] = own
+    else:
+        args = (own,)
+    operation(*args, **kwargs)
+    if kind == "receipt":
+        assert json.loads(own.read_text(encoding="utf-8"))["outbox"] == {}
+    else:
+        with zipfile.ZipFile(own) as archive:
+            assert "README.txt" in archive.namelist()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["requested", "saved", "probe", "target"])
+def test_beta_diagnostic_directory_rejects_foreign_writes_without_fallback(
+    monkeypatch, tmp_path: Path, kind: str,
+):
+    home = tmp_path / "beta"
+    downloads = home / "downloads"
+    data = home / "data"
+    downloads.mkdir(parents=True)
+    data.mkdir()
+    formal = tmp_path / "formal"
+    formal.mkdir()
+    marker = formal / "marker"
+    marker.write_bytes(b"formal data")
+    requested = str(downloads)
+    saved = ""
+    if kind == "requested":
+        requested = str(formal)
+    elif kind == "saved":
+        requested, saved = "", str(formal)
+    elif kind == "probe":
+        (downloads / ".spider-gd-write-probe").symlink_to(marker)
+    else:
+        requested = ""
+        (data / "诊断包").symlink_to(formal, target_is_directory=True)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+
+    with pytest.raises(ValueError, match="测试版"):
+        diagnostic_output_dir(requested, saved, data)
+
+    assert marker.read_bytes() == b"formal data"
+    assert list(formal.iterdir()) == [marker]
+
+
+@pytest.mark.unit
 def test_partial_mask_and_known_secret_strip():
     assert partial_mask("alice") == "a***e"
     secrets = collect_secret_values({

@@ -41,6 +41,7 @@ from calendar_data import (  # noqa: E402
 )
 from dom_probe import DOM_PROBE_JS  # noqa: E402
 
+from spider_gd.config.user_home import validate_write_path  # noqa: E402
 from spider_gd.core.crawler.exceptions import CaptchaError, is_playwright_goto_error  # noqa: E402
 from spider_gd.core.crawler.shared_browser import (  # noqa: E402
     GD_LOGIN_SUCCESS_SELECTOR,
@@ -809,7 +810,7 @@ class WorkflowRunner:
         self.config = config
         self.name = config.get("name", "unnamed")
         self.steps = config.get("steps", [])
-        self.download_dir = Path(download_dir)
+        self.download_dir = validate_write_path(download_dir, "工作流下载目录")
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.output_dirs = {
             str(key): str(path)
@@ -887,6 +888,13 @@ class WorkflowRunner:
         # 必须换新文档；执行器在这里停下来，不替用户重试。
         self._poisoned_pages: set = set()
         self._inflight: set = set()
+        self._query_request_sequence = 0
+        self._query_request_metadata: dict[Any, dict] = {}
+        self._query_request_history: list[dict] = []
+        self._query_frame_generations: dict[Any, int] = {}
+        self._query_metadata_dropped = 0
+        self._query_history_dropped = 0
+        self._query_frames_truncated = False
         self._retired_pages: set = set()
         self._tab_checkpoints: dict = {}
         self._executing_step_index: int | None = None
@@ -959,7 +967,9 @@ class WorkflowRunner:
         try:
             ts = time.strftime("%Y%m%d_%H%M%S")
             safe_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", prefix).strip("_") or "failure"
-            path = self.download_dir / "_failures" / f"{safe_prefix}_{ts}.png"
+            path = validate_write_path(
+                self.download_dir / "_failures" / f"{safe_prefix}_{ts}.png", "失败现场截图",
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             await self.page.screenshot(path=str(path), full_page=True)
             logger.info("  失败现场截图: {}", path)
@@ -1002,7 +1012,9 @@ class WorkflowRunner:
         return name
 
     def _output_base(self) -> Path:
-        return Path(self._active_output_dir) if self._active_output_dir else self.download_dir
+        return validate_write_path(
+            self._active_output_dir or self.download_dir, "工作流输出目录",
+        )
 
     def _custom_filename(self, save_as: str, original_name: str = "") -> str:
         """当前步骤若启用了自定义命名，返回渲染后的文件名。
@@ -1057,7 +1069,7 @@ class WorkflowRunner:
         name = self._custom_filename(save_as or default_name)
         if not name:
             name = self._save_as_name(save_as) or self._save_as_name(default_name)
-        resolved = self._output_base() / name
+        resolved = validate_write_path(self._output_base() / name, "工作流输出文件")
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return resolved
 
@@ -1069,11 +1081,13 @@ class WorkflowRunner:
         """
         custom = self._custom_filename(save_as, original_name)
         if custom:
-            return self._output_base() / custom
+            return validate_write_path(self._output_base() / custom, "工作流导出文件")
         original = save_as_filename(original_name)
         name = self._save_as_name(save_as)
         if not name:
-            return self._output_base() / (original or "download")
+            return validate_write_path(
+                self._output_base() / (original or "download"), "工作流导出文件",
+            )
         site_suffix = Path(original).suffix
         if site_suffix and Path(name).suffix.lower() != site_suffix.lower():
             logger.warning(
@@ -1081,7 +1095,7 @@ class WorkflowRunner:
                 name, original,
             )
             name = Path(name).stem + site_suffix
-        return self._output_base() / name
+        return validate_write_path(self._output_base() / name, "工作流导出文件")
 
     # ----- 属性 -----
 
@@ -1389,6 +1403,7 @@ class WorkflowRunner:
         entry = {"at": datetime.now().astimezone().isoformat(timespec="milliseconds"),
                  "step": (self._executing_step_index or 0) + 1, **entry}
         try:
+            validate_write_path(self._action_trace_file, "浏览器动作诊断文件")
             self._action_trace_file.parent.mkdir(parents=True, exist_ok=True)
             first_write = not self._action_trace_file.exists()
             with self._action_trace_file.open("a", encoding="utf-8") as stream:
@@ -1396,7 +1411,7 @@ class WorkflowRunner:
             if first_write:
                 logger.info("  浏览器动作诊断文件: {}", self._action_trace_file)
             logger.info("  [browser-action] {}", json.dumps(entry, ensure_ascii=False))
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("  浏览器动作诊断保存失败: {}", exc)
 
     async def _trace_browser_action(self, phase: str) -> None:
@@ -1420,13 +1435,102 @@ class WorkflowRunner:
         except Exception as exc:
             self._write_action_trace(kind="action", phase=phase, unavailable=type(exc).__name__)
 
+    @staticmethod
+    def _query_path(url: str) -> str:
+        from urllib.parse import urlsplit
+
+        try:
+            return urlsplit(url).path[:180]
+        except ValueError:
+            return ""
+
+    def _on_page_frame_navigated(self, frame) -> None:
+        if frame not in self._query_frame_generations:
+            if len(self._query_frame_generations) >= 64:
+                self._query_frames_truncated = True
+                return
+            self._query_frame_generations[frame] = 0
+        self._query_frame_generations[frame] += 1
+
+    def _record_query_request(self, request, state: str) -> None:
+        try:
+            if getattr(request, "resource_type", "") not in ("xhr", "fetch", "document"):
+                return
+            now = time.monotonic()
+            at_ms = time.time_ns() // 1_000_000
+            if state == "started":
+                frame = getattr(request, "frame", None)
+                if frame is not None and frame not in self._query_frame_generations:
+                    if len(self._query_frame_generations) < 64:
+                        self._query_frame_generations[frame] = 0
+                    else:
+                        self._query_frames_truncated = True
+                self._query_request_sequence += 1
+                page = self._request_owner_page(request)
+                metadata = {
+                    "request_id": str(self._query_request_sequence),
+                    "path": self._query_path(request.url),
+                    "page_id": str(id(page)) if page is not None else None,
+                    "frame_id": str(id(frame)) if frame is not None else None,
+                    "observed_document_generation": self._query_frame_generations.get(frame),
+                    "observed": True,
+                    "started_at": now,
+                    "started_at_ms": at_ms,
+                }
+                self._query_request_metadata[request] = metadata
+                if len(self._query_request_metadata) > 128:
+                    self._query_request_metadata.pop(next(iter(self._query_request_metadata)))
+                    self._query_metadata_dropped += 1
+            else:
+                metadata = self._query_request_metadata.pop(request, None)
+                if metadata is None:
+                    metadata = {"request_id": None, "path": self._query_path(request.url),
+                                "observed": False, "started_at": None}
+            entry = {key: value for key, value in metadata.items() if key != "started_at"}
+            entry["state"] = state
+            entry["at_ms"] = at_ms
+            if state != "started":
+                started = metadata["started_at"]
+                entry["duration_ms"] = (
+                    round((now - started) * 1000) if started is not None else None
+                )
+            self._query_request_history.append(entry)
+            if len(self._query_request_history) > 40:
+                del self._query_request_history[:-40]
+                self._query_history_dropped += 1
+        except Exception:
+            pass
+
+    def _log_query_diagnostics(self, requests: list) -> None:
+        now = time.monotonic()
+        pending = []
+        for request in requests[:128]:
+            metadata = self._query_request_metadata.get(request)
+            if metadata is None:
+                pending.append({"request_id": None, "path": self._query_path(request.url),
+                                "observed": False, "age_ms": None,
+                                "observed_document_generation": None})
+            else:
+                entry = {key: value for key, value in metadata.items() if key != "started_at"}
+                entry["age_ms"] = round((now - metadata["started_at"]) * 1000)
+                pending.append(entry)
+        report = {
+            "pending_count": len(requests), "pending": pending,
+            "pending_truncated": max(0, len(requests) - len(pending)),
+            "metadata_dropped": self._query_metadata_dropped,
+            "history_dropped": self._query_history_dropped,
+            "frames_truncated": self._query_frames_truncated,
+            "frames": [{"frame_id": str(id(frame)), "observed_document_generation": generation}
+                       for frame, generation in self._query_frame_generations.items()],
+            "recent": self._query_request_history,
+        }
+        logger.info("[query-diagnostics] {}", json.dumps(report, ensure_ascii=False))
+
     def _observe_page(self, page) -> None:
         """给页面挂只读观测器：不改写请求，只记录 4xx/5xx、控制台错误与在途请求。"""
         if page is None:
             return
         try:
-            if page in self._page_observers:
-                return
             if page.is_closed():
                 return
             handlers = {
@@ -1436,11 +1540,15 @@ class WorkflowRunner:
                 "response": self._on_page_response,
                 "console": self._on_page_console,
                 "pageerror": self._on_page_pageerror,
+                "framenavigated": self._on_page_frame_navigated,
                 "websocket": self._on_page_websocket,
             }
+            installed = self._page_observers.setdefault(page, {})
             for name, handler in handlers.items():
+                if name in installed:
+                    continue
                 page.on(name, handler)
-            self._page_observers[page] = handlers
+                installed[name] = handler
         except Exception as exc:  # 观测失败不能影响主流程
             logger.debug("  页面观测器挂载失败: {}", exc)
 
@@ -1452,6 +1560,9 @@ class WorkflowRunner:
                     page.remove_listener(name, handler)
         self._page_observers.clear()
         self._action_request_phases.clear()
+        self._query_request_metadata.clear()
+        self._query_request_history.clear()
+        self._query_frame_generations.clear()
         for websocket, handler in self._websocket_handlers:
             with contextlib.suppress(Exception):
                 websocket.remove_listener("close", handler)
@@ -1467,18 +1578,20 @@ class WorkflowRunner:
                 if len(self._action_request_phases) > 100:
                     self._action_request_phases.pop(next(iter(self._action_request_phases)))
             self._last_network_activity = time.monotonic()
+            self._record_query_request(request, "started")
         except Exception:
             pass
 
-    def _on_page_request_done(self, request) -> None:
+    def _on_page_request_done(self, request, state: str = "finished") -> None:
         try:
             self._inflight.discard(request)
             self._last_network_activity = time.monotonic()
+            self._record_query_request(request, state)
         except Exception:
             pass
 
     def _on_page_request_failed(self, request) -> None:
-        self._on_page_request_done(request)
+        self._on_page_request_done(request, "failed")
         try:
             failure = getattr(request, "failure", None) or ""
             url = getattr(request, "url", "")[:140]
@@ -2228,7 +2341,9 @@ class WorkflowRunner:
         if len(html) > 2_000_000:
             html = html[:2_000_000] + "\n<!-- 已截断 -->"
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", prefix).strip("_") or "page"
-        path = self.download_dir / "_failures" / f"{safe}.html"
+        path = validate_write_path(
+            self.download_dir / "_failures" / f"{safe}.html", "页面 HTML 诊断文件",
+        )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(html, encoding="utf-8")
@@ -2242,7 +2357,9 @@ class WorkflowRunner:
         """失败时把控制台异常、页面异常、4xx 记录落盘，下次定位不用靠猜。"""
         try:
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            path = self.download_dir / "_failures" / f"diagnostics_{stamp}.log"
+            path = validate_write_path(
+                self.download_dir / "_failures" / f"diagnostics_{stamp}.log", "页面诊断文件",
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             page = self.page
             storage_keys: list[str] = []
@@ -3372,12 +3489,14 @@ class WorkflowRunner:
         return watch
 
     async def _finish_certificate_watch(self, watch) -> None:
-        """点击返回后收起监视。窗口对不上就失败，没出现则继续登录。"""
+        """点击返回后收起监视。窗口对不上就暂停，没出现则继续登录。"""
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
+
         watch.mark_click_finished()
-        result = await asyncio.to_thread(watch.finish)
+        result = await run_hardware_blocking(watch.finish)
         if result.ok or result.absent:
             return
-        raise WorkflowExecutionError(result.reason or "证书窗口无法唯一确认")
+        await self._pause_login_error(result.reason or "证书窗口无法唯一确认")
 
     def _confirm_station_certificate(self) -> None:
         """立即登录之后，如有原生证书窗口，只确认唯一对上的单位。
@@ -3433,8 +3552,8 @@ class WorkflowRunner:
             self._login_error_baseline = len(self._page_errors)
             self._arm_login_response_listener(self.page)
         cert_watch = self._start_certificate_watch() if watch_login else None
-        await self._trace_browser_action("click.before")
         try:
+            await self._trace_browser_action("click.before")
             try:
                 clicked = await self._low_profile_click(selector, timeout=timeout)
                 if not clicked and await self._adopt_tab_with_target(selector):
@@ -3446,6 +3565,8 @@ class WorkflowRunner:
                 if cert_watch is not None:
                     await self._finish_certificate_watch(cert_watch)
                     cert_watch = None
+            except WorkflowPaused:
+                raise
             except Exception as exc:
                 if step.get("allow_empty") and step.get("no_data_selector"):
                     no_data_selector = str(step["no_data_selector"])
@@ -3468,6 +3589,8 @@ class WorkflowRunner:
                 if isinstance(exc, WorkflowExecutionError):
                     raise
                 raise WorkflowExecutionError(self._click_miss_message(selector)) from exc
+            if watch_login and self._skip_remaining_login_steps:
+                return
             logger.info("  点击: {}", selector)
             opener = self.page
             await self._drop_duplicate_tabs_missing(selector)
@@ -3508,8 +3631,10 @@ class WorkflowRunner:
         finally:
             if cert_watch is not None:
                 cert_watch.stop()
+                from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
+
                 with contextlib.suppress(Exception):
-                    await asyncio.to_thread(cert_watch.finish, 1)
+                    await run_hardware_blocking(cert_watch.finish, 1)
             if watch_login:
                 await self._disarm_login_response_listener()
 
@@ -4105,9 +4230,9 @@ class WorkflowRunner:
             return ""
         urls = []
         for request in requests[:4]:
-            raw = str(getattr(request, "url", "") or "").split("?", 1)[0]
-            if raw:
-                urls.append(raw[:140])
+            path = WorkflowRunner._query_path(str(getattr(request, "url", "") or ""))
+            if path:
+                urls.append(path[:140])
         text = f"仍有 {len(requests)} 个当前页的同源查询请求在途"
         if urls:
             text += "：" + "；".join(urls)
@@ -4159,6 +4284,8 @@ class WorkflowRunner:
                 continue
             if not gateway:
                 parts.insert(0, f"等待查询完成超过 {int(timeout)}ms")
+            with contextlib.suppress(Exception):
+                self._log_query_diagnostics(inflight)
             await self._pause_and_wait(
                 "导出前暂停。" + " ".join(parts) + "。不会在请求未确认时导出。"
             )
@@ -4181,7 +4308,7 @@ class WorkflowRunner:
             "/portal/xhr/sso-portal/portal/notice/list",
         ))
         timeout = int(step.get("timeout", 30000))
-        base = Path(self._active_output_dir) if self._active_output_dir else self.download_dir
+        base = self._output_base()
         base.mkdir(parents=True, exist_ok=True)
 
         notices = await self._fetch_notice_reports(
@@ -4389,8 +4516,10 @@ class WorkflowRunner:
             suggested = download.suggested_filename or fallback
             safe_name = re.sub(r'[<>:"/\\|?*]', "_", Path(suggested).name).strip()
             safe_name = safe_name or fallback
-            save_path = base / safe_name
-            tmp_path = base / f".{safe_name}.{time.time_ns()}.tmp"
+            save_path = validate_write_path(base / safe_name, "运行日报附件")
+            tmp_path = validate_write_path(
+                base / f".{safe_name}.{time.time_ns()}.tmp", "运行日报临时附件",
+            )
             await download.save_as(str(tmp_path))
             if require_year is not None and not self._report_download_matches_year(
                 suggested, tmp_path, require_year,
@@ -4682,8 +4811,10 @@ class WorkflowRunner:
             original_name = download.suggested_filename
             # 浏览器导出按 save_as 重命名（扩展名以站点为准），没写则保留站点原名。
             save_path = self._export_path(save_name, original_name)
+            tmp_path = validate_write_path(
+                save_path.parent / f".{save_path.name}.{time.time_ns()}.tmp", "工作流临时导出文件",
+            )
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = save_path.parent / f".{save_path.name}.{time.time_ns()}.tmp"
             await download.save_as(str(tmp_path))
             result = self._keep_download(tmp_path, save_path)
             self._emit(
@@ -4712,7 +4843,10 @@ class WorkflowRunner:
         self._emit("api_fallback", status="start", url=api_url, reason=str(original_error))
         try:
             result = await self._fetch_api_fallback(fallback)
-            save_path = self._resolve_save_path(save_as, "api_fallback.xlsx").with_suffix(".xlsx")
+            save_path = validate_write_path(
+                self._resolve_save_path(save_as, "api_fallback.xlsx").with_suffix(".xlsx"),
+                "API 降级输出文件",
+            )
             save_path.parent.mkdir(parents=True, exist_ok=True)
             self._save_api_fallback_result(result, save_path)
             logger.success("  API 降级导出成功 → {}", save_path)
@@ -4790,6 +4924,7 @@ class WorkflowRunner:
         return result
 
     def _save_api_fallback_result(self, result: dict, save_path: Path) -> None:
+        save_path = validate_write_path(save_path, "API 降级输出文件")
         raw = base64.b64decode(result.get("base64") or "")
         content_type = (result.get("contentType") or "").lower()
         if (
@@ -4815,6 +4950,7 @@ class WorkflowRunner:
     def _save_versioned_text(
         save_path: Path, text: str, encoding: str = "utf-8", *, overwrite: bool = False,
     ) -> None:
+        save_path = validate_write_path(save_path, "工作流文本输出文件")
         data = text.encode(encoding)
         if overwrite:
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4824,8 +4960,12 @@ class WorkflowRunner:
 
     @staticmethod
     def _save_workbook_versioned(save_path: Path, wb, *, overwrite: bool = False) -> None:
+        save_path = validate_write_path(save_path, "工作流工作簿输出文件")
+        tmp_path = validate_write_path(
+            save_path.parent / f".{save_path.stem}.{time.time_ns()}{save_path.suffix or '.xlsx'}",
+            "工作流临时工作簿",
+        )
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = save_path.parent / f".{save_path.stem}.{time.time_ns()}{save_path.suffix or '.xlsx'}"
         wb.save(str(tmp_path))
         if overwrite:
             from spider_gd.core.custom_filename import overwrite_file
@@ -4981,7 +5121,7 @@ class WorkflowRunner:
     async def _do_screenshot(self, step: dict) -> None:
         """截屏保存。"""
         name = step.get("name", f"screenshot_{int(time.time())}.png")
-        path = self.download_dir / name
+        path = validate_write_path(self.download_dir / name, "工作流截图")
         await self.page.screenshot(path=str(path), full_page=True)
         logger.info("  截图保存: {}", path)
 
@@ -5349,7 +5489,9 @@ class WorkflowRunner:
         try:
             page = self.page
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            path = self.download_dir / "_failures" / f"login_diagnostics_{stamp}.log"
+            path = validate_write_path(
+                self.download_dir / "_failures" / f"login_diagnostics_{stamp}.log", "登录诊断文件",
+            )
             path.parent.mkdir(parents=True, exist_ok=True)
             keys: list[str] = []
             token_len = 0
@@ -5423,8 +5565,10 @@ class WorkflowRunner:
             if self._shared_session is None:
                 self._mark_failed(detail)
                 raise WorkflowPaused(detail)
-            auth = await self._shared_session.check_auth(self.page)
+            page = self._login_landing_page() or self.page
+            auth = await self._shared_session.check_auth(page)
             if auth["state"] == "authenticated":
+                await self._adopt_login_workbench(page)
                 self._paused = False
                 self._skip_remaining_login_steps = True
                 return

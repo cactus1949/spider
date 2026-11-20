@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -135,3 +139,166 @@ def test_pywin32_dll_search_reads_known_folders(tmp_path: Path):
     (tmp_path / "unrelated.dll").write_bytes(b"MZ")
     found = {path.name for path in build_backend.pywin32_dlls([tmp_path])}
     assert found == {"pywintypes311.dll", "pythoncom311.dll"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", [None, "wmi", "win32com.client", "pywintypes"])
+def test_wmi_probe_exec_initializes_com_before_import_and_always_releases(failure):
+    events = []
+    pythoncom = SimpleNamespace(
+        CoInitialize=lambda: events.append("initialize"),
+        CoUninitialize=lambda: events.append("uninitialize"),
+    )
+
+    def import_port(name, *args, **kwargs):
+        events.append(name)
+        if name == "pythoncom":
+            return pythoncom
+        assert name in ("wmi", "win32com.client", "pywintypes"), "no hardware queries"
+        assert "initialize" in events, "WMI imported before COM initialization"
+        if name == failure:
+            raise ImportError(f"missing {name}")
+        return SimpleNamespace(client=SimpleNamespace())
+
+    namespace = {"__builtins__": {**vars(builtins), "__import__": import_port}}
+    if failure:
+        with pytest.raises(ImportError, match=failure):
+            exec(build_backend._WMI_PROBE, namespace)
+    else:
+        exec(build_backend._WMI_PROBE, namespace)
+    expected = ["pythoncom", "initialize", "wmi", "win32com.client", "pywintypes"]
+    if failure:
+        expected = expected[:expected.index(failure) + 1]
+    assert events == [*expected, "uninitialize"]
+
+
+@pytest.mark.unit
+def test_probe_uses_requested_interpreter_and_bytes(monkeypatch):
+    def run(command, **options):
+        assert command == ["fake-python", "-c", build_backend._WMI_PROBE]
+        assert options == {"capture_output": True, "check": False}
+        return subprocess.CompletedProcess(command, 1, b"", "导入失败".encode())
+
+    monkeypatch.setattr(build_backend.subprocess, "run", run)
+    assert build_backend.probe_wmi_import("fake-python") == "导入失败"
+
+
+_BUILD_ID = "012345abcdef"
+_RELEASE = {"channel": "beta", "version": "0.2.8-beta.1", "serviceName": "spider-gd-service-beta"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", [
+    "ok", "crt-noise", "exit", "non-json", "json-list", "missing-build-id", "build-id",
+    "channel", "version", "timeout", "os-error",
+])
+def test_frozen_build_runs_exe_and_checks_real_json(monkeypatch, tmp_path, capsys, case):
+    assert callable(getattr(build_backend, "assert_frozen_build", None)), (
+        "missing executable build self-test"
+    )
+    monkeypatch.setattr(build_backend, "IS_WIN", True)
+    exe = tmp_path / "fake.exe"
+    identity = {"build_id": _BUILD_ID, "channel": "beta", "version": "0.2.8-beta.1"}
+    if case in ("build-id", "channel", "version"):
+        identity[{"build-id": "build_id"}.get(case, case)] = "wrong"
+    if case == "missing-build-id":
+        del identity["build_id"]
+    stdout = (
+        b"not JSON" if case == "non-json"
+        else json.dumps([] if case == "json-list" else identity).encode()
+    )
+    if case == "crt-noise":
+        # 真实现象：身份 JSON 之后，Windows CRT 追加一行 UTF-16 的 COM 释放报错。
+        stdout += b"\r\nW\x00i\x00n\x003\x002\x00 \x00e\x00x\x00c\x00e\x00p\x00t\x00i\x00o\x00n\x00\n\x00"
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        assert command == [str(exe), "--self-test-build"]
+        assert options["capture_output"] is True
+        assert options["check"] is False
+        assert not options.get("text")
+        assert "encoding" not in options
+        assert 0 < options["timeout"] <= 180
+        if case == "timeout":
+            raise subprocess.TimeoutExpired(command, options["timeout"])
+        if case == "os-error":
+            raise OSError("cannot launch fake exe")
+        return subprocess.CompletedProcess(
+            command, 1 if case == "exit" else 0, stdout, "依赖失败".encode(),
+        )
+
+    monkeypatch.setattr(build_backend.subprocess, "run", run)
+    if case in ("ok", "crt-noise"):
+        build_backend.assert_frozen_build(exe, _RELEASE, _BUILD_ID)
+    else:
+        with pytest.raises(SystemExit) as error:
+            build_backend.assert_frozen_build(exe, _RELEASE, _BUILD_ID)
+        assert str(error.value)
+        if case == "exit":
+            assert "依赖失败" in str(error.value)
+        assert "[done]" not in capsys.readouterr().out
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+def test_frozen_build_non_windows_explicitly_skips(monkeypatch, tmp_path, capsys):
+    assert callable(getattr(build_backend, "assert_frozen_build", None)), (
+        "missing executable build self-test"
+    )
+    monkeypatch.setattr(build_backend, "IS_WIN", False)
+    monkeypatch.setattr(
+        build_backend.subprocess, "run", lambda *a, **k: pytest.fail("native exe must not run"),
+    )
+    build_backend.assert_frozen_build(tmp_path / "fake.exe", _RELEASE, _BUILD_ID)
+    output = capsys.readouterr().out
+    assert "[skip]" in output
+    assert "Windows" in output
+    assert "[done]" not in output
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("result", ["ok", "missing-exe", "wrong-build"])
+def test_pyinstaller_success_requires_exe_and_its_self_test(monkeypatch, tmp_path, capsys, result):
+    output = tmp_path / "output"
+    monkeypatch.setattr(build_backend, "OUTPUT", output)
+    monkeypatch.setattr(build_backend, "BUILD", tmp_path / "build")
+    monkeypatch.setattr(build_backend, "IS_WIN", True)
+    monkeypatch.setattr(build_backend, "EXE_SUFFIX", ".exe")
+    monkeypatch.setattr(build_backend, "DATA_FILES", [])
+    for name in (
+        "assert_repo_package_wins", "clean_build", "restore_build_stamp", "assert_frozen_modules",
+        "assert_frozen_ocr", "assert_ocr_frozen",
+    ):
+        monkeypatch.setattr(build_backend, name, lambda *a, **k: None)
+    monkeypatch.setattr(build_backend, "stage_release_data", lambda *a: [])
+    monkeypatch.setattr(build_backend, "install_build_stamp", lambda *a, **k: "original")
+    monkeypatch.setattr(build_backend, "current_build_id", lambda: _BUILD_ID)
+    monkeypatch.setattr(build_backend, "onnxruntime_package_dir", lambda: tmp_path)
+    monkeypatch.setattr(build_backend, "ocr_pyinstaller_args", lambda *a: [])
+    monkeypatch.setattr(build_backend, "_pywin32_search_roots", lambda: [])
+    monkeypatch.setitem(sys.modules, "curl_cffi", None)
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        if command[:3] == [sys.executable, "-m", "PyInstaller"]:
+            if result != "missing-exe":
+                (output / "spider-gd-service-beta.exe").write_bytes(b"fake; never execute")
+            return subprocess.CompletedProcess(command, 0)
+        assert command == [str(output / "spider-gd-service-beta.exe"), "--self-test-build"]
+        identity = {
+            "channel": "beta", "version": "0.2.8-beta.1",
+            "build_id": _BUILD_ID if result == "ok" else "ffffffffffff",
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(identity).encode(), b"")
+
+    monkeypatch.setattr(build_backend.subprocess, "run", run)
+    if result == "ok":
+        build_backend.run_pyinstaller(_RELEASE)
+        assert len(calls) == 2, "archive inspection cannot replace running the frozen self-test"
+    else:
+        with pytest.raises(SystemExit, match=r"exe|build_id|构建"):
+            build_backend.run_pyinstaller(_RELEASE)
+        assert not (output / ".env").exists()
+        assert "[done]" not in capsys.readouterr().out

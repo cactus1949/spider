@@ -27,6 +27,238 @@ from spider_gd.infrastructure.storage.database import TaskStateStore
 from spider_gd.interfaces.storage import ExecutionLogRecord, TaskItemRecord, TaskRecord
 
 
+@pytest.fixture(autouse=True)
+def _isolated_control_environment(tmp_path, monkeypatch):
+    from spider_gd.config.delivery_env import DELIVERY_ENV_KEYS
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable")
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    for key in (*DELIVERY_ENV_KEYS, "SPIDER_GD_DELIVERY_ENV_FILE", "SPIDER_BROWSER_CONFIG"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def beta_client(tmp_path: Path, monkeypatch):
+    from spider_gd.core.crawler import shared_browser
+
+    home = tmp_path / "beta"
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    monkeypatch.delenv("SPIDER_BROWSER_CONFIG", raising=False)
+    monkeypatch.setattr(shared_browser, "_shared_browser", None)
+    settings = load_config("configs/mode_d_offline.yaml")
+    settings.log.persist_to_file = False
+    ctx = assemble(settings)
+    ctx.state_store.create_execution_log(ExecutionLogRecord(
+        exec_id="beta_diag", name="诊断", type="workflow", target_id="daily",
+        status="failed", reason="fixture", created_at="2030-01-02 03:04:05",
+        updated_at="2030-01-02 03:04:06",
+    ))
+    app = create_app(ControlService(ctx))
+    try:
+        yield TestClient(app), home
+    finally:
+        ctx.state_store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", ["workflow", "task"])
+@pytest.mark.parametrize("link_kind", ["external", "directory"])
+def test_beta_runtime_rejects_download_paths_before_creating_directories(
+    beta_client, tmp_path, monkeypatch, kind, link_kind,
+):
+    import spider_gd.app as app_module
+    from spider_gd.infrastructure.network import WifiConnector
+
+    client, home = beta_client
+    client = TestClient(client.app, raise_server_exceptions=False)
+    formal = tmp_path / "formal"
+    formal.mkdir()
+    marker = formal / "marker"
+    marker.write_bytes(b"formal data")
+    if link_kind == "external":
+        destination = formal / "new-downloads"
+    else:
+        linked = home / "linked"
+        linked.symlink_to(formal, target_is_directory=True)
+        destination = linked / "new-downloads"
+    monkeypatch.setattr(app_module, "ensure_dual_nic_ready", lambda *_: (True, "fixture", []))
+    monkeypatch.setattr(WifiConnector, "current_ssid", lambda *_: "fixture-wifi")
+    if kind == "workflow":
+        saved = client.put("/api/workflows/beta_path", json={
+            "name": "路径测试", "yaml_text": "name: path\nsteps: []\n",
+        })
+        route = "/api/workflows/beta_path/run/stream"
+    else:
+        saved = client.put("/api/task-configs/beta_path", json={
+            "name": "路径测试", "indicators": [], "enabled": False,
+        })
+        route = "/api/tasks/beta_path/run/stream"
+    assert saved.status_code == 200
+
+    response = client.get(route, params={"download_dir": str(destination)})
+
+    assert response.status_code == 400
+    assert "测试版" in response.json()["detail"]
+    assert marker.read_bytes() == b"formal data"
+    assert list(formal.iterdir()) == [marker]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", ["logs", "execution", "ukey", "workshop"])
+def test_beta_runtime_output_routes_reject_linked_directories_before_mkdir(
+    beta_client, tmp_path, monkeypatch, kind,
+):
+    import spider_gd.infrastructure.network.usb_devices as usb
+
+    client, home = beta_client
+    client = TestClient(client.app, raise_server_exceptions=False)
+    formal = tmp_path / "formal"
+    formal.mkdir()
+    marker = formal / "marker"
+    marker.write_bytes(b"formal data")
+    link = home / "linked"
+    link.symlink_to(formal, target_is_directory=True)
+    destination = link / "new-output"
+    monkeypatch.setattr(usb, "gather_ukey_download_parts", lambda: ({}, {}, ""))
+
+    async def disabled_builder(*args, **kwargs):
+        raise RuntimeError("fixture 禁止启动交互构建器")
+
+    monkeypatch.setattr("build_workflow.build_workflow", disabled_builder)
+    if kind == "logs":
+        (home / "logs").symlink_to(destination, target_is_directory=True)
+        response = client.get("/api/logs/path")
+    elif kind == "execution":
+        response = client.post("/api/execution-logs/beta_diag/download", json={
+            "download_dir": str(destination),
+        })
+    elif kind == "ukey":
+        response = client.post("/api/stations/ukey-report/download", json={
+            "download_dir": str(destination),
+        })
+    else:
+        response = client.post("/api/record-workshop/build", json={
+            "name": "path", "download_dir": str(destination),
+        })
+
+    if kind in {"logs", "workshop"}:
+        assert response.status_code == 400
+        assert "测试版" in response.json()["detail"]
+    else:
+        assert response.status_code == 200
+        assert response.json()["status"] == "error"
+        assert "测试版" in response.json()["message"]
+    assert marker.read_bytes() == b"formal data"
+    assert list(formal.iterdir()) == [marker]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("key", ["downloadDir", "deliveryDesktopWechatProfilePath"])
+def test_beta_settings_reject_foreign_write_path_before_any_setting_write(
+    beta_client, tmp_path, key,
+):
+    client, home = beta_client
+    own = str(home / "downloads")
+    saved = client.put("/api/settings", json={key: own, "siteUrl": "original"})
+    assert saved.status_code == 200
+    formal = tmp_path / "formal"
+
+    rejected = client.put("/api/settings", json={key: str(formal), "siteUrl": "changed"})
+
+    assert rejected.status_code == 400
+    assert "测试版" in rejected.json()["detail"]
+    settings = client.get("/api/settings").json()["settings"]
+    assert settings[key] == own
+    assert settings["siteUrl"] == "original"
+    assert not formal.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("importing", [False, True])
+def test_beta_task_write_paths_reject_foreign_targets_without_replacing_task(
+    beta_client, tmp_path, importing,
+):
+    client, home = beta_client
+    own = {"name": "original", "enabled": False, "download_dir": str(home / "downloads")}
+    assert client.put("/api/task-configs/beta-path", json=own).status_code == 200
+    foreign = tmp_path / "formal"
+    bad = {**own, "id": "beta-path", "name": "changed", "download_dir": str(foreign)}
+
+    if importing:
+        response = client.post("/api/data/import", json={"tasks": [bad]})
+        assert response.status_code == 200
+        assert any("测试版" in error for error in response.json()["errors"])
+    else:
+        response = client.put("/api/task-configs/beta-path", json=bad)
+        assert response.status_code == 400
+        assert "测试版" in response.json()["detail"]
+
+    stored = client.get("/api/task-configs/beta-path").json()
+    assert stored["name"] == "original"
+    assert stored["download_dir"] == own["download_dir"]
+    assert not foreign.exists()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("folder", ["tasks", "workflows"])
+def test_beta_yaml_writes_reject_foreign_file_links(beta_client, tmp_path, folder):
+    client, home = beta_client
+    directory = home / folder
+    directory.mkdir(exist_ok=True)
+    formal = tmp_path / "formal.yml"
+    formal.write_text("name: formal\n", encoding="utf-8")
+    link = directory / "daily.yml"
+    link.symlink_to(formal)
+
+    if folder == "tasks":
+        response = client.put("/api/tasks/daily", json={
+            "name": "daily", "yaml_text": "name: changed\n",
+        })
+        assert response.status_code == 400
+        assert "测试版" in response.json()["detail"]
+    else:
+        response = client.post("/api/data/import", json={
+            "workflows": [{"name": "daily", "content": "name: changed\n"}],
+        })
+        assert response.status_code == 200
+        assert any("测试版" in error for error in response.json()["errors"])
+
+    assert formal.read_text(encoding="utf-8") == "name: formal\n"
+    assert link.is_symlink()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", ["/api/task-configs/export-all", "/api/workflows/export-all"])
+def test_beta_api_exports_use_own_home_instead_of_shared_temp(
+    beta_client, tmp_path, monkeypatch, route,
+):
+    import io
+    import tempfile
+
+    client, home = beta_client
+    imported = client.post("/api/data/import", json={
+        "tasks": [{"id": "own", "name": "own", "enabled": False}],
+        "workflow_configs": [{"id": "own", "name": "own", "yaml_text": "name: own\n"}],
+    })
+    assert imported.status_code == 200
+    assert not imported.json()["errors"]
+    formal = tmp_path / "formal"
+    formal.write_bytes(b"formal data")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(formal))
+
+    response = client.get(route)
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist()
+    assert (home / ".exports").is_dir()
+    assert formal.read_bytes() == b"formal data"
+
+
 @pytest.fixture
 def client(tmp_path: Path):
     settings = load_config("configs/mode_d_offline.yaml")
@@ -148,6 +380,159 @@ def test_tasks_endpoints(client: TestClient):
     body = detail.json()
     assert body["status"] == "completed"
     assert body["items"][0]["indicator"] == "日清算概览"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/network/wifi/test", "/api/network/route-rules/apply"])
+async def test_network_mutation_busy_is_409_before_prepare_or_closure(client, monkeypatch, path):
+    from spider_gd.infrastructure.hardware_lease import hardware_operation
+
+    calls = []
+
+    class WifiPort:
+        def prepare(self, options):
+            calls.append("prepare")
+            return WifiConnectResult(ok=True, target_ssid=options.ssid, message="ready")
+
+    class ClosurePort:
+        def __init__(self, *, cache_dir):
+            calls.append("closure")
+
+        def apply_rules(self, rules):
+            calls.append("apply")
+            return DualNicClosureReport(
+                status="ok", applied=0, results=[], details=[], message="ready",
+            )
+
+    monkeypatch.setattr("spider_gd.infrastructure.network.WifiConnector", WifiPort)
+    monkeypatch.setattr("spider_gd.infrastructure.network.DualNicClosure", ClosurePort)
+    saved = client.put("/api/settings", json={"settings": {
+        "wifiAutoConnectEnabled": "true", "wifiSsid": "fixture",
+    }})
+    assert saved.status_code == 200
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=client.app), base_url="http://fixture"
+    ) as http:
+        with hardware_operation():
+            response = await http.post(path)
+            assert response.status_code == 409
+            assert "共享硬件" in response.json()["detail"]
+            assert calls == []
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("path", "outcome"), [
+    ("/api/network/wifi/test", "success"),
+    ("/api/network/wifi/test", "wifi-error"),
+    ("/api/network/route-rules/apply", "success"),
+    ("/api/network/route-rules/apply", "wifi-error"),
+    ("/api/network/route-rules/apply", "rules-error"),
+])
+def test_network_mutation_preserves_payload_inside_one_guarded_worker(
+    client, tmp_path, monkeypatch, path, outcome
+):
+    import threading
+
+    from spider_gd.infrastructure.hardware_lease import HardwareLease, hardware_operation
+
+    route_thread = []
+    workers = []
+    calls = []
+
+    @client.app.middleware("http")
+    async def capture_route_thread(request, call_next):
+        route_thread.append(threading.get_ident())
+        return await call_next(request)
+
+    def assert_worker_owned():
+        contender = HardwareLease.try_acquire()
+        if contender is not None:
+            contender.close()
+        assert contender is None, "REST native port ran without hardware ownership"
+        worker = threading.get_ident()
+        assert worker != route_thread[-1], "REST native port blocked the event loop"
+        workers.append(worker)
+
+    class WifiPort:
+        def prepare(self, options):
+            assert_worker_owned()
+            calls.append("prepare")
+            assert options.ssid == "fixture"
+            return WifiConnectResult(
+                ok=outcome != "wifi-error", target_ssid=options.ssid,
+                message="wifi failed" if outcome == "wifi-error" else "wifi ready",
+                details=["wifi detail"],
+            )
+
+    class ClosurePort:
+        def __init__(self, *, cache_dir):
+            assert_worker_owned()
+            calls.append("closure")
+            assert cache_dir == tmp_path / "data" / "network" / "dns_cache"
+
+        def apply_rules(self, rules):
+            assert_worker_owned()
+            calls.append("apply")
+            assert rules[0]["domain_pattern"] == "fixture.test"
+            return DualNicClosureReport(
+                status="error" if outcome == "rules-error" else "ok",
+                applied=0 if outcome == "rules-error" else 1,
+                message="rules failed" if outcome == "rules-error" else "rules ready",
+                details=["rules detail"], results=[DualNicRuleResult(
+                    domain="fixture.test", interface_name="fixture-nic", status="error",
+                    expected_ssid="fixture", current_ssid="original", resolved_ips=["192.0.2.1"],
+                    stale_ips=["192.0.2.2"], gateway="192.0.2.3", private_ok=False,
+                    public_ok=True, routes_ok=False, error="fixture result",
+                )],
+            )
+
+    monkeypatch.setattr("spider_gd.infrastructure.network.WifiConnector", WifiPort)
+    monkeypatch.setattr("spider_gd.infrastructure.network.DualNicClosure", ClosurePort)
+    assert client.put("/api/settings", json={"settings": {
+        "wifiAutoConnectEnabled": "true", "wifiSsid": "fixture",
+    }}).status_code == 200
+    assert client.put("/api/network/route-rules", json={"rules": [{
+        "domain_pattern": "fixture.test", "interface_name": "fixture-nic",
+    }]}).status_code == 200
+    response = client.post(path)
+    assert response.status_code == 200
+    if path.endswith("wifi/test"):
+        assert response.json() == {
+            "ok": outcome == "success",
+            "message": "wifi ready" if outcome == "success" else "wifi failed",
+            "details": (
+                ["wifi detail"] if outcome == "success"
+                else ["wifi detail", "ERR WiFi: wifi failed"]
+            ),
+        }
+        assert calls == ["prepare"]
+    elif outcome == "wifi-error":
+        assert response.json() == {
+            "status": "error", "applied": 0, "message": "wifi failed",
+            "details": ["wifi detail", "ERR WiFi: wifi failed"], "results": [],
+        }
+        assert calls == ["prepare"]
+    else:
+        assert response.json() == {
+            "status": "error" if outcome == "rules-error" else "ok",
+            "applied": 0 if outcome == "rules-error" else 1,
+            "message": (
+                "wifi ready；rules failed" if outcome == "rules-error"
+                else "wifi ready；rules ready"
+            ),
+            "details": ["wifi detail", "rules detail"], "results": [{
+                "domain": "fixture.test", "interface_name": "fixture-nic", "status": "error",
+                "expected_ssid": "fixture", "current_ssid": "original",
+                "resolved_ips": ["192.0.2.1"],
+                "stale_ips": ["192.0.2.2"], "gateway": "192.0.2.3", "private_ok": False,
+                "public_ok": True, "routes_ok": False, "error": "fixture result",
+            }],
+        }
+        assert calls == ["prepare", "closure", "apply"]
+    assert len(set(workers)) == 1
+    with hardware_operation():
+        pass
 
 
 @pytest.mark.integration
@@ -453,7 +838,7 @@ def test_execution_log_download_builds_one_zip(tmp_path: Path):
     settings.log.file_dir = str(tmp_path / "logs")
     settings.log.persist_to_file = False
     log_dir = Path(settings.log.file_dir)
-    log_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     (log_dir / "app.log").write_text(
         f"{now}.000 | INFO | run:save:1 | task | 本次执行标记\n"
@@ -635,12 +1020,19 @@ def test_delivery_test_endpoint_file_send_uses_outbox_on_failure(tmp_path: Path)
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("channel", ["stable", "beta"])
 @respx.mock
-def test_delivery_test_endpoint_returns_outbox_receipt_on_success(tmp_path: Path):
+def test_delivery_test_endpoint_returns_outbox_receipt_on_success(tmp_path, monkeypatch, channel):
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", channel)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    storage_root = tmp_path / "beta-home" if channel == "beta" else tmp_path
+    if channel == "beta":
+        monkeypatch.setenv("SPIDER_GD_HOME", str(storage_root))
     webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc"
     settings = load_config("configs/mode_d_offline.yaml")
-    settings.storage.sqlite_path = str(tmp_path / "spider.db")
-    settings.storage.data_dir = str(tmp_path / "data")
+    settings.storage.sqlite_path = str(storage_root / "spider.db")
+    settings.storage.data_dir = str(storage_root / "data")
     settings.log.persist_to_file = False
     settings.delivery.enabled = True
     settings.delivery.wecom_webhook = webhook
@@ -669,6 +1061,70 @@ def test_delivery_test_endpoint_returns_outbox_receipt_on_success(tmp_path: Path
         assert body["outbox"]["zip_size"] == 6
         assert body["outbox"]["zip_sha256"] == hashlib.sha256(b"123456").hexdigest()
         assert body["outbox"]["delivered_at"]
+    finally:
+        ctx.state_store.close()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize(("send_field", "expected_status"), [
+    ({}, 200), ({"send": False}, 200), ({"send": None}, 400),
+    ({"send": "false"}, 400), ({"send": "true"}, 400),
+    ({"send": 0}, 400), ({"send": 1}, 400),
+    ({"send": []}, 400), ({"send": {}}, 400),
+])
+@respx.mock
+def test_delivery_test_requires_explicit_json_true(
+    tmp_path, monkeypatch, channel, frozen, send_field, expected_status,
+):
+    import sys
+
+    from spider_gd import build_stamp
+
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setenv(
+        "SPIDER_GD_CHANNEL", ("stable" if channel == "beta" else "beta") if frozen else channel,
+    )
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc"
+    storage_root = tmp_path / "home" if channel == "beta" else tmp_path
+    settings = load_config("configs/mode_d_offline.yaml")
+    settings.storage.sqlite_path = str(storage_root / "spider.db")
+    settings.storage.data_dir = str(storage_root / "data")
+    settings.log.persist_to_file = False
+    settings.delivery.enabled = True
+    settings.delivery.wecom_webhook = webhook
+    settings.delivery.file_delivery = "wecom_file"
+    settings.delivery.retry_attempts = 1
+    settings.delivery.retry_delay_sec = 0
+    ctx = assemble(settings)
+    try:
+        sample = tmp_path / "result.zip"
+        sample.write_bytes(b"123456")
+        media = respx.post(
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key=abc&type=file",
+        ).mock(return_value=httpx.Response(200, json={"errcode": 0, "media_id": "MEDIA"}))
+        message = respx.post(webhook).mock(return_value=httpx.Response(200, json={"errcode": 0}))
+        c = TestClient(create_app(ControlService(ctx)))
+
+        response = c.post("/api/delivery/test", json={"filePath": str(sample), **send_field})
+
+        assert media.call_count == message.call_count == 0, "未明确发送不能触发网络"
+        assert response.status_code == expected_status
+        if expected_status == 200:
+            assert response.json()["dry_run"] is True
+            assert not response.json().get("sent", False)
+        else:
+            assert "send" in response.json()["detail"]
+        outbox = c.get("/api/delivery/outbox")
+        assert outbox.status_code == 200
+        assert outbox.json()["summary"]["total"] == 0
+        assert sample.read_bytes() == b"123456"
+        assert not (tmp_path / "data" / "_stable_delivery").exists()
     finally:
         ctx.state_store.close()
 

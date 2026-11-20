@@ -182,6 +182,87 @@ def test_duplicate_custom_name_overwrites_only_the_target_file(tmp_path: Path):
     assert (folder / "inside.txt").exists()
 
 
+@pytest.mark.parametrize("channel", ["beta", "stable"])
+def test_overwrite_keeps_readable_output_in_configured_home(tmp_path, monkeypatch, channel):
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", channel)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    source = tmp_path / "download.tmp"
+    source.write_bytes(b"new")
+    target = tmp_path / "data" / "report.txt"
+    overwrite_file(source, target)
+    assert target.read_bytes() == b"new"
+    assert not source.exists()
+    assert not (target.parent / ".file_versions.json").exists()
+
+
+@pytest.mark.parametrize("unsafe", [
+    "source", "source_link", "source_external_link", "destination", "directory_link",
+    "leaf_link", "destination_external_link",
+])
+def test_beta_overwrite_rejects_external_targets_without_consuming_source(
+    tmp_path, monkeypatch, unsafe,
+):
+    home = tmp_path / "beta"
+    home.mkdir()
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_bytes(b"keep")
+    source = home / "download.tmp"
+    source.write_bytes(b"new")
+    target = home / "report.txt"
+    target.write_bytes(b"old")
+    link = None
+    if unsafe == "source":
+        source = sentinel
+    elif unsafe == "source_link":
+        source.unlink()
+        source.symlink_to(sentinel)
+        link = source
+    elif unsafe == "source_external_link":
+        source = tmp_path / "source-link.tmp"
+        source.symlink_to(home / "download.tmp")
+        link = source
+    elif unsafe == "destination_external_link":
+        target = tmp_path / "destination-link.txt"
+        target.symlink_to(home / "report.txt")
+        link = target
+    elif unsafe == "destination":
+        target = sentinel
+    elif unsafe == "directory_link":
+        link = home / "linked"
+        link.symlink_to(outside, target_is_directory=True)
+        target = link / "new" / "report.txt"
+    else:
+        target.unlink()
+        target.symlink_to(sentinel)
+        link = target
+    with pytest.raises(ValueError, match="测试版"):
+        overwrite_file(source, target)
+    assert sentinel.read_bytes() == b"keep"
+    assert source.read_bytes() == (b"keep" if unsafe in {"source", "source_link"} else b"new")
+    if link is not None:
+        assert link.is_symlink()
+    if unsafe in {"source", "source_link", "source_external_link"}:
+        assert target.read_bytes() == b"old"
+    assert sorted(p.name for p in outside.iterdir()) == ["sentinel.txt"]
+
+
+def test_stable_overwrite_allows_external_consumed_source(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable")
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    source = tmp_path / "outside.tmp"
+    source.write_bytes(b"new")
+    target = tmp_path / "external" / "report.txt"
+    overwrite_file(source, target)
+    assert target.read_bytes() == b"new"
+    assert not source.exists()
+
+
 def test_old_task_database_gains_empty_custom_names(tmp_path: Path):
     import sqlite3
 

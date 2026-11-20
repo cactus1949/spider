@@ -6,8 +6,7 @@
 
 from __future__ import annotations
 
-import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from spider_gd.core.station_profile import (
@@ -350,7 +349,7 @@ def _plan_selected(
     return TaskUKeyPlan(started=bool(runnable), runnable=runnable, skipped=skipped)
 
 
-def format_station_report(rows: Sequence[StationDecision | dict[str, str]]) -> str:
+def format_station_report(rows: Sequence[StationDecision | Mapping[str, object]]) -> str:
     """把场站结果收成执行日志里的几行。
 
     Args:
@@ -375,26 +374,11 @@ def format_station_report(rows: Sequence[StationDecision | dict[str, str]]) -> s
             lines.append(f"场站 {name}：已执行")
         elif status == "failed":
             lines.append(f"场站 {name or '未命名'}：失败（{reason or '执行失败'}）")
+        elif status == "cancelled":
+            lines.append(f"场站 {name or '未命名'}：已中断（{reason or '用户取消，已完成项保留'}）")
         elif name or reason:
             lines.append(f"场站 {name or '未命名'}：未执行（{reason or '未执行'}）")
     return "\n".join(lines)
-
-
-_RUN_LOCK = threading.Lock()
-
-
-def acquire_ukey_run() -> bool:
-    """占用证书窗口和切网。拿不到说明另一个任务还在用。"""
-    return _RUN_LOCK.acquire(blocking=False)
-
-
-def release_ukey_run() -> None:
-    """放开证书窗口和切网。"""
-    if _RUN_LOCK.locked():
-        try:
-            _RUN_LOCK.release()
-        except RuntimeError:
-            return
 
 
 def configured_ukey_ids(cfg: dict | None) -> list[str]:
@@ -538,7 +522,9 @@ def collect_runtime_plan(
         from spider_gd.infrastructure.network.usb_devices import list_usb_devices
 
         present = [
-            item.device_id for item in list_usb_devices() if item.ukey_candidate
+            device_id
+            for item in list_usb_devices() if item.ukey_candidate
+            for device_id in (item.device_id, *item.member_ids)
         ]
     except Exception:
         present = []

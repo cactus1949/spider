@@ -1,5 +1,6 @@
 import { Tray, Menu, nativeImage } from 'electron'
 import { join } from 'path'
+import { releaseIdentity } from './release'
 
 let tray: Tray | null = null
 
@@ -21,7 +22,7 @@ function loadTrayIcon(): Electron.NativeImage {
 
 export function createTray(handlers: TrayHandlers): Tray {
   tray = new Tray(loadTrayIcon())
-  tray.setToolTip('广东电力数据采集 · 运行中')
+  tray.setToolTip(`${releaseIdentity.productName} · ${releaseIdentity.channelLabel} · 运行中`)
 
   const menu = Menu.buildFromTemplate([
     { label: '显示主窗口', click: handlers.onShow },

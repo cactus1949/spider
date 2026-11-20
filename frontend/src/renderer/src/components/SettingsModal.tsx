@@ -3,6 +3,8 @@ import { Modal, Form, Input, Select, Switch, Button, Space, Menu, Alert, App as 
 import { CopyOutlined, DownloadOutlined, FolderOpenOutlined, SyncOutlined, ExportOutlined, ImportOutlined, WarningOutlined } from '@ant-design/icons'
 import { api, settingsStore, type DeliveryOutboxItem, type DeliveryOutboxSummary, type UsbDeviceOption, type WifiNetwork } from '../services/api'
 import UploadProfilesPanel, { type UploadProfilesHandle } from './UploadProfilesPanel'
+import VersionCenterPanel from './VersionCenterPanel'
+import type { ReleaseInfo } from '../../../preload/index.d'
 
 interface Settings {
   downloadDir: string
@@ -65,6 +67,7 @@ const SECTIONS = [
   // { key: 'section-workshop', label: '📹 录制工坊' },
   // { key: 'section-delivery', label: '📤 结果发送' },
   // { key: 'section-route', label: '📡 路由' },
+  { key: 'section-versions', label: '版本中心' },
   { key: 'section-about', label: 'ℹ️ 关于' }
 ] as const
 
@@ -185,7 +188,11 @@ export default function SettingsModal({
   const [form] = Form.useForm<Settings>()
   const [dir, setDir] = useState('')
   const [activeSection, setActiveSection] = useState('section-basic')
-  const [version, setVersion] = useState('')
+  const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
+  const version = releaseInfo?.version || ''
+  useEffect(() => {
+    if (open) window.api.getReleaseInfo().then(setReleaseInfo).catch(() => {})
+  }, [open])
   const [checking, setChecking] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [deliveryTesting, setDeliveryTesting] = useState(false)
@@ -216,9 +223,30 @@ export default function SettingsModal({
   const [settingsError, setSettingsError] = useState('')
   const [saving, setSaving] = useState(false)
   const baselineRef = useRef<Record<string, string>>({})
+  const usbOptions = [
+    { name: 'UKey', candidate: true },
+    { name: '其他 USB', candidate: false }
+  ].map((group) => {
+    const devices = usbDevices.filter((device) => Boolean(device.ukeyCandidate) === group.candidate)
+    return {
+      label: `${group.name}（${devices.length} 个）`,
+      options: devices.map((device) => ({
+        value: device.id,
+        searchText: [device.name, device.label, device.id, device.serial].join(' ').toLowerCase(),
+        label: (
+          <div style={{ whiteSpace: 'normal', lineHeight: 1.5, padding: '4px 0' }}>
+            <div>{device.name}</div>
+            <div style={{ color: '#667085', fontSize: 12, overflowWrap: 'anywhere' }}>
+              {device.serial ? '序列号' : '本次插口特征'}：
+              <span>{device.serial || device.id.replace(/\//g, '\\').split('\\').pop()}</span>
+            </div>
+          </div>
+        )
+      }))
+    }
+  }).filter((group) => group.options.length > 0)
 
   const applyLoadedSettings = useCallback((s: Record<string, string>): Record<string, string> => {
-        window.api.getVersion().then(setVersion)
         const merged = { ...DEFAULTS }
         for (const [k, v] of Object.entries(s)) {
           if (v === 'true') (merged as any)[k] = true
@@ -637,7 +665,7 @@ export default function SettingsModal({
         </div>
 
         {/* ── Right content ── */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, minWidth: activeSection === 'section-versions' ? 0 : undefined, display: 'flex', flexDirection: 'column' }}>
           <div
             key={activeSection}
             style={{
@@ -659,8 +687,9 @@ export default function SettingsModal({
             <Form
               form={form}
               layout="vertical"
-              style={{ maxWidth: activeSection === 'section-upload' ? 'none' : 520 }}
+              style={{ maxWidth: ['section-upload', 'section-versions'].includes(activeSection) ? 'none' : 520 }}
             >
+              {open && activeSection === 'section-versions' && <VersionCenterPanel />}
               {/* ── 基础 ── */}
               {activeSection === 'section-basic' && <>
               <h3
@@ -728,6 +757,9 @@ export default function SettingsModal({
                 <div style={{ color: '#8b98a8', fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
                   配了两个及以上场站时，点立即执行会先弹出多选窗口。证书窗口的列是颁发给、单位、截止日期、颁发者，用来对上的是「单位」。单位名称写一段能对上的字即可，例如单位是「三峡新能源阳江发电有限公司」时写「阳江」，显示成「三峡新能源发电（韶关浈江）有...」时写「韶关浈江」或「浈江」。改完要点右下角「保存」。
                 </div>
+                <div style={{ color: '#667085', fontSize: 13, marginBottom: 12, lineHeight: 1.6 }}>
+                  多把同型号 UKey 请逐把插入，点「刷新设备和 WiFi」后确认对应场站。没有序列号时显示的是本次插口特征，请固定插口使用，换口后重新选择；证书单位名称不能用来判断哪把实体 UKey。
+                </div>
                 {usbError && (
                   <Alert
                     type="warning"
@@ -771,13 +803,13 @@ export default function SettingsModal({
                         allowClear
                         value={station.deviceId}
                         placeholder={usbLoading ? '正在读取外部 USB' : '特征码：外部 USB / UKey，或粘贴'}
-                        options={usbDevices.map((device) => ({
-                          value: device.id,
-                          label: device.ukeyCandidate ? `${device.label} · UKey` : device.label
-                        }))}
-                        filterOption={(input, option) =>
-                          String(option?.label || option?.value || '').toLowerCase().includes(input.toLowerCase())
-                        }
+                        options={usbOptions}
+                        virtual={false}
+                        filterOption={(input, option) => {
+                          if (!option || !('searchText' in option)) return false
+                          return typeof option.searchText === 'string'
+                            && option.searchText.includes(input.toLowerCase())
+                        }}
                         onChange={(value) => {
                           const deviceId = String(value ?? '')
                           editStations((rows) => rows.map((row) => row.id === station.id ? { ...row, deviceId } : row))
@@ -1791,8 +1823,8 @@ export default function SettingsModal({
               </h3>
 
               <div style={{ fontSize: 13, color: '#888', marginBottom: 12 }}>
-                <div>广东电力数据采集系统</div>
-                <div>版本 v{version || '...'}</div>
+                <div>{releaseInfo?.productName || '广东电力数据采集系统'}</div>
+                <div>版本 v{version || '...'} · {releaseInfo?.channelLabel || '...'}</div>
               </div>
 
               <Space wrap>

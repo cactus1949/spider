@@ -67,12 +67,15 @@ class _Session:
         self._active_runner = None
 
     @asynccontextmanager
-    async def execution(self, _name, on_event=None):
+    async def execution(self, _name, on_event=None, *, hardware_lease=None):
+        from spider_gd.infrastructure.hardware_lease import hardware_operation
+
         def emit(event):
             if on_event:
                 on_event(event)
 
-        yield emit
+        with hardware_operation(hardware_lease):
+            yield emit
 
     async def check_auth(self, *_args, **_kwargs):
         return {"state": "authenticated"}
@@ -101,6 +104,9 @@ class _ScriptedRunner:
         reason = _ScriptedRunner.reasons.pop(0)
         self.failed = bool(reason)
         self.failure_reason = reason
+
+    async def dismiss_workbench_popups(self) -> int:
+        return 0
 
 
 def _runner(tmp_path: Path, **config) -> TaskRunner:

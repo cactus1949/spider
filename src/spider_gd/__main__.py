@@ -699,7 +699,7 @@ def _cmd_delivery_test(args: argparse.Namespace) -> int:
         else:
             ok = True
             receipt_path = None
-            reliable_hook = _build_reliable_delivery_hook(ctx)
+            reliable_hook = _build_reliable_delivery_hook(ctx, manual=True)
             task_id = (
                 args.task_id.strip()
                 or f"DELIVERY_TEST_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
@@ -1045,7 +1045,7 @@ def _cmd_delivery_acceptance(args: argparse.Namespace) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
-        reliable_hook = _build_reliable_delivery_hook(ctx)
+        reliable_hook = _build_reliable_delivery_hook(ctx, manual=True)
         summary = {
             "total": 1,
             "success": 1,
@@ -1181,7 +1181,7 @@ def _cmd_delivery_send(args: argparse.Namespace) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
-        reliable_hook = _build_reliable_delivery_hook(ctx)
+        reliable_hook = _build_reliable_delivery_hook(ctx, manual=True)
 
         async def _send() -> None:
             await reliable_hook(task_id, str(task_dir), str(file_path), summary)
@@ -1441,7 +1441,7 @@ def _cmd_wechat_webhook_stable_file(args: argparse.Namespace) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
 
-        reliable_hook = _build_reliable_delivery_hook(ctx)
+        reliable_hook = _build_reliable_delivery_hook(ctx, manual=True)
         summary = {
             "total": 1,
             "success": 1,
@@ -1602,7 +1602,7 @@ def _cmd_wechat_auto_stable(args: argparse.Namespace) -> int:
         if file_path is not None:
             task_id = args.task_id.strip() or _default_delivery_send_task_id(file_path)
             result["task_id"] = task_id
-            reliable_hook = _build_reliable_delivery_hook(ctx)
+            reliable_hook = _build_reliable_delivery_hook(ctx, manual=True)
             summary = {
                 "total": 1,
                 "success": 1,

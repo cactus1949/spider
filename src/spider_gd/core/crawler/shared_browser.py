@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 from loguru import logger
 
+from spider_gd.config.user_home import validate_write_path
+
 # 完整性级别 RID：Low=0x1000、Medium=0x2000（Mandatory Integrity Control）
 _IL_LOW = 0x1000
 _IL_MEDIUM = 0x2000
@@ -193,6 +195,12 @@ def _get_chrome_path() -> str | None:
 
 def default_profile_dir() -> Path:
     import os
+
+    from spider_gd.config.user_home import user_home
+    from spider_gd.release_channel import runtime_release
+
+    if runtime_release()["channel"] == "beta":
+        return user_home() / "browser-profiles" / "default"
     if sys.platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SpiderGD/browser-profiles/default"
     if sys.platform == "darwin":
@@ -331,6 +339,8 @@ class SharedBrowser:
         self._lifecycle_lock = asyncio.Lock()
         self._execution_lock = asyncio.Lock()
         self._config_path = config_path
+        if config_path is not None:
+            validate_write_path(config_path, "浏览器状态")
         self._config: dict[str, Any] = {
             "mode": "managed", "endpoint": "http://127.0.0.1:9222",
             "profile_dir": str(default_profile_dir()), "auth_policy": "reuse_only",
@@ -361,8 +371,10 @@ class SharedBrowser:
         if self._config_path is None:
             return
         import json
-        self._config_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._config_path.with_suffix(".tmp")
+        validate_write_path(self._config_path, "浏览器状态")
+        validate_write_path(temporary, "浏览器临时状态")
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps({"config": self._config, "run": self._run}, ensure_ascii=False), encoding="utf-8")
         temporary.replace(self._config_path)
 
@@ -377,6 +389,8 @@ class SharedBrowser:
         merged = {**self._config, **values}
         if merged["mode"] not in ("managed", "cdp", "authorized"):
             raise ValueError("不支持的浏览器连接方式")
+        if merged["mode"] == "managed":
+            validate_write_path(merged["profile_dir"], "浏览器 Profile")
         if merged["auth_policy"] not in ("reuse_only", "reuse_or_auto", "manual"):
             raise ValueError("不支持的登录策略")
         validate_local_endpoint(merged["endpoint"])
@@ -832,6 +846,10 @@ class SharedBrowser:
             if not chrome_path:
                 raise RuntimeError("找不到系统 Chrome 浏览器")
             profile = Path(self._config["profile_dir"]).expanduser().resolve()
+            validate_write_path(profile, "浏览器 Profile")
+            validate_write_path(profile / "chrome.log", "浏览器日志")
+            validate_write_path(profile / "spider-cdp-endpoint", "浏览器端点记录")
+            validate_write_path(self._download_root or profile / "downloads", "浏览器下载目录")
             profile.mkdir(parents=True, exist_ok=True)
             self._profile_dir = profile
             # 上次软件退出后 Chrome 可能仍在。先尝试其已登记端点，不抢占 Profile。
@@ -907,10 +925,13 @@ class SharedBrowser:
     def set_download_dir(self, directory: str) -> None:
         """同步应用设置的下载目录，已开始的下载继续保存到原路径。"""
         preferred = Path(directory).expanduser().resolve() if directory.strip() else None
+        if preferred is not None:
+            validate_write_path(preferred, "下载目录")
         if preferred == self._download_root:
             return
         if self._managed_download_dir is not None:
             destination = preferred or self._profile_dir / "downloads"
+            validate_write_path(destination, "浏览器下载目录")
             destination.mkdir(parents=True, exist_ok=True)
             self._managed_download_dir = destination
         self._download_root = preferred
@@ -948,6 +969,7 @@ class SharedBrowser:
             import uuid
             target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}{target.suffix}")
         try:
+            validate_write_path(target, "浏览器下载文件")
             await download.save_as(str(target))
             logger.info("专用浏览器下载已保存: {}（原始文件名: {}）", target, name)
         except Exception:
@@ -1119,46 +1141,50 @@ class SharedBrowser:
                 raise RuntimeError("用户取消登录检查")
 
     @contextlib.asynccontextmanager
-    async def execution(self, name: str, on_event=None):
+    async def execution(self, name: str, on_event=None, *, hardware_lease=None):
         import uuid
-        # 启动阶段与持有租约阶段分开；获取租约前再次检查以避免并发抢占。
+        from spider_gd.infrastructure.hardware_lease import hardware_operation
+
         if self._execution_lock.locked():
             raise RuntimeError("浏览器正被其他任务占用（包括已暂停任务）")
-        await self.ensure_connected()
-        async with self._lifecycle_lock:
-            if self._execution_lock.locked():
-                raise RuntimeError("浏览器正被其他任务占用")
-            if not self.is_running:
-                raise RuntimeError("浏览器连接已断开，请重新连接")
-            await self._execution_lock.acquire()
-        self._cancel_requested = False
-        self._resume_event.clear()
-        self._run = {"id": uuid.uuid4().hex, "name": name, "state": "running", "reason": "", "step": 0, "pause_version": 0}
-        self._event_sink = on_event
-        self._save()
-        try:
-            await self.list_pages()
-            # 必须已经选择。错误页在这里抛出加载失败说明，禁止新建隔离 Context 兜底。
-            _bound = self.page
-            del _bound
-            self.emit({"event": "run_started", "run_id": self._run["id"]})
-            self._warn_stale_tabs()
-            yield self.emit
-            if self._run["state"] == "running":
-                self._run["state"] = "succeeded"
-        except asyncio.CancelledError:
-            self._run.update(state="cancelled", reason="执行连接已中止")
-            raise
-        except Exception as exc:
-            self._run.update(state="failed", reason=str(exc))
-            raise
-        finally:
-            if self._cancel_requested:
-                self._run.update(state="cancelled", reason="用户取消")
-            self._active_runner = None
-            self._event_sink = None
-            self._save()
-            self._execution_lock.release()
+        with hardware_operation(hardware_lease):
+            await self.ensure_connected()
+            async with self._lifecycle_lock:
+                if self._execution_lock.locked():
+                    raise RuntimeError("浏览器正被其他任务占用")
+                if not self.is_running:
+                    raise RuntimeError("浏览器连接已断开，请重新连接")
+                await self._execution_lock.acquire()
+            self._cancel_requested = False
+            self._resume_event.clear()
+            self._run = {"id": uuid.uuid4().hex, "name": name, "state": "running", "reason": "", "step": 0, "pause_version": 0}
+            self._event_sink = on_event
+            try:
+                self._save()
+                await self.list_pages()
+                # 必须已经选择。错误页在这里抛出加载失败说明，禁止新建隔离 Context 兜底。
+                _bound = self.page
+                del _bound
+                self.emit({"event": "run_started", "run_id": self._run["id"]})
+                self._warn_stale_tabs()
+                yield self.emit
+                if self._run["state"] == "running":
+                    self._run["state"] = "succeeded"
+            except asyncio.CancelledError:
+                self._run.update(state="cancelled", reason="执行连接已中止")
+                raise
+            except Exception as exc:
+                self._run.update(state="failed", reason=str(exc))
+                raise
+            finally:
+                if self._cancel_requested:
+                    self._run.update(state="cancelled", reason="用户取消")
+                self._active_runner = None
+                self._event_sink = None
+                try:
+                    self._save()
+                finally:
+                    self._execution_lock.release()
 
     def _warn_stale_tabs(self) -> None:
         """执行前提示同域多标签页：旧文档的请求签名可能已失效。

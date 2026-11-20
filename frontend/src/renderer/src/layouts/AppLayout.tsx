@@ -18,6 +18,7 @@ import HealthIndicators from '../components/HealthIndicators'
 import SettingsModal from '../components/SettingsModal'
 import { App } from 'antd'
 import { api, settingsStore } from '../services/api'
+import type { ReleaseInfo } from '../../../preload/index.d'
 
 const { Sider, Header, Content } = Layout
 
@@ -40,7 +41,8 @@ export default function AppLayout(): JSX.Element {
   const location = useLocation()
   const [collapsed, setCollapsed] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [version, setVersion] = useState('')
+  const [releaseInfo, setReleaseInfo] = useState<ReleaseInfo | null>(null)
+  const version = releaseInfo?.version || ''
   const [currentWifi, setCurrentWifi] = useState('')
   const [wifiError, setWifiError] = useState('')
   const [wifiChecked, setWifiChecked] = useState(false)
@@ -48,7 +50,7 @@ export default function AppLayout(): JSX.Element {
   const { message } = App.useApp()
 
   useEffect(() => {
-    window.api.getVersion().then(setVersion)
+    window.api.getReleaseInfo().then(setReleaseInfo).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -449,6 +451,7 @@ export default function AppLayout(): JSX.Element {
       </Layout>
 
       <div className="app-version">
+        <Tag color={releaseInfo?.channel === 'beta' ? 'orange' : 'green'}>{releaseInfo?.channelLabel || '...'}</Tag>
         v{version || '...'}
       </div>
 

@@ -1,106 +1,132 @@
-; 安装、升级时强制盖掉旧程序。
-;
-; 用户数据在 %APPDATA%，安装目录里的 data、logs、tasks、workflows、
-; downloads、archives、.env 也不删除。这里只结束进程并替换程序文件。
-;
-; 三种常见失败都从这里绕开：
-; 1. 旧卸载程序删不掉文件、或卸载登记已损坏。不再运行它，避免安装被它中止。
-; 2. 窗口关掉后主程序仍在托盘，或 spider-gd-service.exe 还占着文件。
-; 3. 任务管理器里已经看不到界面进程，但文件仍被后端或只读属性占着。
+; Fail closed: identity is injected by applyInstallerIdentity for BOTH NSIS builds.
+!ifndef SPIDER_CHANNEL
+  !error "Missing SPIDER_CHANNEL"
+!endif
+!ifndef SPIDER_OWN_MAIN_EXE
+  !error "Missing SPIDER_OWN_MAIN_EXE"
+!endif
+!ifndef SPIDER_OTHER_MAIN_EXE
+  !error "Missing SPIDER_OTHER_MAIN_EXE"
+!endif
+!ifndef SPIDER_OWN_SERVICE_EXE
+  !error "Missing SPIDER_OWN_SERVICE_EXE"
+!endif
+!ifndef SPIDER_OTHER_SERVICE_EXE
+  !error "Missing SPIDER_OTHER_SERVICE_EXE"
+!endif
+!ifndef SPIDER_OWN_INSTALL_KEY
+  !error "Missing SPIDER_OWN_INSTALL_KEY"
+!endif
+!ifndef SPIDER_OTHER_INSTALL_KEY
+  !error "Missing SPIDER_OTHER_INSTALL_KEY"
+!endif
+!ifndef SPIDER_OWN_UNINSTALL_KEY
+  !error "Missing SPIDER_OWN_UNINSTALL_KEY"
+!endif
+!ifndef SPIDER_OTHER_UNINSTALL_KEY
+  !error "Missing SPIDER_OTHER_UNINSTALL_KEY"
+!endif
+!ifdef DELETE_APP_DATA_ON_UNINSTALL
+  !error "Installer isolation must preserve user data"
+!endif
+!ifdef UNINSTALL_REGISTRY_KEY_2
+  !error "Unverified legacy uninstall key is not supported"
+!endif
 
-!define SPIDER_STOP_ENCODED "JABFAHIAcgBvAHIAQQBjAHQAaQBvAG4AUAByAGUAZgBlAHIAZQBuAGMAZQAgAD0AIAAnAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAJwAKAEcAZQB0AC0AUAByAG8AYwBlAHMAcwAgAC0ATgBhAG0AZQAgACcAcwBwAGkAZABlAHIALQBnAGQALQBzAGUAcgB2AGkAYwBlACcAIAAtAEUAcgByAG8AcgBBAGMAdABpAG8AbgAgAFMAaQBsAGUAbgB0AGwAeQBDAG8AbgB0AGkAbgB1AGUAIAB8ACAAUwB0AG8AcAAtAFAAcgBvAGMAZQBzAHMAIAAtAEYAbwByAGMAZQAgAC0ARQByAHIAbwByAEEAYwB0AGkAbwBuACAAUwBpAGwAZQBuAHQAbAB5AEMAbwBuAHQAaQBuAHUAZQAKACQAZABpAHIAIAA9ACAAJABlAG4AdgA6AFMAUABJAEQARQBSAF8AUwBUAE8AUABfAEQASQBSAAoAJABzAGUAdAB1AHAAIAA9ACAAJABlAG4AdgA6AFMAUABJAEQARQBSAF8AUwBFAFQAVQBQAF8ARQBYAEUACgBpAGYAIAAoACQAZABpAHIAKQAgAHsAIAAkAGQAaQByACAAPQAgACQAZABpAHIALgBUAHIAaQBtAEUAbgBkACgAJwBcACcAKQAgAH0ACgBHAGUAdAAtAFAAcgBvAGMAZQBzAHMAIAB8ACAARgBvAHIARQBhAGMAaAAtAE8AYgBqAGUAYwB0ACAAewAKACAAIAAkAHAAYQB0AGgAIAA9ACAAJABuAHUAbABsAAoAIAAgAHQAcgB5ACAAewAgACQAcABhAHQAaAAgAD0AIABbAHMAdAByAGkAbgBnAF0AJABfAC4AUABhAHQAaAAgAH0AIABjAGEAdABjAGgAIAB7ACAAcgBlAHQAdQByAG4AIAB9AAoAIAAgAGkAZgAgACgALQBuAG8AdAAgACQAcABhAHQAaAApACAAewAgAHIAZQB0AHUAcgBuACAAfQAKACAAIAAkAG4AYQBtAGUAIAA9ACAAWwBzAHQAcgBpAG4AZwBdACQAXwAuAFAAcgBvAGMAZQBzAHMATgBhAG0AZQAKACAAIABpAGYAIAAoACQAcwBlAHQAdQBwACAALQBhAG4AZAAgACgAJABwAGEAdABoACAALQBlAHEAIAAkAHMAZQB0AHUAcAApACkAIAB7ACAAcgBlAHQAdQByAG4AIAB9AAoAIAAgAGkAZgAgACgAJABuAGEAbQBlACAALQBpAG4AIABAACgAJwBwAG8AdwBlAHIAcwBoAGUAbABsACcALAAnAHAAdwBzAGgAJwAsACcAYwBtAGQAJwAsACcAdABhAHMAawBrAGkAbABsACcALAAnAGMAbwBuAGgAbwBzAHQAJwApACkAIAB7ACAAcgBlAHQAdQByAG4AIAB9AAoAIAAgACQAaABpAHQAIAA9ACAAJABuAGEAbQBlACAALQBlAHEAIAAnAHMAcABpAGQAZQByAC0AZwBkAC0AcwBlAHIAdgBpAGMAZQAnAAoAIAAgAGkAZgAgACgAJABkAGkAcgAgAC0AYQBuAGQAIAAkAHAAYQB0AGgALgBTAHQAYQByAHQAcwBXAGkAdABoACgAJABkAGkAcgAgACsAIAAnAFwAJwAsACAAWwBTAHkAcwB0AGUAbQAuAFMAdAByAGkAbgBnAEMAbwBtAHAAYQByAGkAcwBvAG4AXQA6ADoATwByAGQAaQBuAGEAbABJAGcAbgBvAHIAZQBDAGEAcwBlACkAKQAgAHsAIAAkAGgAaQB0ACAAPQAgACQAdAByAHUAZQAgAH0ACgAgACAAaQBmACAAKAAkAGgAaQB0ACkAIAB7ACAAUwB0AG8AcAAtAFAAcgBvAGMAZQBzAHMAIAAtAEkAZAAgACQAXwAuAEkAZAAgAC0ARgBvAHIAYwBlACAALQBFAHIAcgBvAHIAQQBjAHQAaQBvAG4AIABTAGkAbABlAG4AdABsAHkAQwBvAG4AdABpAG4AdQBlACAAfQAKAH0ACgA="
+Var spiderGuardReady
 
-; 跳过“程序正在运行”提示。真正开始复制文件时才结束进程。
-; 放在向导一开始就杀，用户还没点安装就会被关掉。
-!macro customCheckAppRunning
-  !insertmacro spiderForceStop
-  !insertmacro spiderForgetBrokenUninstall
+!macro spiderFail MESSAGE
+  DetailPrint "${MESSAGE}"
+  SetErrorLevel 2
+  Quit
 !macroend
 
-; 始终装到当前用户目录，避免去提权。这台机器经常关着 UAC。
+!macro spiderSetEnv NAME VALUE
+  !define _envId ${__COUNTER__}
+  ; System::Call 的输出寄存器写法和 NSIS 变量名都区分大小写：
+  ;   .r8 → $8（小写变量），.R8 → $R8。写错时调用不报错但返回值为空，
+  ;   安装器会静默退出（exit 2）；写成 .s 从栈接收在旧版 System.dll 上还会崩溃。
+  System::Call 'Kernel32::SetEnvironmentVariable(t, t) i ("${NAME}", "${VALUE}").R8'
+  StrCmp $R8 "1" envOk_${_envId}
+  !insertmacro spiderFail "Cannot set installer guard environment: ${NAME}"
+  envOk_${_envId}:
+  !undef _envId
+!macroend
+
+!macro spiderRunGuard ACTION TARGET
+  !define _guardId ${__COUNTER__}
+  ; Silent uninstall reaches customCheckAppRunning before customUnInit.
+  StrCmp $spiderGuardReady "1" guardReady_${_guardId}
+  InitPluginsDir
+  ; Framework registry probes can leave Errors set when a key is absent.
+  ; Reset only BEFORE measuring this new operation, never after a failure.
+  ClearErrors
+  File /oname=$PLUGINSDIR\installer-guard.ps1 "${BUILD_RESOURCES_DIR}\installer-guard.ps1"
+  IfErrors 0 guardExtracted_${_guardId}
+  !insertmacro spiderFail "Cannot extract installer isolation guard"
+  guardExtracted_${_guardId}:
+  StrCpy $spiderGuardReady "1"
+  guardReady_${_guardId}:
+  !insertmacro spiderSetEnv "SPIDER_CHANNEL" "${SPIDER_CHANNEL}"
+  !insertmacro spiderSetEnv "SPIDER_OWN_MAIN_EXE" "${SPIDER_OWN_MAIN_EXE}"
+  !insertmacro spiderSetEnv "SPIDER_OTHER_MAIN_EXE" "${SPIDER_OTHER_MAIN_EXE}"
+  !insertmacro spiderSetEnv "SPIDER_OWN_SERVICE_EXE" "${SPIDER_OWN_SERVICE_EXE}"
+  !insertmacro spiderSetEnv "SPIDER_OTHER_SERVICE_EXE" "${SPIDER_OTHER_SERVICE_EXE}"
+  !insertmacro spiderSetEnv "SPIDER_OWN_INSTALL_KEY" "${SPIDER_OWN_INSTALL_KEY}"
+  !insertmacro spiderSetEnv "SPIDER_OTHER_INSTALL_KEY" "${SPIDER_OTHER_INSTALL_KEY}"
+  !insertmacro spiderSetEnv "SPIDER_OWN_UNINSTALL_KEY" "${SPIDER_OWN_UNINSTALL_KEY}"
+  !insertmacro spiderSetEnv "SPIDER_OTHER_UNINSTALL_KEY" "${SPIDER_OTHER_UNINSTALL_KEY}"
+  !insertmacro spiderSetEnv "SPIDER_UNINSTALL_FILENAME" "${UNINSTALL_FILENAME}"
+  !insertmacro spiderSetEnv "SPIDER_INSTALL_DIR" "$INSTDIR"
+  !insertmacro spiderSetEnv "SPIDER_GUARD_STATE" "$PLUGINSDIR\installer-guard-state.json"
+  ; 不直接把 $CMDLINE 传进 System::Call：真实命令行里带引号、中文路径时会
+  ; 破坏内联参数的字符串解析，变量设不上（guard 报 Missing guard arguments），
+  ; 安装器静默退出 2。--delete-app-data 已在编译期用 !error 拦死，运行时标志
+  ; 只剩纵深防御，可用固定串代替。
+  !insertmacro spiderSetEnv "SPIDER_GUARD_ARGUMENTS" "installer"
+  !insertmacro spiderSetEnv "SPIDER_GUARD_ACTION" "${ACTION}"
+  !insertmacro spiderSetEnv "SPIDER_CLEANUP_TARGET" "${TARGET}"
+  ; Dynamic paths/identity never become PowerShell source or command-line arguments.
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\installer-guard.ps1"'
+  Pop $R8
+  StrCmp $R8 "0" guardOk_${_guardId}
+  !insertmacro spiderFail "Installer isolation guard ${ACTION} failed ($R8); nothing further will run"
+  guardOk_${_guardId}:
+  !undef _guardId
+!macroend
+
+!macro customHeader
+  ; Defaults from common.nsh/multiUser.nsh now exist; validate both framework builds.
+  !if "${APP_EXECUTABLE_FILENAME}" != "${SPIDER_OWN_MAIN_EXE}"
+    !error "Framework executable identity mismatch"
+  !endif
+  !if "${INSTALL_REGISTRY_KEY}" != "${SPIDER_OWN_INSTALL_KEY}"
+    !error "Framework install registry identity mismatch"
+  !endif
+  !if "${UNINSTALL_REGISTRY_KEY}" != "${SPIDER_OWN_UNINSTALL_KEY}"
+    !error "Framework uninstall registry identity mismatch"
+  !endif
+  !ifndef BUILD_UNINSTALLER
+    ; customHeader precedes the framework's default section, even in assisted inner instances.
+    Section "-spiderIsolation"
+      SectionIn RO
+      !insertmacro spiderRunGuard "Check" ""
+      !insertmacro spiderRunGuard "Stop" ""
+      !insertmacro spiderRunGuard "Forget" ""
+      !insertmacro spiderRemoveProgramFiles
+    SectionEnd
+  !endif
+!macroend
+
+; Read-only validation here; never kill or forget while the user is still choosing.
+!macro customCheckAppRunning
+  !insertmacro spiderRunGuard "Check" ""
+!macroend
+
+; Preserve the existing current-user install policy without changing permissions.
 !macro customInstallMode
   StrCpy $isForceCurrentInstall "1"
   StrCpy $isForceMachineInstall "0"
-!macroend
-
-!macro spiderStopByDir DIR
-  !define _stopId ${__COUNTER__}
-  StrCmp "${DIR}" "" stopSkip_${_stopId}
-  System::Call 'Kernel32::SetEnvironmentVariable(t "SPIDER_STOP_DIR", t "${DIR}")'
-  System::Call 'Kernel32::SetEnvironmentVariable(t "SPIDER_SETUP_EXE", t "$EXEPATH")'
-  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "${SPIDER_STOP_ENCODED}"'
-  Pop $R8
-  stopSkip_${_stopId}:
-  !undef _stopId
-!macroend
-
-!macro spiderForceStop
-  DetailPrint "正在结束残留的采集程序和后端…"
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /T /IM "spider-gd-service.exe"'
-  Pop $R8
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
-  Pop $R8
-  ReadRegStr $R9 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
-  !insertmacro spiderStopByDir "$R9"
-  ReadRegStr $R9 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
-  !insertmacro spiderStopByDir "$R9"
-  !insertmacro spiderStopByDir "$INSTDIR"
-  Sleep 800
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /T /IM "spider-gd-service.exe"'
-  Pop $R8
-  nsExec::ExecToLog '"$SYSDIR\taskkill.exe" /F /T /IM "${APP_EXECUTABLE_FILENAME}"'
-  Pop $R8
-  ClearErrors
-!macroend
-
-; 旧卸载程序一旦返回失败，安装器会重试五次后直接退出。
-; 先摘掉卸载命令，让它找不到旧卸载程序，后面改为覆盖程序文件。
-!macro spiderForgetBrokenUninstall
-  SetRegView 64
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  DeleteRegValue HKLM "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue HKLM "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  SetRegView 32
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue HKCU "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  DeleteRegValue HKLM "${UNINSTALL_REGISTRY_KEY}" UninstallString
-  DeleteRegValue HKLM "${UNINSTALL_REGISTRY_KEY}" QuietUninstallString
-  SetRegView 64
-  ClearErrors
-!macroend
-
-!macro spiderTryReplace FILE
-  !define _repId ${__COUNTER__}
-  IfFileExists "${FILE}" 0 repSkip_${_repId}
-  nsExec::ExecToLog '"$SYSDIR\attrib.exe" -R "${FILE}"'
-  Pop $R8
-  ClearErrors
-  Delete "${FILE}"
-  IfErrors 0 repSkip_${_repId}
-  ClearErrors
-  Delete "${FILE}.old"
-  ClearErrors
-  Rename "${FILE}" "${FILE}.old"
-  ClearErrors
-  repSkip_${_repId}:
-  !undef _repId
-!macroend
-
-!macro spiderUnlockDir DIR
-  !define _unlockId ${__COUNTER__}
-  StrCmp "${DIR}" "" unlockSkip_${_unlockId}
-  IfFileExists "${DIR}\${APP_EXECUTABLE_FILENAME}" unlockDo_${_unlockId} 0
-  IfFileExists "${DIR}\resources\app.asar" unlockDo_${_unlockId} 0
-  IfFileExists "${DIR}\resources\backend\spider-gd-service.exe" unlockDo_${_unlockId} unlockSkip_${_unlockId}
-  unlockDo_${_unlockId}:
-  !insertmacro spiderTryReplace "${DIR}\${APP_EXECUTABLE_FILENAME}"
-  !insertmacro spiderTryReplace "${DIR}\${UNINSTALL_FILENAME}"
-  !insertmacro spiderTryReplace "${DIR}\resources\app.asar"
-  !insertmacro spiderTryReplace "${DIR}\resources\backend\spider-gd-service.exe"
-  unlockSkip_${_unlockId}:
-  ClearErrors
-  !undef _unlockId
 !macroend
 
 !macro customInit
@@ -111,38 +137,68 @@
   !insertmacro setInstallModePerUser
 !macroend
 
-; 旧卸载失败、或根本没跑起来时，安装器原逻辑会退出。这里改成继续覆盖。
+!macro customUnInit
+  !insertmacro spiderRunGuard "Check" ""
+!macroend
+
+; Forget must make legacy uninstall unreachable. Never suppress a framework failure.
 !macro customUnInstallCheck
-  ${if} $R0 != 0
-    DetailPrint "旧版本卸载返回 $R0，改为强制覆盖程序文件。"
-  ${endif}
+  !define _uncheckId ${__COUNTER__}
+  ; 安装流程会先 Check/Stop/Forget 再清程序文件：旧卸载器可能已被 Forget 摘掉
+  ; UninstallString（框架 copy 失败会置错误标志），因此这里不能把“继承的错误标志”
+  ; 当成卸载失败——只看真实卸载退出码 $R0。升级 beta.1 -> beta.2 时曾因此 exit=2。
   ClearErrors
-  !insertmacro spiderForceStop
-  !insertmacro spiderUnlockDir "$INSTDIR"
-  ReadRegStr $R9 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
-  !insertmacro spiderUnlockDir "$R9"
-  ReadRegStr $R9 HKLM "${INSTALL_REGISTRY_KEY}" InstallLocation
-  !insertmacro spiderUnlockDir "$R9"
-  ; 旧安装可能留下上一版 Chromium。先删掉整个浏览器目录，后面只放入当前版本。
-  RMDir /r "$INSTDIR\resources\backend\playwright_browsers"
-  ClearErrors
+  StrCmp $R0 "0" uncheckOk_${_uncheckId}
+  !insertmacro spiderFail "Unexpected legacy uninstall failure; refusing to overwrite"
+  uncheckOk_${_uncheckId}:
+  !undef _uncheckId
 !macroend
 
 !macro customUnInstallCheckCurrentUser
   !insertmacro customUnInstallCheck
 !macroend
 
-; 替换默认的整目录删除。程序文件删掉，用户数据目录留下。
-!macro customRemoveFiles
-  !insertmacro spiderForceStop
-  !insertmacro spiderUnlockDir "$INSTDIR"
-  RMDir /r "$INSTDIR\resources"
-  RMDir /r "$INSTDIR\locales"
-  Delete "$INSTDIR\*.dll"
-  Delete "$INSTDIR\*.pak"
-  Delete "$INSTDIR\*.bin"
-  Delete "$INSTDIR\icudtl.dat"
-  Delete "$INSTDIR\LICENSE*"
-  Delete "$INSTDIR\vk_swiftshader*"
+!macro spiderRemoveTree RELATIVE
+  !define _treeId ${__COUNTER__}
+  !insertmacro spiderRunGuard "CheckCleanup" "${RELATIVE}"
+  IfFileExists "$INSTDIR\${RELATIVE}\*.*" 0 treeOk_${_treeId}
   ClearErrors
+  RMDir /r "$INSTDIR\${RELATIVE}"
+  IfErrors 0 treeOk_${_treeId}
+  !insertmacro spiderFail "Cannot remove checked program directory; refusing to continue"
+  treeOk_${_treeId}:
+  !undef _treeId
+!macroend
+
+!macro spiderRemoveFile RELATIVE
+  !define _fileId ${__COUNTER__}
+  !insertmacro spiderRunGuard "CheckCleanup" "${RELATIVE}"
+  IfFileExists "$INSTDIR\${RELATIVE}" 0 fileOk_${_fileId}
+  ClearErrors
+  Delete "$INSTDIR\${RELATIVE}"
+  IfErrors 0 fileOk_${_fileId}
+  !insertmacro spiderFail "Cannot remove checked program file; refusing to continue"
+  fileOk_${_fileId}:
+  !undef _fileId
+!macroend
+
+; Only program files. Never remove the root, userData, data/logs/tasks/workflows/
+; downloads/archives/.env. No attrib, rename fallback, reboot deletion or permission repair.
+!macro spiderRemoveProgramFiles
+  !insertmacro spiderRemoveTree "resources"
+  !insertmacro spiderRemoveTree "locales"
+  !insertmacro spiderRemoveFile "${SPIDER_OWN_MAIN_EXE}"
+  !insertmacro spiderRemoveFile "${UNINSTALL_FILENAME}"
+  !insertmacro spiderRemoveFile "*.dll"
+  !insertmacro spiderRemoveFile "*.pak"
+  !insertmacro spiderRemoveFile "*.bin"
+  !insertmacro spiderRemoveFile "icudtl.dat"
+  !insertmacro spiderRemoveFile "LICENSE*"
+  !insertmacro spiderRemoveFile "vk_swiftshader*"
+!macroend
+
+!macro customRemoveFiles
+  !insertmacro spiderRunGuard "Check" ""
+  !insertmacro spiderRunGuard "Stop" ""
+  !insertmacro spiderRemoveProgramFiles
 !macroend

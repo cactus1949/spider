@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from spider_gd.config.user_home import validate_write_path
 from spider_gd.infrastructure.proc import ensure_text
 
 
@@ -218,6 +219,8 @@ class DesktopWechatSender:
                 error_msg="绑定模式目前只支持 Windows 微信客户端",
             )
 
+        profile_file = Path(profile_path).expanduser().resolve()
+        validate_write_path(profile_file, "微信绑定文件")
         env = os.environ.copy()
         options = DesktopWechatOptions(target=target, app_name=app_name)
         env.update(
@@ -265,7 +268,6 @@ class DesktopWechatSender:
                 error_msg=f"绑定脚本返回 JSON 解析失败: {exc}",
             )
         record["bound_at"] = datetime.now().isoformat(timespec="seconds")
-        profile_file = Path(profile_path).expanduser().resolve()
         profile_file.parent.mkdir(parents=True, exist_ok=True)
         profile = _load_wechat_profile(profile_file)
         targets = profile.setdefault("targets", {})

@@ -14,7 +14,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "build:win": "electron-vite build && electron-builder --win",
+    "build:win": "node build-win.mjs",
+    "build:win:beta": "node build-win.mjs --channel beta",
     "release": "bash ../release.sh"
   },
   "dependencies": {

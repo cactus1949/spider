@@ -531,6 +531,73 @@ async def test_run_upload_zips_folder_and_skips_connected_wifi(tmp_path: Path) -
     assert b"inside.txt" in body
 
 
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+@pytest.mark.parametrize("frozen", [False, True])
+@respx.mock
+async def test_imported_auto_upload_runs_only_in_stable(tmp_path, monkeypatch, channel, frozen):
+    import sys
+
+    from spider_gd import build_stamp
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable" if frozen else channel)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    store = TaskStateStore(tmp_path / "spider.db")
+    try:
+        save_profiles(store, [_profile_payload()])
+        store.save_task_config({
+            "id": "imported", "name": "采集", "indicators": ["spot"],
+            "upload_profile_id": "up_test", "auto_upload": True,
+        })
+        config = store.get_task_config("imported")
+        saved_profiles = store.get_setting(SETTINGS_KEY)
+        download = tmp_path / "downloads"
+        download.mkdir()
+        target = download / "out.txt"
+        target.write_bytes(b"sample")
+        wifi = FakeWifi("trading")
+        route = respx.post("https://example.test/upload").mock(
+            return_value=httpx.Response(200, json={"code": 200}),
+        )
+        events: list[dict] = []
+        offer = await maybe_upload_after_run(
+            store, profile_id=config["upload_profile_id"], auto_upload=config["auto_upload"],
+            exec_id="", download_dir=str(download), before={}, wifi=wifi,
+            retry_delay_sec=0, on_event=events.append,
+        )
+        assert offer is not None
+        assert offer["paths"] == [str(target)]
+        assert store.get_task_config("imported")["auto_upload"] is True
+        assert store.get_setting(SETTINGS_KEY) == saved_profiles
+        if channel == "beta":
+            assert offer["auto"] is False, "测试版不能按导入配置自动上传"
+            assert offer["ok"] is None
+            assert offer["message"] == "等待手动上传"
+            assert wifi.calls == []
+            assert route.call_count == 0
+            assert [event["event"] for event in events] == ["upload_offer", "upload_settled"]
+            from spider_gd.gateway.data_upload_flow import upload_selected_paths
+            from spider_gd.gateway.upload_profiles import get_profile
+
+            result = await upload_selected_paths(
+                store, get_profile(store, "up_test"), offer["paths"], wifi=wifi,
+                retry_delay_sec=0,
+            )
+            assert result.ok is True
+            assert [call.ssid for call in wifi.calls] == ["office", "trading"]
+            assert route.call_count == 1
+        else:
+            assert offer["auto"] is True
+            assert offer["ok"] is True
+            assert [call.ssid for call in wifi.calls] == ["office", "trading"]
+            assert route.call_count == 1
+    finally:
+        store.close()
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_maybe_upload_after_run_manual_offer_and_auto_retry(tmp_path: Path) -> None:

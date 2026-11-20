@@ -264,7 +264,7 @@ class CertificateWatch:
             self._thread.join(self._timeout if timeout is None else timeout)
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(1)
+            self._thread.join()
         if self.result is not None:
             return self.result
         return CertDialogResult(False, "", absent=True)

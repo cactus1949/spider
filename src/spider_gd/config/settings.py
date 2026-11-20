@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from spider_gd.config.deploy_mode import DeployMode, ModuleToggle
 from spider_gd.interfaces.crawler import EndpointConfig
+from spider_gd.release_channel import runtime_release
 
 
 class PlatformSettings(BaseSettings):
@@ -117,7 +118,7 @@ class WebSettings(BaseSettings):
     """REST 控制接口 / Web UI 监听配置（走公网网卡）。"""
 
     host: str = "127.0.0.1"
-    port: int = 8800
+    port: int = Field(default_factory=lambda: runtime_release()["preferredPort"])
     enable_mcp: bool = True  # 挂载 MCP server（streamable-http），供 OpenClaw 调用
 
 
@@ -200,7 +201,17 @@ def load_config(config_path: str | Path) -> AppSettings:
 
     prepare_user_home(Path.cwd())
     raw = _load_yaml(Path(config_path))
-    return rebase_user_paths(AppSettings(**raw))
+    env_options: dict[str, Any] = {}
+    if runtime_release()["channel"] == "beta":
+        encoding = "utf-8-sig"
+        env_path = Path.cwd() / ".env"
+        if env_path.is_file():
+            try:
+                env_path.read_text(encoding=encoding)
+            except UnicodeDecodeError:
+                encoding = "gbk"
+        env_options["_env_file_encoding"] = encoding
+    return rebase_user_paths(AppSettings(**raw, **env_options))
 
 
 def load_endpoints(path: str | Path) -> list[EndpointConfig]:

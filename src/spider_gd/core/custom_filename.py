@@ -11,6 +11,8 @@ import re
 from datetime import date
 from pathlib import Path
 
+from spider_gd.config.user_home import validate_write_path
+
 __all__ = [
     "EXAMPLE_DATE",
     "PLACEHOLDERS",
@@ -264,8 +266,11 @@ def overwrite_file(source: str | Path, dest: str | Path) -> None:
         >>> overwrite_file.__name__
         'overwrite_file'
     """
-    source_path = Path(source)
-    dest_path = Path(dest)
+    source_path = validate_write_path(source, "覆盖文件临时来源")
+    dest_path = validate_write_path(dest, "覆盖文件输出")
+    # replace 会消费来源、替换目标目录条目，而不只是写入链接指向的文件。
+    validate_write_path(source_path.parent, "覆盖文件临时来源目录")
+    validate_write_path(dest_path.parent, "覆盖文件输出目录")
     leaf = dest_path.name
     if leaf in {"", ".", ".."} or leaf != Path(leaf).name or "/" in leaf or "\\" in leaf:
         raise ValueError("文件名不能包含路径")

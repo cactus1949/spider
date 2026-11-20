@@ -1,4 +1,5 @@
 import type { DesktopApi } from './index'
+export type { ReleaseInfo } from '../../release-channel.mjs'
 
 export interface ElectronAPI extends DesktopApi {
   getDataDir(): Promise<string>

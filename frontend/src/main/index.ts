@@ -1,9 +1,12 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
-import path, { join } from 'path'
+import { join } from 'path'
 import { createTray, destroyTray } from './tray'
 import { registerFileIpc } from './files'
 import { startUpdater, manualCheck } from './updater'
-import { startBackend, stopBackend, currentBackendBase, whenBackendPort } from './backend'
+import { startBackend, stopBackend, currentBackendBase, currentBackendDataDir, whenBackendPort } from './backend'
+import { configureAppIdentity } from '../../release-channel.mjs'
+import { getReleaseInfo, releaseIdentity } from './release'
+import { registerVersionCenter } from './versionCenter'
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
@@ -16,7 +19,7 @@ function createWindow(): BrowserWindow {
     minHeight: 640,
     show: false,
     autoHideMenuBar: true,
-    title: '广东电力数据采集',
+    title: `${releaseIdentity.productName} · ${releaseIdentity.channelLabel}`,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -26,6 +29,7 @@ function createWindow(): BrowserWindow {
   })
 
   win.on('ready-to-show', () => win.show())
+  win.on('page-title-updated', (event) => event.preventDefault())
 
   // 关闭按钮 → 隐藏到托盘，不退出
   win.on('close', (e) => {
@@ -65,6 +69,7 @@ function showMainWindow(): void {
 }
 
 // 单实例锁：二次启动聚焦已有窗口
+configureAppIdentity(app, releaseIdentity)
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
@@ -74,10 +79,11 @@ if (!gotLock) {
   app.whenReady().then(() => {
     if (process.platform === 'win32') {
       // Windows 桌面通知需要稳定的 AppUserModelId 才能正常归属到本应用。
-      app.setAppUserModelId('com.spider-gd.desktop')
+      app.setAppUserModelId(releaseIdentity.aumid)
     }
     mainWindow = createWindow()
     registerFileIpc()
+    registerVersionCenter()
 
     // 启动采集后端服务
     startBackend(mainWindow)
@@ -94,20 +100,13 @@ if (!gotLock) {
       }
     })
 
-    ipcMain.handle('app:get-version', () => app.getVersion())
+    ipcMain.handle('app:get-version', () => getReleaseInfo().version)
+    ipcMain.handle('app:get-release-info', getReleaseInfo)
     ipcMain.handle('backend:get-base', async () => {
       await whenBackendPort()
       return currentBackendBase()
     })
-    ipcMain.handle('app:get-data-dir', () => {
-      // 开发模式：app.getAppPath() 指向 frontend/ 根
-      // 打包模式：app.getAppPath() 指向 app.asar 内
-      const isDev = !app.isPackaged
-      if (isDev) {
-        return path.resolve(app.getAppPath(), '../data')
-      }
-      return path.resolve(process.resourcesPath, '../../data')
-    })
+    ipcMain.handle('app:get-data-dir', currentBackendDataDir)
     ipcMain.handle('window:raise', () => {
       showMainWindow()
       return true

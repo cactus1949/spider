@@ -285,17 +285,23 @@ export default function Files(): JSX.Element {
       const stored = settings.downloadDir || ''
       setSettingsReady(true)
       if (stored) { setRoot(stored); setCwd(stored) }
-    }).catch(() => {
-      if (alive) setSettingsReady(true)
+    }).catch((error: unknown) => {
+      if (alive) message.error(`设置加载失败，未初始化下载目录：${String(error)}`)
     })
     return () => { alive = false }
   }, [])
   useEffect(() => {
     if (!settingsReady || root) return
-    window.api.getDataDir().then((dir) => {
-      if (dir) { setRoot(dir); setCwd(dir); void settingsStore.save({ downloadDir: dir }) }
+    let alive = true
+    window.api.getDataDir().then(async (dir) => {
+      if (!alive || !dir) return
+      await settingsStore.save({ downloadDir: dir })
+      if (alive) { setRoot(dir); setCwd(dir) }
+    }).catch((error: unknown) => {
+      if (alive) message.error(`下载目录初始化失败：${String(error)}`)
     })
-  }, [settingsReady, root])
+    return () => { alive = false }
+  }, [settingsReady, root, message])
   useEffect(() => { if (root && !cwd) setCwd(root) }, [root, cwd])
 
   const syncRoot = useCallback(() => {

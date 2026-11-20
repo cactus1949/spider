@@ -22,6 +22,28 @@ from spider_gd.config.settings import AppSettings, DeliverySettings
 from spider_gd.infrastructure.storage.database import TaskStateStore
 
 
+@pytest.fixture(autouse=True)
+def _isolated_delivery_environment(tmp_path, monkeypatch):
+    from spider_gd.config.delivery_env import DELIVERY_ENV_KEYS
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable")
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    for key in (*DELIVERY_ENV_KEYS, "SPIDER_GD_DELIVERY_ENV_FILE", "SPIDER_BROWSER_CONFIG"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def _assert_hardware_owned():
+    from spider_gd.infrastructure.hardware_lease import HardwareLease
+
+    contender = HardwareLease.try_acquire()
+    if contender is not None:
+        contender.close()
+    assert contender is None, "sender ran without shared hardware ownership"
+
+
 class _StateSettings:
     def __init__(self, values: dict[str, str] | None = None) -> None:
         self.values = values or {}
@@ -830,7 +852,7 @@ async def test_delivery_hook_sends_desktop_wechat_message_and_file(
 ):
     calls: list[dict[str, object]] = []
 
-    async def fake_send(settings, *, message, file_path=None, dry_run=False):
+    async def fake_send(settings, *, message, file_path=None, dry_run=False, hardware_lease=None):
         calls.append({
             "target": settings.desktop_wechat_target,
             "message": message,
@@ -863,6 +885,182 @@ async def test_delivery_hook_sends_desktop_wechat_message_and_file(
         "dry_run": False,
     }]
     assert "T_DESKTOP" in str(calls[0]["message"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", ["success", "rejected", "exception"])
+async def test_native_desktop_delivery_hook_preserves_sender_outcome(
+    tmp_path, monkeypatch, outcome
+):
+    from spider_gd.gateway.delivery.desktop_wechat import DesktopWechatResult, DesktopWechatSender
+
+    calls = []
+    worker_error = ValueError("native sender failed")
+
+    def send(_sender, options):
+        _assert_hardware_owned()
+        calls.append(options)
+        if outcome == "exception":
+            raise worker_error
+        return DesktopWechatResult(
+            ok=outcome == "success",
+            dry_run=False,
+            platform="fixture",
+            error_msg="native sender rejected" if outcome == "rejected" else "",
+        )
+
+    monkeypatch.setattr(DesktopWechatSender, "send", send)
+    settings = AppSettings(
+        delivery=DeliverySettings(
+            enabled=True,
+            backend="desktop_wechat",
+            desktop_wechat_target="文件传输助手",
+            send_message=True,
+            send_file=True,
+        )
+    )
+    hook = _build_delivery_hook(SimpleNamespace(settings=settings))
+    assert hook is not None
+    zip_path = tmp_path / "result.zip"
+    zip_path.write_bytes(b"123456")
+    summary = {"total": 1, "success": 1, "failed": 0}
+    if outcome == "exception":
+        with pytest.raises(ValueError, match="native sender failed") as raised:
+            await hook("T_DESKTOP_NATIVE", str(tmp_path), str(zip_path), summary)
+        assert raised.value is worker_error
+    elif outcome == "rejected":
+        with pytest.raises(RuntimeError, match="native sender rejected"):
+            await hook("T_DESKTOP_NATIVE", str(tmp_path), str(zip_path), summary)
+    else:
+        assert await hook("T_DESKTOP_NATIVE", str(tmp_path), str(zip_path), summary) is None
+    assert len(calls) == 1
+    assert calls[0].target == "文件传输助手"
+    assert Path(calls[0].file_path) == zip_path
+    assert calls[0].dry_run is False
+    assert "T_DESKTOP_NATIVE" in calls[0].message
+    from spider_gd.infrastructure.hardware_lease import hardware_operation
+
+    with hardware_operation():
+        pass
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entrypoint", ["test", "hook", "manual-retry", "stable-auto-retry"])
+@pytest.mark.parametrize("busy", [False, True])
+async def test_independent_desktop_delivery_acquires_or_refuses_shared_hardware(
+    tmp_path, monkeypatch, entrypoint, busy
+):
+    from contextlib import nullcontext
+
+    from spider_gd.app import _delivery_retry_job, send_delivery_test_message
+    from spider_gd.gateway.delivery.desktop_wechat import DesktopWechatResult, DesktopWechatSender
+    from spider_gd.infrastructure.hardware_lease import HardwareBusyError, hardware_operation
+
+    calls = []
+
+    def send(_sender, options):
+        _assert_hardware_owned()
+        calls.append(options)
+        return DesktopWechatResult(ok=True, dry_run=False, platform="fixture")
+
+    monkeypatch.setattr(DesktopWechatSender, "send", send)
+    settings = AppSettings(delivery=DeliverySettings(
+        enabled=True, backend="desktop_wechat", desktop_wechat_target="fixture-target",
+        send_file=True, send_message=True,
+    ))
+    settings.storage.data_dir = str(tmp_path / "data")
+    store = TaskStateStore(tmp_path / "delivery.db")
+    ctx = SimpleNamespace(settings=settings, state_store=store)
+    sample = tmp_path / "sample.zip"
+    sample.write_bytes(b"safe")
+    if "retry" in entrypoint:
+        store.enqueue_delivery_outbox(
+            task_id="INDEPENDENT", task_dir=str(tmp_path), zip_path=str(sample),
+            summary={"total": 1, "success": 1, "failed": 0}, error_msg="pending",
+        )
+        if entrypoint == "stable-auto-retry":
+            store.mark_delivery_outbox_failed("INDEPENDENT", "retryable", status="failed")
+
+    async def invoke():
+        if entrypoint == "test":
+            return await send_delivery_test_message(ctx)
+        if entrypoint == "hook":
+            return await _build_delivery_hook(ctx)(
+                "INDEPENDENT", str(tmp_path), str(sample),
+                {"total": 1, "success": 1, "failed": 0},
+            )
+        if entrypoint == "manual-retry":
+            return await retry_pending_deliveries(ctx)
+        return await _delivery_retry_job(ctx)({})
+
+    try:
+        with hardware_operation() if busy else nullcontext():
+            if busy and entrypoint in {"test", "hook"}:
+                with pytest.raises(HardwareBusyError):
+                    await invoke()
+            else:
+                result = await invoke()
+                if entrypoint == "test":
+                    assert result is True
+                elif entrypoint == "manual-retry":
+                    assert result["sent"] == (0 if busy else 1)
+                    assert result["failed"] == (1 if busy else 0)
+            assert len(calls) == (0 if busy else 1)
+            if "retry" in entrypoint:
+                item = store.get_delivery_outbox("INDEPENDENT")
+                assert item["status"] == ("pending" if busy else "sent")
+                if busy:
+                    assert "共享硬件" in item["last_error"]
+        with hardware_operation():
+            pass
+    finally:
+        store.close()
+
+
+@pytest.mark.unit
+async def test_task_desktop_delivery_borrows_owner_through_both_hooks(tmp_path, monkeypatch):
+    from spider_gd.app import deliver_task_runner_downloads
+    from spider_gd.gateway.delivery.desktop_wechat import DesktopWechatResult, DesktopWechatSender
+    from spider_gd.infrastructure.hardware_lease import hardware_operation
+
+    calls = []
+
+    def send(_sender, options):
+        _assert_hardware_owned()
+        calls.append(options)
+        return DesktopWechatResult(ok=True, dry_run=False, platform="fixture")
+
+    monkeypatch.setattr(DesktopWechatSender, "send", send)
+    settings = AppSettings(delivery=DeliverySettings(
+        enabled=True, backend="desktop_wechat", desktop_wechat_target="fixture-target",
+    ))
+    settings.storage.data_dir = str(tmp_path / "data")
+    store = TaskStateStore(tmp_path / "delivery.db")
+    ctx = SimpleNamespace(settings=settings, state_store=store)
+    download = tmp_path / "downloads"
+    download.mkdir()
+    (download / "result.txt").write_bytes(b"safe")
+    try:
+        with hardware_operation() as owner:
+            archive = await deliver_task_runner_downloads(
+                ctx, exec_id="BORROWED", task_config_id="task", task_name="task",
+                download_dir=download, before={}, hardware_lease=owner,
+            )
+            assert len(calls) == 1
+            assert calls[0].target == "fixture-target"
+            assert calls[0].file_path == archive
+            assert store.get_delivery_outbox("BORROWED")["status"] == "sent"
+            with zipfile.ZipFile(archive) as zipped:
+                assert zipped.namelist() == ["result.txt"]
+                assert zipped.read("result.txt") == b"safe"
+            _assert_hardware_owned()
+            # Borrowers must neither close nor replace the caller's real lease.
+            with hardware_operation(owner):
+                pass
+        with hardware_operation():
+            pass
+    finally:
+        store.close()
 
 
 @pytest.mark.unit
@@ -1653,6 +1851,68 @@ async def test_retry_pending_deliveries_reports_missing_env_file(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+@pytest.mark.parametrize("frozen", [False, True])
+@respx.mock
+def test_startup_retries_delivery_only_in_stable(tmp_path, monkeypatch, channel, frozen):
+    import sys
+
+    from spider_gd import app as app_module
+    from spider_gd import build_stamp
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable" if frozen else channel)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=startup-test"
+    db_path = tmp_path / "spider.db"
+    store = TaskStateStore(db_path)
+    settings = AppSettings(delivery=DeliverySettings(
+        enabled=True, wecom_webhook=webhook, send_file=False,
+        retry_attempts=1, retry_delay_sec=0,
+    ))
+    settings.storage.data_dir = str(tmp_path / "data")
+    settings.modules.scheduler = False
+    settings.modules.web_ui = False
+    sample = tmp_path / "result.zip"
+    sample.write_bytes(b"sample")
+    store.enqueue_delivery_outbox(
+        task_id="STARTUP", task_dir=str(tmp_path), zip_path=str(sample),
+        summary={"total": 1, "success": 1, "failed": 0}, error_msg="network down",
+    )
+    store.mark_delivery_outbox_failed("STARTUP", "network down", status="failed")
+    original = store.get_delivery_outbox("STARTUP")
+    send = respx.post(webhook).mock(return_value=httpx.Response(200, json={"errcode": 0}))
+
+    class StartupReachedError(RuntimeError):
+        pass
+
+    class Scheduler:
+        async def start(self):
+            raise StartupReachedError
+
+    ctx = SimpleNamespace(settings=settings, state_store=store, scheduler=Scheduler())
+    monkeypatch.setattr(app_module, "assemble", lambda _settings: ctx)
+    with pytest.raises(StartupReachedError):
+        app_module.run_app(settings)
+
+    reopened = TaskStateStore(db_path)
+    try:
+        item = reopened.get_delivery_outbox("STARTUP")
+        if channel == "beta":
+            assert item == original, "测试版启动不能重排或补发导入的待发送记录"
+            assert send.call_count == 0
+            assert not (tmp_path / "data" / "_stable_delivery").exists()
+        else:
+            assert item["status"] == "sent"
+            assert send.call_count == 1
+    finally:
+        reopened.close()
+
+
+@pytest.mark.unit
 @respx.mock
 async def test_retry_pending_deliveries_marks_sent(tmp_path):
     webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc"
@@ -1853,6 +2113,52 @@ async def test_retry_pending_deliveries_serializes_concurrent_runs(tmp_path):
     assert first["sent"] + second["sent"] == 1
     assert route.call_count == 1
     assert summary["sent"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+@pytest.mark.parametrize("frozen", [False, True])
+@respx.mock
+async def test_collected_files_auto_deliver_only_in_stable(tmp_path, monkeypatch, channel, frozen):
+    import sys
+
+    from spider_gd import build_stamp
+    from spider_gd.app import deliver_task_runner_downloads
+
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable" if frozen else channel)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=collected-test"
+    store = TaskStateStore(tmp_path / "spider.db")
+    settings = AppSettings(delivery=DeliverySettings(
+        enabled=True, wecom_webhook=webhook, send_file=False,
+        retry_attempts=1, retry_delay_sec=0,
+    ))
+    settings.storage.data_dir = str(tmp_path / "data")
+    download = tmp_path / "downloads"
+    download.mkdir()
+    (download / "out.xlsx").write_bytes(b"collected")
+    send = respx.post(webhook).mock(return_value=httpx.Response(200, json={"errcode": 0}))
+    try:
+        archive = await deliver_task_runner_downloads(
+            SimpleNamespace(settings=settings, state_store=store), exec_id="COLLECTED",
+            task_config_id="imported", task_name="采集", download_dir=download, before={},
+        )
+        assert archive is not None
+        with zipfile.ZipFile(archive) as zipped:
+            assert zipped.namelist() == ["out.xlsx"]
+        if channel == "beta":
+            assert send.call_count == 0, "测试版采集后不能自动发送产物"
+            assert store.list_delivery_outbox() == []
+            assert not (tmp_path / "data" / "_stable_delivery").exists()
+        else:
+            assert send.call_count == 1
+            assert store.get_delivery_outbox("COLLECTED")["status"] == "sent"
+    finally:
+        store.close()
 
 
 @pytest.mark.unit

@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 if TYPE_CHECKING:
     from spider_gd.gateway.control_service import ControlService
 
+from spider_gd.config.user_home import validate_write_path
 from spider_gd.core.station_picker import StationPickError, pick_station
 from spider_gd.core.station_profile import (
     mask_station_profiles,
@@ -443,6 +444,22 @@ def create_app(
 
     app = FastAPI(title="spider-gd 控制接口", version=__version__, lifespan=lifespan)
 
+    def _export_temp_path(name: str) -> Path:
+        import tempfile
+
+        from spider_gd.config.user_home import user_home
+        from spider_gd.release_channel import runtime_release
+
+        if runtime_release()["channel"] == "beta":
+            root = user_home() / ".exports"
+            validate_write_path(root, "导出暂存目录")
+            root.mkdir(parents=True, exist_ok=True)
+        else:
+            root = Path(tempfile.gettempdir())
+        path = root / name
+        validate_write_path(path, "导出暂存文件")
+        return path
+
     def _sync_browser_download_dir() -> None:
         from spider_gd.core.crawler.shared_browser import get_shared_browser
 
@@ -551,6 +568,10 @@ def create_app(
         from pathlib import Path as _Path
 
         log_dir = _Path(service._ctx.settings.log.file_dir).resolve()
+        try:
+            validate_write_path(log_dir, "日志目录")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         log_dir.mkdir(parents=True, exist_ok=True)  # 确保存在
         return {"path": str(log_dir)}
 
@@ -828,7 +849,6 @@ def create_app(
     async def export_all_workflows() -> Any:
         """导出全部工作流为 ZIP（每个工作流一个 .yml 文件）。"""
         import zipfile as _zipfile
-        import tempfile as _tmp
         import json as _json
         from fastapi.responses import FileResponse
         from starlette.background import BackgroundTask
@@ -837,7 +857,9 @@ def create_app(
         if not configs and not service._ctx.state_store.list_workflow_groups():
             raise HTTPException(status_code=404, detail="没有可导出的工作流")
 
-        tmp_zip = Path(_tmp.gettempdir()) / f"workflows_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        tmp_zip = _export_temp_path(
+            f"workflows_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+        )
         with _zipfile.ZipFile(str(tmp_zip), "w", _zipfile.ZIP_DEFLATED) as zf:
             manifest = {"version": 1, "groups": service._ctx.state_store.list_workflow_groups(), "workflows": []}
             for index, cfg in enumerate(configs):
@@ -1283,6 +1305,10 @@ def create_app(
             or str(service._ctx.state_store.get_setting("downloadDir") or "")
             or str(service._ctx.settings.storage.data_dir)
         )
+        try:
+            validate_write_path(dl_dir, "工作流下载目录")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         Path(dl_dir).mkdir(parents=True, exist_ok=True)
         
         # 接管会话复用已有 Context，不再用 storage_state 重建浏览器上下文。
@@ -1513,7 +1539,6 @@ def create_app(
         """导出全部任务配置为 ZIP（每个任务一个 .json 文件）。"""
         import json as _json
         import zipfile as _zipfile
-        import tempfile as _tmp
         from fastapi.responses import FileResponse
         from starlette.background import BackgroundTask
 
@@ -1521,7 +1546,9 @@ def create_app(
         if not configs:
             raise HTTPException(status_code=404, detail="没有可导出的任务配置")
 
-        tmp_zip = Path(_tmp.gettempdir()) / f"tasks_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        tmp_zip = _export_temp_path(
+            f"tasks_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+        )
         with _zipfile.ZipFile(str(tmp_zip), "w", _zipfile.ZIP_DEFLATED) as zf:
             for cfg in configs:
                 filename = f"{cfg['id']}.json"
@@ -1709,7 +1736,10 @@ def create_app(
     @app.put("/api/task-configs/{config_id}")
     async def save_task_config(config_id: str, body: dict[str, Any]) -> dict[str, Any]:
         body["id"] = config_id
-        service._ctx.state_store.save_task_config(body)
+        try:
+            service._ctx.state_store.save_task_config(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # 自动刷新调度。界面一次保存会把每条任务都 PUT 一遍，调度没变就跳过。
         try:
@@ -1751,7 +1781,11 @@ def create_app(
                 raise ValueError("YAML 必须是字典")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"YAML 语法错误: {e}")
-        path = _task_file(name)
+        try:
+            path = _task_file(name)
+            validate_write_path(path, "任务文件")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         logger.info("任务已保存: {}", path)
@@ -1766,7 +1800,31 @@ def create_app(
         return {"status": "ok"}
 
     async def run_task_stream(name: str, cert_password: str = "", account: str = "", account_password: str = "", download_dir: str = "", headless: str = "false", minimized: str = "false", reference_date: str = "", prepared: dict | None = None):
-        """SSE 流式执行任务（登录 + 多个指标）。"""
+        from spider_gd.infrastructure.hardware_lease import HardwareLease
+
+        hardware_lease = HardwareLease.try_acquire()
+        if hardware_lease is None:
+            raise HTTPException(
+                status_code=409,
+                detail="另一个安装或任务正在使用共享硬件（证书、浏览器或网络），请稍后重试",
+            )
+        producer = None
+        try:
+            response, producer = await _prepare_task_stream(
+                name, cert_password, account, account_password, download_dir,
+                headless, minimized, reference_date, prepared,
+                hardware_lease=hardware_lease,
+            )
+            return response
+        finally:
+            if producer is None:
+                hardware_lease.close()
+
+    async def _prepare_task_stream(
+        name, cert_password, account, account_password, download_dir,
+        headless, minimized, reference_date, prepared, *, hardware_lease,
+    ):
+        """SSE 流式执行任务；预检租约成功后交给已启动的生产任务。"""
         import asyncio as _asyncio
         import sys as _sys
         import uuid as _uuid
@@ -1927,8 +1985,11 @@ def create_app(
                 return f"📌 {evt}: {json.dumps({k: v for k, v in data.items() if k != 'event'}, ensure_ascii=False)}"
 
         from spider_gd.app import ensure_dual_nic_ready, network_preflight_label
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
 
-        net_ok, net_message, net_details = ensure_dual_nic_ready(service._ctx)
+        net_ok, net_message, net_details = await run_hardware_blocking(
+            ensure_dual_nic_ready, service._ctx,
+        )
         net_label = network_preflight_label(net_message, net_details)
         try:
             service._ctx.state_store.append_execution_log_detail(exec_id, f"🌐 {net_label}: {net_message}")
@@ -1966,7 +2027,7 @@ def create_app(
                     "Connection": "keep-alive",
                     "X-Accel-Buffering": "no",
                 },
-            )
+            ), None
 
         from spider_gd.core.output_paths import choose_download_root
 
@@ -2014,7 +2075,6 @@ def create_app(
             )
             # 结构配置优先；不让我旧的 path_folders 再叠加一层。
             cfg["path_folders"] = []
-            Path(dl_dir).mkdir(parents=True, exist_ok=True)
         else:
             template = str(cfg.get("path_template") or "").strip()
             if template:
@@ -2026,10 +2086,13 @@ def create_app(
                     ))
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=f"任务存储路径配置错误: {exc}") from exc
-                Path(dl_dir).mkdir(parents=True, exist_ok=True)
             else:
                 dl_dir = base_dir
-                Path(dl_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            validate_write_path(dl_dir, "任务下载目录")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        Path(dl_dir).mkdir(parents=True, exist_ok=True)
         from spider_gd.app import _snapshot_download_files
         if structure_issues:
             for line in structure_issues:
@@ -2080,7 +2143,7 @@ def create_app(
                     return None
                 return [item.id for item in picked]
 
-            ukey_plan = await _asyncio.to_thread(
+            ukey_plan = await run_hardware_blocking(
                 collect_runtime_plan,
                 saved_profiles,
                 selected_ids=selected_ids,
@@ -2215,23 +2278,23 @@ def create_app(
             return cont_result[0]
 
         async def _execute_and_finalize():
-            from spider_gd.core.ukey_plan import acquire_ukey_run, release_ukey_run
-            hold_ukey = bool(station_queue)
-            if hold_ukey and not acquire_ukey_run():
-                reason = "另一个任务正在使用证书或网络"
-                _on_event({"event": "task_error", "error": reason})
-                service._ctx.state_store.update_execution_log(
-                    exec_id, status="failed", reason=reason,
-                    updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-                return
             try:
-                await runner.run(on_event=_on_event, wait_continue=_wait_continue)
+                await _run_and_finalize()
+            finally:
+                try:
+                    _continue_events.pop(name, None)
+                finally:
+                    hardware_lease.close()
+
+        async def _run_and_finalize():
+            try:
+                await runner.run(
+                    on_event=_on_event, wait_continue=_wait_continue,
+                    hardware_lease=hardware_lease,
+                )
             except Exception as exc:
                 _on_event({"event": "task_error", "error": str(exc)})
             finally:
-                if hold_ukey:
-                    release_ukey_run()
                 final_status = _log_final_status[0]
                 reason = _log_final_status[1] if len(_log_final_status) > 1 else ""
                 try:
@@ -2246,6 +2309,7 @@ def create_app(
                         before=download_snapshot,
                         task_status=final_status,
                         reason=reason,
+                        hardware_lease=hardware_lease,
                     )
                     if zip_path:
                         service._ctx.state_store.append_execution_log_detail(
@@ -2275,6 +2339,7 @@ def create_app(
                         before=download_snapshot,
                         interface_name=str(service._ctx.state_store.get_setting("wifiInterfaceName") or ""),
                         on_event=_emit_upload,
+                        hardware_lease=hardware_lease,
                     )
                 except Exception as upload_exc:
                     service._ctx.state_store.append_execution_log_detail(
@@ -2285,12 +2350,8 @@ def create_app(
                 service._ctx.state_store.update_execution_log(
                     exec_id, status=final_status, reason=reason, updated_at=now_ts2,
                 )
-                _continue_events.pop(name, None)
 
         async def _event_generator():
-            task = _asyncio.create_task(_execute_and_finalize())
-            _browser_background_tasks.add(task)
-            task.add_done_callback(_browser_background_tasks.discard)
             terminal_events = {"task_done", "task_error", "aborted"}
             seen_terminal = False
 
@@ -2321,11 +2382,15 @@ def create_app(
             while not event_queue.empty():
                 yield _render(event_queue.get_nowait())
 
-        return StreamingResponse(
+        response = StreamingResponse(
             _event_generator(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
+        task = _asyncio.create_task(_execute_and_finalize())
+        _browser_background_tasks.add(task)
+        task.add_done_callback(_browser_background_tasks.discard)
+        return response, task
 
     # ---- 执行日志 API ----
 
@@ -2523,6 +2588,7 @@ def create_app(
         data_dir = Path(service._ctx.settings.storage.data_dir)
         dl_dir = Path(download_dir) if download_dir else data_dir
         log_dir = dl_dir / "执行日志"
+        validate_write_path(log_dir, "执行日志输出目录")
         log_dir.mkdir(parents=True, exist_ok=True)
         safe_name = re.sub(r"[^\w\-.]", "_", log.name)[:64]
         filename = f"{safe_name}_{log.exec_id[:12]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
@@ -2620,7 +2686,10 @@ def create_app(
         kv = filter_settings_update(kv)
         if not kv:
             return {"status": "ok", "settings": {}}
-        service._ctx.state_store.save_settings(kv)
+        try:
+            service._ctx.state_store.save_settings(kv)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         stored = service._ctx.state_store.get_all_settings()
         if "downloadDir" in kv:
             _sync_browser_download_dir()
@@ -2707,6 +2776,7 @@ def create_app(
             data_dir = Path(service._ctx.settings.storage.data_dir)
             dl_dir = Path(req.download_dir) if req.download_dir else data_dir
             out_dir = dl_dir / "诊断包"
+            validate_write_path(out_dir, "UKey 诊断输出目录")
             out_dir.mkdir(parents=True, exist_ok=True)
             filename = f"ukey_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
             zip_path = out_dir / filename
@@ -2807,8 +2877,10 @@ def create_app(
             verify_delivery_receipt,
         )
 
+        send = payload.get("send", False)
+        if not isinstance(send, bool):
+            raise HTTPException(status_code=400, detail="send 必须为 JSON 布尔值")
         file_path = str(payload.get("filePath", "")).strip()
-        send = bool(payload.get("send", False))
         sample_zip = bool(payload.get("sampleZip", False))
         download_remote = bool(payload.get("downloadRemote", False))
         verify = bool(payload.get("verify", False)) or download_remote
@@ -2857,7 +2929,7 @@ def create_app(
             try:
                 if file_path:
                     path = Path(file_path).expanduser().resolve()
-                    reliable_hook = _build_reliable_delivery_hook(service._ctx)
+                    reliable_hook = _build_reliable_delivery_hook(service._ctx, manual=True)
                     task_id = f"DELIVERY_UI_TEST_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
                     plan["task_id"] = task_id
                     await reliable_hook(
@@ -3139,6 +3211,10 @@ def create_app(
 
         description = str(payload.get("description", ""))
         export_dir = _workshop_export_dir(download_dir)
+        try:
+            validate_write_path(export_dir, "工作流构建输出目录")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         export_dir.mkdir(parents=True, exist_ok=True)
 
         safe_name = re.sub(r"[^\w\-.]", "_", name)[:64] or "workflow"
@@ -3373,13 +3449,24 @@ def create_app(
     async def test_wifi_connection() -> dict[str, Any]:
         """按当前设置尝试连接目标 WiFi。"""
         from spider_gd.app import prepare_wifi_connection
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
 
-        ok, message, details = prepare_wifi_connection(service._ctx)
-        return {
-            "ok": ok,
-            "message": message,
-            "details": details,
-        }
+        try:
+            with hardware_operation():
+                ok, message, details = await run_hardware_blocking(
+                    prepare_wifi_connection, service._ctx
+                )
+                return {
+                    "ok": ok,
+                    "message": message,
+                    "details": details,
+                }
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/api/network/wifi/current")
     async def get_current_wifi() -> dict[str, str]:
@@ -3423,47 +3510,59 @@ def create_app(
     @app.post("/api/network/route-rules/apply")
     async def apply_route_rules() -> dict[str, Any]:
         """应用路由规则到系统：专网动态 DNS → /32 路由 → 专网/公网验证。"""
-        from spider_gd.infrastructure.network import DualNicClosure
         from spider_gd.app import prepare_wifi_connection
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
+        from spider_gd.infrastructure.network import DualNicClosure
 
-        wifi_ok, wifi_message, wifi_details = prepare_wifi_connection(service._ctx)
-        if not wifi_ok:
-            return {
-                "status": "error",
-                "applied": 0,
-                "message": wifi_message,
-                "details": wifi_details,
-                "results": [],
-            }
-        rules = service._ctx.state_store.list_route_rules()
-        cache_dir = Path(service._ctx.settings.storage.data_dir) / "network" / "dns_cache"
-        closure = DualNicClosure(cache_dir=cache_dir)
-        report = closure.apply_rules(rules)
-        details = [*wifi_details, *report.details]
-        message = f"{wifi_message}；{report.message}" if wifi_details else report.message
-        return {
-            "status": report.status,
-            "applied": report.applied,
-            "message": message,
-            "details": details,
-            "results": [
-                {
-                    "domain": item.domain,
-                    "interface_name": item.interface_name,
-                    "status": item.status,
-                    "expected_ssid": item.expected_ssid,
-                    "current_ssid": item.current_ssid,
-                    "resolved_ips": item.resolved_ips,
-                    "stale_ips": item.stale_ips,
-                    "gateway": item.gateway,
-                    "private_ok": item.private_ok,
-                    "public_ok": item.public_ok,
-                    "routes_ok": item.routes_ok,
-                    "error": item.error,
+        def _apply_rules():
+            wifi_ok, wifi_message, wifi_details = prepare_wifi_connection(service._ctx)
+            if not wifi_ok:
+                return {
+                    "status": "error",
+                    "applied": 0,
+                    "message": wifi_message,
+                    "details": wifi_details,
+                    "results": [],
                 }
-                for item in report.results
-            ],
-        }
+            rules = service._ctx.state_store.list_route_rules()
+            cache_dir = Path(service._ctx.settings.storage.data_dir) / "network" / "dns_cache"
+            closure = DualNicClosure(cache_dir=cache_dir)
+            report = closure.apply_rules(rules)
+            details = [*wifi_details, *report.details]
+            message = f"{wifi_message}；{report.message}" if wifi_details else report.message
+            return {
+                "status": report.status,
+                "applied": report.applied,
+                "message": message,
+                "details": details,
+                "results": [
+                    {
+                        "domain": item.domain,
+                        "interface_name": item.interface_name,
+                        "status": item.status,
+                        "expected_ssid": item.expected_ssid,
+                        "current_ssid": item.current_ssid,
+                        "resolved_ips": item.resolved_ips,
+                        "stale_ips": item.stale_ips,
+                        "gateway": item.gateway,
+                        "private_ok": item.private_ok,
+                        "public_ok": item.public_ok,
+                        "routes_ok": item.routes_ok,
+                        "error": item.error,
+                    }
+                    for item in report.results
+                ],
+            }
+
+        try:
+            with hardware_operation():
+                return await run_hardware_blocking(_apply_rules)
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # ---- 数据管理：导出 / 导入 / 恢复出厂设置 ----
 
@@ -3579,6 +3678,7 @@ def create_app(
                         from spider_gd.config.user_home import user_workflows_dir
 
                         wf_path = user_workflows_dir(create=True) / f"{name}.yml"
+                        validate_write_path(wf_path, "工作流文件")
                         wf_path.parent.mkdir(parents=True, exist_ok=True)
                         wf_path.write_text(content, "utf-8")
                         imported_count += 1
@@ -3743,16 +3843,19 @@ def create_app(
     async def test_upload_wifi(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         """测试切换到配置里的 WiFi，已连接则直接提示，否则切过去再切回。"""
         from spider_gd.gateway.data_upload_flow import run_test_wifi
+        from spider_gd.infrastructure.hardware_lease import HardwareBusyError, run_hardware_blocking
 
         interface_name = str(service._ctx.state_store.get_setting("wifiInterfaceName") or "")
         try:
-            return await asyncio.to_thread(
+            return await run_hardware_blocking(
                 run_test_wifi,
                 service._ctx.state_store,
                 payload,
                 None,
                 interface_name,
             )
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

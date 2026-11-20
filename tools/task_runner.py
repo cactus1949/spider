@@ -28,6 +28,7 @@ _WORKFLOWS_DIR = _TOOLS_DIR.parent / "workflows"
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
+from spider_gd.config.user_home import validate_write_path
 from spider_gd.core.dates import (
     apply_date_profile,
     day_loop_output_keys,
@@ -671,7 +672,7 @@ class TaskRunner:
         self._download_root = download_dir
         self._unattended = bool(task_config.get("_unattended"))
         self._skipped_stations = list(task_config.get("_skipped_stations") or [])
-        self._station_results: list[dict[str, str]] = []
+        self._station_results: list[dict[str, object]] = []
         self._station_report_sent = False
         self._active_station_name = ""
         self.headless = headless
@@ -773,20 +774,24 @@ class TaskRunner:
     def _indicator_output_dir(self, indicator_name: str) -> str:
         """指标级目录；有显式 indicator_dirs 时优先用它。"""
         if self.indicator_dirs:
-            target = Path(self.indicator_dirs.get(indicator_name, self.download_dir))
+            target = validate_write_path(
+                self.indicator_dirs.get(indicator_name, self.download_dir), "指标输出目录",
+            )
             target.mkdir(parents=True, exist_ok=True)
             return str(target)
 
         folder_path = self.indicator_folders.get(indicator_name, "").strip()
         if not folder_path:
+            validate_write_path(self.download_dir, "指标输出目录")
             return self.download_dir
         from spider_gd.core.output_paths import sanitize_segment
 
         parts = [sanitize_segment(part) for part in folder_path.split("/")]
         parts = [part for part in parts if part]
         if not parts:
+            validate_write_path(self.download_dir, "指标输出目录")
             return self.download_dir
-        target = Path(self.download_dir).joinpath(*parts)
+        target = validate_write_path(Path(self.download_dir).joinpath(*parts), "指标输出目录")
         target.mkdir(parents=True, exist_ok=True)
         return str(target)
 
@@ -797,8 +802,10 @@ class TaskRunner:
             _re.fullmatch(r"\d{4}-\d{2}-\d{2}", download_dir.name)
             and _re.fullmatch(r"\d{4}-\d{2}", download_dir.parent.name)
         ):
-            return download_dir.parent.parent / "storage_state.json"
-        return download_dir / "storage_state.json"
+            return validate_write_path(
+                download_dir.parent.parent / "storage_state.json", "任务登录状态文件",
+            )
+        return validate_write_path(download_dir / "storage_state.json", "任务登录状态文件")
 
     def _load_wf_cfg(self, wf_id: str) -> dict | None:
         if self._workflow_loader:
@@ -812,10 +819,13 @@ class TaskRunner:
             return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return None
 
-    async def run(self, on_event=None, wait_continue=None, *, session=None):
+    async def run(self, on_event=None, wait_continue=None, *, session=None, hardware_lease=None):
         from spider_gd.core.crawler.shared_browser import get_shared_browser
         session = session or get_shared_browser()
-        async with session.execution(self.config.get("_control_name", self.name), on_event) as emit:
+        async with session.execution(
+            self.config.get("_control_name", self.name), on_event,
+            hardware_lease=hardware_lease,
+        ) as emit:
             self._shared_session = session
             base_emit = emit
 
@@ -895,13 +905,29 @@ class TaskRunner:
                 for station_index, station in enumerate(stations):
                     user_cancelled = bool(self._stopped or session._cancel_requested)
                     if user_cancelled:
+                        self._station_results.extend(
+                            {"name": item.get("name", ""), "status": "skipped",
+                             "reason": "任务已停止（用户取消）"}
+                            for item in stations[station_index:] if isinstance(item, dict)
+                        )
+                        self._failure_reason = "用户取消"
                         break
                     self._failed = False
+                    self._failure_reason = ""
+                    self._summary = {"success": 0, "failed": 0, "skipped": 0}
+                    pending_runs = runs
+                    self._had_error = False
+                    if not self._terminal_sent:
+                        self._task_error_emitted = False
                     self._gateway_reset_used = False
                     step_idx = 0
                     if isinstance(station, dict):
                         prepared = await self._use_station(station, station_index, len(stations))
                         if prepared == "stop":
+                            self._close_station(
+                                station, station_index, len(stations), _emit,
+                                failed=False,
+                            )
                             break
                         if prepared == "skip":
                             continue
@@ -949,6 +975,13 @@ class TaskRunner:
                                   name=self.login_name, status="done", message="复用当前业务登录态")
                         await self._dismiss_workbench_popups()
                         if self._failed or self._stopped or session._cancel_requested:
+                            if self._stopped or session._cancel_requested:
+                                self._emit_skipped_download_plans(pending_runs, _emit)
+                                self._mark_plan_skipped(
+                            pending_runs, _emit, "任务已停止（用户取消）",
+                        )
+                                for key in self._summary:
+                                    self._rolled[key] += self._summary[key]
                             if self._close_station(
                                 station, station_index, len(stations), _emit,
                                 failed=bool(self._failed), count_failure=bool(self._failed),
@@ -966,6 +999,7 @@ class TaskRunner:
                             continue
                     self._summary = {"success": 0, "failed": 0, "skipped": 0}
                     for index, item in enumerate(runs):
+                        pending_runs = runs[index:]
                         if self._stopped or session._cancel_requested or self._failed:
                             self._emit_skipped_download_plans(runs[index:], _emit)
                             self._mark_plan_skipped(runs[index:], _emit, "任务已停止")
@@ -1003,6 +1037,9 @@ class TaskRunner:
                         step_idx += 1
                         outcome = await self._run_with_retries(item, step_idx, total_steps, _emit, keys)
                         if outcome == "fatal":
+                            if self._stopped or session._cancel_requested:
+                                self._emit_skipped_download_plans(runs[index + 1:], _emit)
+                                self._mark_plan_skipped(runs[index + 1:], _emit, "用户取消")
                             break
                     for key in self._rolled:
                         self._rolled[key] += self._summary[key]
@@ -1020,12 +1057,22 @@ class TaskRunner:
                     else:
                         self._emit_terminal(_emit)
             except Exception as exc:
-                self._defer_terminal = False
-                self._record_failure(str(exc))
-                if not self._terminal_sent:
-                    _emit("task_error", error=str(exc))
-                    self._task_error_emitted = True
-                    self._terminal_sent = True
+                if self._stopped or session._cancel_requested:
+                    self._stopped = True
+                    self._emit_skipped_download_plans(pending_runs, _emit)
+                    self._mark_plan_skipped(pending_runs, _emit, "用户取消")
+                    for key in self._rolled:
+                        self._rolled[key] += self._summary[key]
+                    self._close_station(
+                        station, station_index, len(stations), _emit, failed=False,
+                    )
+                else:
+                    self._defer_terminal = False
+                    self._record_failure(str(exc))
+                    if not self._terminal_sent:
+                        _emit("task_error", error=str(exc))
+                        self._task_error_emitted = True
+                        self._terminal_sent = True
             finally:
                 with contextlib.suppress(Exception):
                     self._emit_station_report(_emit)
@@ -1065,7 +1112,16 @@ class TaskRunner:
             _emit("task_summary", **self._summary, message=message)
         if isinstance(station, dict):
             if user_cancelled:
-                self._station_results.append({"name": name, "status": "skipped", "reason": "已停止"})
+                self._station_results.append({
+                    "name": name, "status": "cancelled",
+                    "reason": "用户取消，已完成项保留",
+                    "counts": dict(self._summary),
+                })
+                self._station_results.extend(
+                    {"name": item.get("name", ""), "status": "skipped",
+                     "reason": "任务已停止（用户取消）"}
+                    for item in self._station_queue[index + 1:]
+                )
             elif failed:
                 self._station_results.append({
                     "name": name,
@@ -1077,8 +1133,9 @@ class TaskRunner:
             else:
                 self._station_results.append({"name": name, "status": "ran", "reason": ""})
         if action == "stop":
+            self._failure_reason = "用户取消"
             self._defer_terminal = False
-            if not self._task_error_emitted:
+            if not self._terminal_sent:
                 _emit("task_error", error=self._failure_reason or "用户中止")
                 self._task_error_emitted = True
             self._terminal_sent = True
@@ -1108,11 +1165,13 @@ class TaskRunner:
         self._defer_terminal = False
         self._emit_station_report(_emit)
         ran = any(row.get("status") == "ran" for row in self._station_results)
+        cancelled = any(row.get("status") == "cancelled" for row in self._station_results)
         unfinished = station_failed or any(
-            row.get("status") in {"failed", "skipped"} for row in self._station_results
+            row.get("status") in {"failed", "skipped", "cancelled"}
+            for row in self._station_results
         )
-        if not ran and unfinished:
-            _emit("task_error", error=self._failure_reason or "没有场站执行成功")
+        if cancelled or (not ran and unfinished):
+            _emit("task_error", error="用户取消" if cancelled else self._failure_reason or "没有场站执行成功")
             self._terminal_sent = True
             self._task_error_emitted = True
             return
@@ -1178,7 +1237,9 @@ class TaskRunner:
         if name and total > 1:
             from spider_gd.core.output_paths import sanitize_segment, station_scoped_path
 
-            target = Path(self._download_root) / sanitize_segment(name)
+            target = validate_write_path(
+                Path(self._download_root) / sanitize_segment(name), "场站下载目录",
+            )
             target.mkdir(parents=True, exist_ok=True)
             self.download_dir = str(target)
             if not hasattr(self, "_output_dirs_base"):
@@ -1212,8 +1273,7 @@ class TaskRunner:
         """连已保存的热点。无人值守超时就跳过；有人时可以重试、跳过或停止。"""
         import time
 
-        import asyncio
-
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
         from spider_gd.infrastructure.network.wifi_connector import WifiConnectOptions, WifiConnector
         from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid, wifi_wait_budget
 
@@ -1231,7 +1291,7 @@ class TaskRunner:
                 "ok": False,
                 "message": "扫描",
             })
-            result = await asyncio.to_thread(
+            result = await run_hardware_blocking(
                 wait_for_saved_ssid,
                 ssid,
                 visible=lambda: [item.ssid for item in connector.list_networks()],
@@ -1251,7 +1311,6 @@ class TaskRunner:
             })
             if result.status == "cancelled":
                 self._stopped = True
-                self._station_results.append({"name": name, "status": "skipped", "reason": "已停止"})
                 return "stop"
             if result.ok:
                 return "ok"
@@ -1275,9 +1334,6 @@ class TaskRunner:
                 return "skip"
             if not continued:
                 self._stopped = True
-                self._station_results.append({
-                    "name": name, "status": "skipped", "reason": "已停止",
-                })
                 return "stop"
             pauses += 1
         self._station_results.append({
@@ -1658,6 +1714,9 @@ class TaskRunner:
         try:
             await runner._execute_steps(self._on_event, self._wait_continue, shared=True)
         finally:
+            if (getattr(runner, "_stopped", False)
+                    or (self._shared_session and self._shared_session._cancel_requested)):
+                self._stopped = True
             if self._shared_session is not None:
                 self._context.remove_listener("page", runner._on_new_page)
                 self._shared_session._active_runner = self
@@ -1739,6 +1798,7 @@ class TaskRunner:
 
     async def _save_storage_state(self) -> None:
         try:
+            validate_write_path(self._storage_state_path, "任务登录状态文件")
             self._storage_state_path.parent.mkdir(parents=True, exist_ok=True)
             await self._context.storage_state(path=str(self._storage_state_path))
             logger.info("  已保存登录状态: {}", self._storage_state_path)
@@ -2017,6 +2077,9 @@ class TaskRunner:
                 query_month=item.get("query_month"),
                 output_dates=item.get("output_dates"),
             )
+            if self._stopped or (self._shared_session and self._shared_session._cancel_requested):
+                self._mark_plan_skipped([item], _emit, "用户取消")
+                return "fatal"
             if not failed:
                 self._summary["success"] += 1
                 self._mark_slots(keys, "success")

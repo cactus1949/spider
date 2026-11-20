@@ -4,6 +4,7 @@
     python build_backend.py                 # 编译。会先用当前解释器安装 .[online,win]
     python build_backend.py --with-browsers # 编译 + 打包 Playwright Chromium
     python build_backend.py --allow-arm64   # 仅当目标机器也是 Windows ARM64 时使用
+    python build_backend.py --channel beta --beta-number 1 --with-browsers
 
 注意：
     PyInstaller 不能跨平台编译。在 macOS 上编译的输出只能在 macOS 运行。
@@ -18,6 +19,7 @@
     python -m pip install pyinstaller
 """
 
+import argparse
 import ast
 import contextlib
 import importlib
@@ -38,6 +40,10 @@ SRC = ROOT / "src"
 PACKAGE = SRC / "spider_gd"
 BUILD = ROOT / "build" / "pyinstaller"
 
+# 直接运行构建脚本时也优先使用仓库源码，与原冻结包路径保持一致。
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 # 平台相关
 IS_WIN = sys.platform == "win32"
 EXE_SUFFIX = ".exe" if IS_WIN else ""
@@ -48,7 +54,6 @@ DATA_FILES: list[tuple[str, str]] = [
     (str(ROOT / "configs"), "configs"),
     (str(ROOT / "workflows"), "workflows"),
     (str(ROOT / "tools"), "tools"),
-    (str(ROOT / "VERSION"), "."),
 ]
 
 # 动态 import 的模块（PyInstaller 静态分析不到）
@@ -124,7 +129,15 @@ WMI_HIDDEN_IMPORTS = [
     "win32api",
     "win32timezone",
 ]
-_WMI_PROBE = "import wmi, win32com.client, pythoncom, pywintypes"
+_WMI_PROBE = """import pythoncom
+pythoncom.CoInitialize()
+try:
+    import wmi
+    import win32com.client
+    import pywintypes
+finally:
+    pythoncom.CoUninitialize()
+"""
 _ARM64_MACHINES = {"arm64", "aarch64"}
 
 
@@ -536,14 +549,19 @@ def current_build_id() -> str:
     return rev
 
 
-def install_build_stamp(build_id: str) -> str:
+def install_build_stamp(build_id: str, *, release: dict[str, object] | None = None) -> str:
     """把构建身份写进将被冻结的源码，并返回原来的文件内容。"""
+    from spider_gd.release_channel import build_release
+
+    release = release or build_release((ROOT / 'VERSION').read_text(encoding='utf-8').strip())
     path = PACKAGE / "build_stamp.py"
     original = path.read_text(encoding="utf-8")
     path.write_text(
         '"""冻结时写入。运行中的进程读这个常量，不读磁盘上的新文件。"""\n\n'
         "from __future__ import annotations\n\n"
-        f"BUILD_ID = {build_id!r}\n",
+        f"BUILD_ID = {build_id!r}\n"
+        f"RELEASE_CHANNEL = {release['channel']!r}\n"
+        f"RELEASE_VERSION = {release['version']!r}\n",
         encoding="utf-8",
     )
     return original
@@ -552,6 +570,64 @@ def install_build_stamp(build_id: str) -> str:
 def restore_build_stamp(original: str) -> None:
     """打包结束后把仓库里的构建身份文件放回去。"""
     (PACKAGE / "build_stamp.py").write_text(original, encoding="utf-8")
+
+
+def frozen_identity_from_stdout(raw: bytes) -> dict[str, object]:
+    """从冻结 exe 的 stdout 里取出身份 JSON。
+
+    Windows COM 释放失败时，CRT 会在真实输出后追加一行
+    ``Win32 exception occurred releasing IUnknown at ...``（UTF-16 字节）。
+    不能把整份 stdout 当 JSON，只认最后一行完整 JSON 对象。
+
+    Args:
+        raw: 子进程 stdout 原始字节。
+
+    Returns:
+        dict: 解析出的身份。
+
+    Raises:
+        ValueError: 没有完整 JSON 对象行。
+    """
+    text = (raw or b"").decode("utf-8", errors="replace")
+    for line in reversed([item.strip() for item in text.splitlines() if item.strip()]):
+        if line.startswith("{") and line.endswith("}"):
+            identity = json.loads(line)
+            if isinstance(identity, dict):
+                return identity
+            break
+    raise ValueError("stdout 中没有 JSON 身份对象")
+
+
+def assert_frozen_build(exe: Path, release: dict[str, object], build_id: str) -> None:
+    """在 Windows 运行冻结 exe，核验真实依赖导入及编译身份。"""
+    if not IS_WIN:
+        print("[skip] 冻结构建身份和 Windows 依赖自测只在 Windows 上运行该 exe")
+        return
+    try:
+        completed = subprocess.run(
+            [str(exe), "--self-test-build"],
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"冻结构建自测无法运行：{exe}：{exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or b"").decode("utf-8", errors="replace")
+        raise SystemExit(f"冻结构建自测失败（exit={completed.returncode}）：\n{detail[-2000:]}")
+    try:
+        identity = frozen_identity_from_stdout(completed.stdout or b"")
+    except (ValueError, UnicodeError) as exc:
+        raise SystemExit(f"冻结构建自测未返回有效 JSON：{exe}") from exc
+    expected = {"build_id": build_id, "channel": release["channel"], "version": release["version"]}
+    if not isinstance(identity, dict) or any(
+        identity.get(key) != value for key, value in expected.items()
+    ):
+        raise SystemExit(
+            f"冻结构建身份 build_id/channel/version 不一致："
+            f"expected={expected!r}, actual={identity!r}"
+        )
+    print("[done] 冻结构建身份匹配，Windows 依赖已真实导入")
 
 
 def assert_frozen_ocr(exe: Path) -> None:
@@ -1096,31 +1172,46 @@ def existing_data_files(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(src, dst) for src, dst in pairs if Path(src).exists()]
 
 
-def clean_build() -> None:
+def stage_release_data(release: dict[str, object], directory: Path) -> list[tuple[str, str]]:
+    """只在构建暂存目录写发布 VERSION，源 VERSION/pyproject 不变。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    version = directory / 'VERSION'
+    version.write_text(str(release['version']) + '\n', encoding='utf-8')
+    contract = directory / 'release-channels.json'
+    shutil.copy2(PACKAGE / 'release-channels.json', contract)
+    return [(str(version), '.'), (str(contract), 'spider_gd')]
+
+
+def clean_build(app_name: str = APP_NAME) -> None:
     """清理上次构建产物，避免 PyInstaller 缓存问题。"""
     if BUILD.exists():
         shutil.rmtree(BUILD, ignore_errors=True)
-    spec = ROOT / "build" / f"{APP_NAME}.spec"
+    spec = ROOT / "build" / f"{app_name}.spec"
     if spec.exists():
         spec.unlink()
 
 
-def run_pyinstaller() -> None:
-    print("=== 编译 Python 后端 ===")
+def run_pyinstaller(release: dict[str, object] | None = None) -> None:
+    from spider_gd.release_channel import build_release
+
+    release = release or build_release((ROOT / 'VERSION').read_text(encoding='utf-8').strip())
+    app_name = str(release['serviceName'])
+    print(f"=== 编译 Python 后端 {release['channel']} {release['version']} ===")
     assert_repo_package_wins()
     absent = missing_repo_modules(runtime_tool_imports())
     if absent:
         raise SystemExit("工具脚本导入了仓库里没有的模块：" + "、".join(absent))
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    clean_build()
+    clean_build(app_name)
+    release_files = stage_release_data(release, BUILD / 'release')
     build_id = current_build_id()
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--console",
-        "--name", APP_NAME,
+        "--name", app_name,
         "--distpath", str(OUTPUT),
         "--workpath", str(BUILD),
         "--specpath", str(ROOT / "build"),
@@ -1129,7 +1220,7 @@ def run_pyinstaller() -> None:
     ]
     cmd += spider_gd_pyinstaller_args()
 
-    present = existing_data_files(DATA_FILES)
+    present = existing_data_files(DATA_FILES + release_files)
     missing = [src for src, _dst in DATA_FILES if not Path(src).exists()]
     for src_abs in missing:
         print(f"[warn] 跳过不存在的数据目录: {src_abs}")
@@ -1177,24 +1268,29 @@ def run_pyinstaller() -> None:
             path_parts.insert(0, str(lib_bin))
     env["PATH"] = os.pathsep.join(path_parts)
 
-    original_stamp = install_build_stamp(build_id)
+    original_stamp = install_build_stamp(build_id, release=release)
     try:
         subprocess.run(cmd, check=True, env=env)
     finally:
         restore_build_stamp(original_stamp)
-    (OUTPUT / "build_stamp.json").write_text(
-        json.dumps({"build_id": build_id}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    exe = OUTPUT / f"{APP_NAME}{EXE_SUFFIX}"
+    exe = OUTPUT / f"{app_name}{EXE_SUFFIX}"
     if not exe.exists():
-        alt = OUTPUT / APP_NAME
+        alt = OUTPUT / app_name
         exe = alt if alt.exists() else exe
-    if exe.exists():
-        assert_frozen_modules(exe)
-        assert_frozen_ocr(exe)
+    if not exe.exists():
+        raise SystemExit(f"PyInstaller 成功返回但未找到输出 exe：{exe}")
+    assert_frozen_build(exe, release, build_id)
+    assert_frozen_modules(exe)
+    assert_frozen_ocr(exe)
     if IS_WIN:
         assert_ocr_frozen(BUILD)
+    (OUTPUT / "build_stamp.json").write_text(
+        json.dumps(
+            {"build_id": build_id, "channel": release['channel'], "version": release['version']},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     # 复制 .env 模板（UTF-8 编码）
     env_template = OUTPUT / ".env"
@@ -1210,13 +1306,13 @@ def run_pyinstaller() -> None:
         )
         print(f"[done] 已生成 .env 模板 -> {env_template}")
 
-    exe = OUTPUT / f"{APP_NAME}{EXE_SUFFIX}"
+    exe = OUTPUT / f"{app_name}{EXE_SUFFIX}"
     if exe.exists():
         size_mb = exe.stat().st_size / (1024 * 1024)
         print(f"[done] {exe} ({size_mb:.1f} MB)")
     else:
         # PyInstaller 可能不添加后缀，检查无后缀版本
-        alt = OUTPUT / APP_NAME
+        alt = OUTPUT / app_name
         if alt.exists():
             size_mb = alt.stat().st_size / (1024 * 1024)
             print(f"[done] {alt} ({size_mb:.1f} MB)")
@@ -1360,19 +1456,31 @@ def copy_browsers() -> None:
 
 
 def main() -> None:
-    with_browsers = "--with-browsers" in sys.argv
-    allow_arm64 = "--allow-arm64" in sys.argv
+    from spider_gd.release_channel import build_release
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--channel', choices=('stable', 'beta'), default='stable')
+    parser.add_argument('--beta-number')
+    parser.add_argument('--with-browsers', action='store_true')
+    parser.add_argument('--allow-arm64', action='store_true')
+    args = parser.parse_args()
+    try:
+        release = build_release(
+            (ROOT / 'VERSION').read_text(encoding='utf-8').strip(), args.channel, args.beta_number,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     print("=== 检查依赖 ===")
     subprocess.run([sys.executable, "-c", "import PyInstaller"], check=True)
     subprocess.run([sys.executable, "-c", "import uvicorn; import fastapi"], check=False)
     if IS_WIN:
-        ensure_windows_wmi(allow_arm64=allow_arm64)
+        ensure_windows_wmi(allow_arm64=args.allow_arm64)
     print("  OK")
 
-    run_pyinstaller()
+    run_pyinstaller(release)
 
-    if with_browsers:
+    if args.with_browsers:
         copy_browsers()
 
     print("\n=== 完成 ===")

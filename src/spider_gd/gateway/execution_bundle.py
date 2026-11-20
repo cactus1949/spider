@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from spider_gd.config.user_home import validate_write_path
+
 __all__ = [
     "build_execution_zip",
     "build_ukey_zip",
@@ -572,6 +574,7 @@ def build_execution_zip(
         >>> "execution_log.txt" in names and "workflows/交易日历.yml" in names
         True
     """
+    validate_write_path(dest, "导出压缩包")
     dest.parent.mkdir(parents=True, exist_ok=True)
     packed = ["README.txt", "execution_log.txt", "app_log_window.txt"]
     payload: list[tuple[str, str | Path]] = [
@@ -651,6 +654,7 @@ def build_ukey_zip(
         >>> "飞天 UKey" in text and "096E" in usb
         True
     """
+    validate_write_path(dest, "导出压缩包")
     dest.parent.mkdir(parents=True, exist_ok=True)
     summary = str(report.get("summary") or "").strip() or "没有检测结论。"
     safe_report = json.loads(redact_secrets(json.dumps(report, ensure_ascii=False)))

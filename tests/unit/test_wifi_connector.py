@@ -357,7 +357,11 @@ def test_wifi_connector_decodes_hex_ssid_in_interfaces():
 
 
 @pytest.mark.unit
-def test_wifi_connector_decodes_hex_ssid_in_scan():
+def test_wifi_connector_decodes_hex_ssid_in_scan(monkeypatch):
+    monkeypatch.setattr(
+        "spider_gd.infrastructure.proc._console_encodings", lambda: ("cp936",)
+    )
+
     def runner(cmd: Sequence[str], **_: Any):
         args = list(cmd)
         if args[:4] == ["netsh", "wlan", "show", "networks"]:

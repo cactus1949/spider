@@ -3,7 +3,8 @@
 安装包升级会清掉安装目录里的 ``data/``、``tasks/`` 和 ``logs/``。
 Electron 把 ``app.getPath('userData')`` 放进环境变量 ``SPIDER_GD_HOME`` 后，
 相对路径的数据库、日志、浏览器配置和任务文件都改到这个目录下。
-环境变量未设置时保持相对当前工作目录的旧行为，开发和测试不用改。
+正式渠道未设置环境变量时保持相对当前工作目录的旧行为。
+测试渠道默认使用独立用户目录，且不自动复制正式数据。
 
 首次启动如果新目录还没有数据、安装目录里还有旧文件，会复制过去并写日志。
 复制而不是移动，避免中途失败把旧数据弄丢。
@@ -17,6 +18,8 @@ import shutil
 from pathlib import Path
 
 from loguru import logger
+
+from spider_gd.release_channel import default_beta_home, runtime_release
 
 HOME_ENV = "SPIDER_GD_HOME"
 
@@ -34,7 +37,7 @@ _MIGRATE_NAMES = (
 
 
 def user_home() -> Path | None:
-    """返回 ``SPIDER_GD_HOME`` 指向的目录；未设置时为 None。
+    """返回 HOME override；未设置时测试版用独立目录，正式版为 None。
 
     Returns:
         Path | None: 展开用户目录后的绝对路径。环境变量为空时为 None。
@@ -45,7 +48,7 @@ def user_home() -> Path | None:
     """
     raw = os.environ.get(HOME_ENV, "").strip().strip('"')
     if not raw:
-        return None
+        return default_beta_home().resolve() if runtime_release()['channel'] == 'beta' else None
     return Path(raw).expanduser().resolve()
 
 
@@ -63,6 +66,7 @@ def tasks_dir() -> Path:
     """
     home = user_home()
     path = (home / "tasks") if home else (Path.cwd() / "tasks")
+    validate_write_path(path, "任务目录")
     if home:
         path.mkdir(parents=True, exist_ok=True)
     return path
@@ -100,6 +104,7 @@ def user_workflows_dir(*, create: bool = False) -> Path:
     """
     home = user_home()
     path = (home / "workflows") if home else (Path.cwd() / "workflows")
+    validate_write_path(path, "工作流目录")
     if create and home:
         path.mkdir(parents=True, exist_ok=True)
     return path
@@ -170,6 +175,18 @@ def rebase_path(value: str, home: Path) -> str:
     return str((home / text).resolve())
 
 
+def validate_write_path(value: str | Path, label: str) -> Path:
+    # 不展开 ~，避免校验位置与实际写入路径不一致。
+    path = Path(value)
+    if runtime_release()["channel"] != "beta":
+        return path
+    home = user_home()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(home):
+        raise ValueError(f"测试版 {label} 必须位于测试版数据目录内")
+    return path
+
+
 def rebase_user_paths(settings):
     """按用户目录重写配置里的相对数据路径。
 
@@ -191,15 +208,23 @@ def rebase_user_paths(settings):
     if home is None:
         return settings
 
-    def rebase_model(model, fields: tuple[str, ...]):
+    def rebase_model(model, group: str, fields: tuple[str, ...]):
         updates = {name: rebase_path(getattr(model, name), home) for name in fields}
+        for name, value in updates.items():
+            if name == "env_file" or (name == "sqlite_path" and value == ":memory:"):
+                continue
+            if not str(value or "").strip():
+                # 空值表示「未配置，用各模块默认」，不能按当前工作目录校验。
+                continue
+            validate_write_path(value, f"{group}.{name}")
         return model.model_copy(update=updates)
 
-    storage = rebase_model(settings.storage, ("data_dir", "archive_dir", "sqlite_path"))
-    log = rebase_model(settings.log, ("file_dir",))
-    crawler = rebase_model(settings.crawler, ("user_data_dir",))
+    storage = rebase_model(settings.storage, "storage", ("data_dir", "archive_dir", "sqlite_path"))
+    log = rebase_model(settings.log, "log", ("file_dir",))
+    crawler = rebase_model(settings.crawler, "crawler", ("user_data_dir",))
     delivery = rebase_model(
         settings.delivery,
+        "delivery",
         ("env_file", "desktop_wechat_profile_path"),
     )
     return settings.model_copy(update={
@@ -327,7 +352,7 @@ def migrate_install_data(install_dir: Path, home: Path) -> list[str]:
 def prepare_user_home(install_dir: Path | None = None) -> Path | None:
     """迁移旧数据并把用户目录里的 ``.env`` 载入环境变量。
 
-    可以重复调用。未设置 ``SPIDER_GD_HOME`` 时直接返回，不改工作目录。
+    可以重复调用。正式版未设置 HOME 时直接返回；测试版不自动迁移旧数据。
 
     Args:
         install_dir (Path | None): 安装目录。空则用当前工作目录。
@@ -343,9 +368,10 @@ def prepare_user_home(install_dir: Path | None = None) -> Path | None:
     if home is None:
         return None
     install = (install_dir or Path.cwd()).resolve()
-    try:
-        migrate_install_data(install, home)
-    except OSError as exc:
-        logger.warning("迁移用户数据失败: {}", exc)
+    if runtime_release()['channel'] == 'stable':
+        try:
+            migrate_install_data(install, home)
+        except OSError as exc:
+            logger.warning("迁移用户数据失败: {}", exc)
     _load_env_file(home / ".env")
     return home

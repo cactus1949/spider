@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from spider_gd.config.user_home import validate_write_path
 from spider_gd.gateway.execution_bundle import (
     _MAX_FILE_BYTES,
     _MAX_FILES,
@@ -47,6 +48,7 @@ def _directory_writable(folder: Path) -> bool:
     if not folder.is_dir():
         return False
     probe = folder / ".spider-gd-write-probe"
+    validate_write_path(probe, "诊断目录检测文件")
     try:
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
@@ -76,6 +78,7 @@ def diagnostic_output_dir(requested: str, saved: str, data_dir: Path) -> tuple[P
         if not text:
             continue
         folder = Path(text)
+        validate_write_path(folder, "诊断输出目录")
         if _directory_writable(folder):
             chosen = folder
             break
@@ -84,6 +87,7 @@ def diagnostic_output_dir(requested: str, saved: str, data_dir: Path) -> tuple[P
         chosen = Path(data_dir)
         notes.append("已改存到数据目录")
     target = chosen / "诊断包"
+    validate_write_path(target, "诊断输出目录")
     target.mkdir(parents=True, exist_ok=True)
     return target, "；".join(notes)
 
@@ -398,6 +402,8 @@ def build_diagnostics_zip(
         >>> "pin-7788" not in env and "env.json" in archive.namelist()
         True
     """
+    validate_write_path(dest, "诊断压缩包")
+    validate_write_path(dest.with_suffix(".scrub.zip"), "诊断脱敏临时文件")
     moment = now or datetime.now()
     cutoff = moment - timedelta(days=2)
     secrets = collect_secret_values(settings, extra_secrets)

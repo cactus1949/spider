@@ -6,9 +6,10 @@
 3. 若设置了 PLAYWRIGHT_BROWSERS_PATH 则使用该路径
 """
 
+import io
+import json
 import os
 import sys
-import io
 import traceback
 from pathlib import Path
 
@@ -64,7 +65,11 @@ def _copy_tree(src: Path, dst: Path) -> None:
 
 
 def _fix_env_encoding(exe_dir: Path) -> None:
-    """如果 .env 是 GBK 编码，转换为 UTF-8（pydantic-settings 强依赖 UTF-8）。"""
+    """正式版保留 GBK → UTF-8 转换；测试版的 .env 输入保持只读。"""
+    from spider_gd.release_channel import runtime_release
+
+    if runtime_release()["channel"] == "beta":
+        return
     env_path = exe_dir / ".env"
     if not env_path.exists():
         return
@@ -108,6 +113,37 @@ def _dispatch_picker(argv: list[str]) -> int | None:
     return int(picker_main(forwarded))
 
 
+def _dispatch_build_self_test(argv: list[str]) -> int | None:
+    """只读构建身份和导入依赖，不初始化配置、HOME 或服务。"""
+    if "--self-test-build" not in argv:
+        return None
+    try:
+        from spider_gd.build_stamp import BUILD_ID
+        from spider_gd.release_channel import runtime_release
+
+        release = runtime_release()
+        if sys.platform == "win32":
+            import pythoncom
+
+            pythoncom.CoInitialize()
+            try:
+                import pywintypes  # noqa: F401
+                import uiautomation  # noqa: F401
+                import win32com.client  # noqa: F401
+                import wmi  # noqa: F401
+            finally:
+                pythoncom.CoUninitialize()
+        print(json.dumps({
+            "build_id": BUILD_ID,
+            "channel": release["channel"],
+            "version": release["version"],
+        }))
+    except Exception:
+        traceback.print_exc()
+        return 1
+    return 0
+
+
 def _dispatch_ocr_self_test(argv: list[str]) -> int | None:
     """冻结产物用 ``--self-test-ocr`` 自己加载验证码依赖。"""
     if "--self-test-ocr" not in argv:
@@ -135,6 +171,9 @@ def main() -> int:
         True
     """
     _fix_console()
+    build_code = _dispatch_build_self_test(sys.argv)
+    if build_code is not None:
+        return build_code
     ocr_code = _dispatch_ocr_self_test(sys.argv)
     if ocr_code is not None:
         return ocr_code

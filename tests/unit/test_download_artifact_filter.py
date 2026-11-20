@@ -13,6 +13,7 @@ from spider_gd.app import (
     _is_internal_download_artifact,
     _snapshot_download_files,
     _zip_download_files,
+    create_delivery_sample_zip,
 )
 from spider_gd.core.pipeline.file_versions import save_versioned_bytes
 from spider_gd.gateway.data_upload_flow import _changed_files
@@ -142,3 +143,76 @@ def test_content_change_uploads_pdf_not_archived_copy(tmp_path: Path) -> None:
     assert changed == [pdf]
     assert not any("_versions" in path.parts for path in changed)
     assert not any(path.name == ".file_versions.json" for path in changed)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["sample", "collected"])
+@pytest.mark.parametrize("link_kind", ["directory", "leaf"])
+def test_beta_delivery_archives_reject_foreign_links(tmp_path, monkeypatch, kind, link_kind):
+    from datetime import datetime
+
+    import spider_gd.app as app_module
+
+    class Clock:
+        @staticmethod
+        def now():
+            return datetime(2030, 1, 2, 3, 4, 5, 6)
+
+    home = tmp_path / "beta"
+    home.mkdir()
+    source = home / "report.txt"
+    source.write_bytes(b"report")
+    formal = tmp_path / "formal"
+    formal.mkdir()
+    marker = formal / "marker"
+    marker.write_bytes(b"formal data")
+    folder = home / "_stable_delivery"
+    if kind == "sample":
+        folder /= "samples"
+        name = "delivery_sample_20300102_030405_000006.zip"
+    else:
+        name = "daily_exec1.zip"
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    if link_kind == "directory":
+        link = folder
+        link.symlink_to(formal, target_is_directory=True)
+    else:
+        folder.mkdir()
+        link = folder / name
+        link.symlink_to(marker)
+    monkeypatch.setenv("SPIDER_GD_HOME", str(home))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    monkeypatch.setattr(app_module, "datetime", Clock)
+
+    if kind == "sample":
+        operation = create_delivery_sample_zip
+        arguments = {}
+    else:
+        operation = _zip_download_files
+        arguments = {"files": [source], "task_name": "daily", "exec_id": "exec1"}
+    with pytest.raises(ValueError, match="测试版"):
+        operation(home, **arguments)
+
+    assert marker.read_bytes() == b"formal data"
+    assert list(formal.iterdir()) == [marker]
+    assert link.is_symlink()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["sample", "collected"])
+def test_beta_delivery_archives_are_readable_in_own_home(tmp_path, monkeypatch, kind):
+    monkeypatch.setenv("SPIDER_GD_HOME", str(tmp_path))
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    source = tmp_path / "report.txt"
+    source.write_bytes(b"report")
+
+    if kind == "sample":
+        output = create_delivery_sample_zip(tmp_path)
+    else:
+        output = _zip_download_files(tmp_path, [source], task_name="daily", exec_id="exec1")
+
+    with zipfile.ZipFile(output) as archive:
+        expected = "README.txt" if kind == "sample" else "report.txt"
+        assert archive.namelist() == [expected]
+        if kind == "collected":
+            assert archive.read(expected) == b"report"

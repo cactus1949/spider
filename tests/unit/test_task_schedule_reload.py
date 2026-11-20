@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from spider_gd.app import (
     _TASK_SCHEDULE_SIGNATURES,
     _task_schedule_signature,
+    register_jobs,
     reload_task_jobs_if_changed,
 )
+from spider_gd.config.settings import AppSettings
 
 
 def test_signature_ignores_order_and_sees_time_changes():
@@ -43,6 +47,11 @@ class _Scheduler:
     def __init__(self) -> None:
         self.jobs = [_Job("task_a"), _Job("cleanup_exec_logs")]
         self.removed: list[str] = []
+        self.added: list[str] = []
+
+    async def add_job(self, spec, _handler) -> str:
+        self.added.append(spec.job_id)
+        return spec.job_id
 
     async def list_jobs(self) -> list[_Job]:
         return list(self.jobs)
@@ -87,3 +96,45 @@ async def test_repeated_saves_reload_scheduler_once(monkeypatch):
     rows[0]["time"] = "16:30"
     assert await reload_task_jobs_if_changed(ctx) is True
     assert calls["n"] == 2
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_beta_never_registers_imported_enabled_automatic_jobs(monkeypatch, frozen):
+    from spider_gd import build_stamp
+
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", "beta")
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable" if frozen else "beta")
+    rows = [{"id": "a", "name": "采集", "enabled": True,
+             "repeat": "daily", "time": "08:00"}]
+    ctx = _Ctx(rows)
+    ctx.settings = AppSettings()
+    ctx.settings.schedule.crawl_cron = ["0 8 * * *"]
+    ctx.settings.schedule.backfill_cron = "0 9 * * *"
+    ctx.settings.schedule.retention_cron = "0 10 * * *"
+    assert await register_jobs(ctx) == [], "测试版不能恢复导入配置中的自动任务"
+    assert ctx.scheduler.added == []
+    assert rows[0]["enabled"] is True, "运行门禁不能改写用户导入的数据"
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_stable_registers_enabled_automatic_jobs(monkeypatch, frozen):
+    from spider_gd import build_stamp
+
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", "stable")
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta" if frozen else "stable")
+    ctx = _Ctx([{
+        "id": "a", "name": "采集", "enabled": True,
+        "repeat": "daily", "time": "08:00",
+    }])
+    ctx.settings = AppSettings()
+    ctx.settings.schedule.crawl_cron = ["0 8 * * *"]
+    ctx.settings.schedule.backfill_cron = "0 9 * * *"
+    ctx.settings.schedule.retention_cron = "0 10 * * *"
+    expected = [
+        "task_a", "crawl_daily_0", "backfill", "retention", "cleanup_exec_logs",
+        "delivery_outbox_retry", "alert_outbox_retry",
+    ]
+    assert await register_jobs(ctx) == expected
+    assert ctx.scheduler.added == expected

@@ -33,6 +33,50 @@ def test_running_process_does_not_read_the_new_stamp_file(tmp_path: Path, monkey
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("raw", [None, '  "relative/用户"  ', "~/用户"])
+def test_runtime_reports_effective_data_home(tmp_path: Path, monkeypatch, raw):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "stable")
+    if raw is None:
+        monkeypatch.delenv("SPIDER_GD_HOME", raising=False)
+        expected = tmp_path
+    else:
+        monkeypatch.setenv("SPIDER_GD_HOME", raw)
+        expected = (tmp_path / "relative/用户") if "relative" in raw else Path.home() / "用户"
+    identity = runtime_identity()
+    assert identity.get("data_home") == str(expected.resolve())
+    assert identity["cwd"] == str(tmp_path)
+
+
+@pytest.mark.unit
+def test_beta_runtime_reports_default_home_without_migrating(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", "beta")
+    monkeypatch.delenv("SPIDER_GD_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "profile"))
+    from spider_gd.release_channel import default_beta_home
+
+    assert runtime_identity().get("data_home") == str(default_beta_home().resolve())
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("channel,opposite", [("stable", "beta"), ("beta", "stable")])
+def test_frozen_runtime_data_home_is_actual_override_with_bound_channel(tmp_path: Path, monkeypatch, channel, opposite):
+    from spider_gd import build_stamp
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(build_stamp, "RELEASE_CHANNEL", channel)
+    monkeypatch.setattr(build_stamp, "RELEASE_VERSION", "0.2.8")
+    monkeypatch.setenv("SPIDER_GD_CHANNEL", opposite)
+    monkeypatch.setenv("SPIDER_GD_HOME", f'  "{tmp_path / "资料"}"  ')
+    identity = runtime_identity()
+    assert identity["channel"] == channel
+    assert identity["data_home"] == str((tmp_path / "资料").resolve())
+    assert identity["frozen"] is True
+
+
+@pytest.mark.unit
 def test_build_stamp_written_for_freeze_is_restored():
     original = build_backend.install_build_stamp("abc123def456")
     try:

@@ -1,0 +1,30 @@
+{
+  "stable": {
+    "channelLabel": "正式版",
+    "appId": "com.spidergd.desktop",
+    "aumid": "com.spider-gd.desktop",
+    "packageName": "spider-gd-desktop",
+    "productName": "广东电力数据采集",
+    "userDataDirName": null,
+    "executableName": "广东电力数据采集",
+    "serviceName": "spider-gd-service",
+    "preferredPort": 8800,
+    "updateUrl": "http://47.101.175.39:20152/releases",
+    "updateChannel": "latest",
+    "updaterCacheDirName": "spider-gd-desktop-updater"
+  },
+  "beta": {
+    "channelLabel": "测试版",
+    "appId": "com.spidergd.desktop.beta",
+    "aumid": "com.spidergd.desktop.beta",
+    "packageName": "spider-gd-desktop-beta",
+    "productName": "广东电力数据采集－测试版",
+    "userDataDirName": "spider-gd-desktop-beta",
+    "executableName": "spider-gd-desktop-beta",
+    "serviceName": "spider-gd-service-beta",
+    "preferredPort": 8801,
+    "updateUrl": "http://47.101.175.39:20152/releases/beta",
+    "updateChannel": "beta",
+    "updaterCacheDirName": "spider-gd-desktop-beta-updater"
+  }
+}

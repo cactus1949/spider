@@ -1,7 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { ReleaseInfo } from '../../release-channel.mjs'
+import type { VersionCatalog } from '../main/versionCatalog.mjs'
 
 const api = {
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
+  getReleaseInfo: (): Promise<ReleaseInfo> => ipcRenderer.invoke('app:get-release-info'),
+  getVersionCatalog: (): Promise<VersionCatalog> => ipcRenderer.invoke('versions:list'),
+  downloadHistoricalVersion: (version: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('versions:download', version),
   getDataDir: (): Promise<string> => ipcRenderer.invoke('app:get-data-dir'),
 
   // 窗口

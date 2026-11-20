@@ -14,14 +14,20 @@
  */
 
 import { autoUpdater } from 'electron-updater'
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, net } from 'electron'
 import { stopBackend } from './backend'
-
-const UPDATE_FEED_URL = 'http://47.101.175.39:20152/releases'
+import { releaseIdentity } from './release'
 
 export function startUpdater(getWindow: () => BrowserWindow | null): void {
   // 配置 autoUpdater
-  autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URL })
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: releaseIdentity.updateUrl,
+    channel: releaseIdentity.updateChannel,
+    updaterCacheDirName: releaseIdentity.updaterCacheDirName
+  })
+  autoUpdater.allowPrerelease = releaseIdentity.channel === 'beta'
+  autoUpdater.allowDowngrade = false
   autoUpdater.autoDownload = false        // 不自动下载，由用户触发
   autoUpdater.autoInstallOnAppQuit = false
 
@@ -60,8 +66,18 @@ export function startUpdater(getWindow: () => BrowserWindow | null): void {
     // 仅在用户手动检查时才通知错误
   })
 
+  // 现场机器多数时间是离线的：离线时不要发起必然失败的自动检查（只影响自动检查，
+  // 用户手动「检查更新」仍会照常尝试，以便插上外网后立即生效）。
+  const online = (): boolean => {
+    try { return net.isOnline() } catch { return true }
+  }
+
   // ── 首次检查（5s 延迟） ──
   setTimeout(() => {
+    if (!online()) {
+      console.log('[updater] 当前离线，跳过首次自动检查')
+      return
+    }
     autoUpdater.checkForUpdates().catch((err) => {
       console.log('[updater] 首次检查失败:', err.message)
     })
@@ -69,6 +85,7 @@ export function startUpdater(getWindow: () => BrowserWindow | null): void {
 
   // ── 定时检查（每 4 小时） ──
   setInterval(() => {
+    if (!online()) return
     autoUpdater.checkForUpdates().catch(() => {})
   }, 4 * 60 * 60 * 1000)
 

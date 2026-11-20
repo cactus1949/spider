@@ -11,6 +11,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from spider_gd.config.user_home import validate_write_path
 from spider_gd.interfaces.storage import (
     ExecutionLogRecord,
     RecordWorkshopRecord,
@@ -180,6 +181,9 @@ class TaskStateStore:
     def __init__(self, db_path: str | Path, enable_wal: bool = True) -> None:
         self._db_path = str(db_path)
         if self._db_path != ":memory:":
+            validate_write_path(self._db_path, "数据库")
+            for suffix in ("-wal", "-shm", "-journal"):
+                validate_write_path(f"{self._db_path}{suffix}", "数据库附属文件")
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = threading.Lock()
         # check_same_thread=False：允许调度器/REST/异步等多线程访问，写操作由 _write_lock 串行化
@@ -322,6 +326,8 @@ class TaskStateStore:
         import json
         import time
 
+        if str(cfg.get("download_dir") or "").strip():
+            validate_write_path(cfg["download_dir"], "任务下载目录")
         now = time.time()
         existing = self.get_task_config(cfg["id"])
         with self._write_lock:
@@ -933,6 +939,9 @@ class TaskStateStore:
 
     def save_settings(self, settings: dict[str, str]) -> None:
         """批量保存设置（覆盖已有 key，插入新 key）。"""
+        for key in ("downloadDir", "deliveryDesktopWechatProfilePath"):
+            if str(settings.get(key) or "").strip():
+                validate_write_path(settings[key], key)
         with self._write_lock:
             for k, v in settings.items():
                 self._conn.execute(
