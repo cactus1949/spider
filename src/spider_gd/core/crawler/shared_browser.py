@@ -318,6 +318,16 @@ def read_authorized_endpoint(profile: Path) -> str:
     return f"ws://127.0.0.1:{int(parts[0])}{parts[1]}"
 
 
+@contextlib.asynccontextmanager
+async def station_auth_scope(session: Any):
+    previous = getattr(session, "_station_org_name", "")
+    session._station_org_name = ""
+    try:
+        yield
+    finally:
+        session._station_org_name = previous
+
+
 class SharedBrowser:
     """本机浏览器会话。接管已有 Context，任务独占，外部进程永不关闭。"""
 
@@ -1117,10 +1127,35 @@ class SharedBrowser:
                 return {"state": "unauthenticated", "reason":
                         f"尚未出现配置的登录成功标志（检查页：{self._page_label(page)}；选择器：{selector}）"}
             identity = ""
-            if self._config["expected_identity"]:
-                identity = (await page.locator(self._config["identity_selector"]).first.inner_text(timeout=3000)).strip()
-                if identity != self._config["expected_identity"]:
+            station_org = getattr(self, "_station_org_name", "")
+            if self._config["expected_identity"] or station_org:
+                identity_selector = self._config.get("identity_selector", "")
+                if station_org and not identity_selector:
+                    return {"state": "unknown", "reason": "核对场站单位需要配置当前业务身份选择器"}
+                identities = page.locator(identity_selector)
+                if station_org and (await identities.count() != 1
+                                    or not await identities.first.is_visible()):
+                    return {"state": "unknown", "reason": "当前业务单位不可读或身份选择器不唯一"}
+                identity = (await identities.first.inner_text(timeout=3000)).strip()
+                if (self._config["expected_identity"]
+                        and identity != self._config["expected_identity"]):
                     return {"state": "wrong_account", "reason": "当前业务身份与配置不一致"}
+                if station_org:
+                    import unicodedata
+
+                    from spider_gd.core.station_profile import normalize_org_name
+
+                    folded_identity = "".join(unicodedata.normalize("NFKC", identity).split())
+                    if not folded_identity or folded_identity.endswith(("...", "…")):
+                        return {
+                            "state": "unknown", "reason": "当前业务单位为空或被截断，无法核对场站",
+                        }
+                    keyword, unit = normalize_org_name(station_org), normalize_org_name(identity)
+                    if len(keyword) < 2 or len(unit) < 2 or keyword not in unit:
+                        return {
+                            "state": "wrong_account",
+                            "reason": f"当前业务单位与场站单位关键字「{station_org}」不一致",
+                        }
             return {"state": "authenticated", "identity": identity}
         except Exception as exc:
             return {"state": "unknown", "reason": f"登录状态无法确认: {exc}"}
@@ -1129,16 +1164,35 @@ class SharedBrowser:
         self, *, allow_auto: bool = False, page: Any = None,
         require_storage_keys: list[str] | None = None,
     ) -> bool:
+        auth = await self.check_auth(page, require_storage_keys=require_storage_keys)
         while True:
-            auth = await self.check_auth(page, require_storage_keys=require_storage_keys)
             if auth["state"] == "authenticated":
                 return True
             # 未知状态和身份不符不能靠“继续”放行，也不能当成未登录去自动登录。
             if allow_auto and self._config["auth_policy"] == "reuse_or_auto" and auth["state"] == "unauthenticated":
                 return False
-            self.emit({"event": "error_pause", "error": auth["reason"], "message": auth["reason"] + "；请在浏览器完成登录后重新检查"})
-            if not await self.wait_continue():
-                raise RuntimeError("用户取消登录检查")
+            guard = getattr(self._active_runner, "_protect_auth_pause_pages", None)
+            # 只与当前场站任务合作；范围包含实际等待与认证重查，取消/异常也会收尾。
+            with (guard(self) if callable(guard) and getattr(self, "_station_org_name", "")
+                  else contextlib.nullcontext()):
+                self.emit({"event": "error_pause", "error": auth["reason"], "message": auth["reason"] + "；请在浏览器完成登录后重新检查"})
+                if not await self.wait_continue():
+                    raise RuntimeError("用户取消登录检查")
+                # 仅场站任务的通用绑定页检查允许人工换页；显式页面/存储参数保持原契约。
+                if (page is None and require_storage_keys is None
+                        and getattr(self, "_station_org_name", "")):
+                    recover = getattr(self._active_runner, "_recover_station_auth_page", None)
+                    if callable(recover):
+                        recovered = await recover()
+                        if recovered is True:
+                            # 最终全候选证明已在保护范围内完成；不能在范围外再 await
+                            # 单页检查，让歧义页/新增人工页落入旧绑定与清理流程。
+                            return True
+                        if recovered is False:
+                            auth = {"state": "unknown", "reason": "无法确认唯一且稳定的场站业务页"}
+                            continue
+                # 显式页面/存储参数及原登录流程仍检查原页，且保持暂停保护。
+                auth = await self.check_auth(page, require_storage_keys=require_storage_keys)
 
     @contextlib.asynccontextmanager
     async def execution(self, name: str, on_event=None, *, hardware_lease=None):

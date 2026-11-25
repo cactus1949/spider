@@ -126,13 +126,11 @@ def _dispatch_build_self_test(argv: list[str]) -> int | None:
             import pythoncom
 
             pythoncom.CoInitialize()
-            try:
-                import pywintypes  # noqa: F401
-                import uiautomation  # noqa: F401
-                import win32com.client  # noqa: F401
-                import wmi  # noqa: F401
-            finally:
-                pythoncom.CoUninitialize()
+            # WMI keeps COM references until interpreter shutdown.
+            import pywintypes  # noqa: F401
+            import uiautomation  # noqa: F401
+            import win32com.client  # noqa: F401
+            import wmi  # noqa: F401
         print(json.dumps({
             "build_id": BUILD_ID,
             "channel": release["channel"],

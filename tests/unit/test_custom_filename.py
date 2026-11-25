@@ -263,6 +263,32 @@ def test_stable_overwrite_allows_external_consumed_source(tmp_path, monkeypatch)
     assert not source.exists()
 
 
+@pytest.mark.parametrize("target,month,want", [
+    (date(2026, 10, 1), date(2026, 10, 1), "settlement_202610.xlsx"),
+    (date(2026, 1, 1), date(2026, 1, 1), "settlement_202601.xlsx"),
+    (date(2026, 10, 1), None, "settlement_202609.xlsx"),
+])
+def test_monthly_expected_filename_matches_saved_result_with_unchanged_date_key(
+    tmp_path, target, month, want,
+):
+    config = {"name": "monthly", "steps": [
+        {"action": "export", "save_as": "settlement_{previous_month}.xlsx"},
+    ]}
+    runner = WorkflowRunner(config, download_dir=str(tmp_path), target_date=target,
+                            query_month=month)
+    runner._executing_step_index = 0
+    events = []
+    runner._on_event = events.append
+    runner._emit_download_plan()
+    path = runner._export_path(config["steps"][0]["save_as"], "site.xlsx")
+    runner._note_file("saved", path)
+    expected, saved = events
+    assert expected["name"] == want
+    assert saved["name"] == want
+    assert expected["date"] == target.isoformat()
+    assert saved["date"] == target.isoformat()
+
+
 def test_old_task_database_gains_empty_custom_names(tmp_path: Path):
     import sqlite3
 

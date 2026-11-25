@@ -131,12 +131,10 @@ WMI_HIDDEN_IMPORTS = [
 ]
 _WMI_PROBE = """import pythoncom
 pythoncom.CoInitialize()
-try:
-    import wmi
-    import win32com.client
-    import pywintypes
-finally:
-    pythoncom.CoUninitialize()
+# WMI keeps COM references until interpreter shutdown.
+import wmi
+import win32com.client
+import pywintypes
 """
 _ARM64_MACHINES = {"arm64", "aarch64"}
 

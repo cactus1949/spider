@@ -2,7 +2,7 @@
 import { app, BrowserWindow, net, dialog } from 'electron'
 import { spawn, ChildProcess, execFile } from 'child_process'
 import { createServer } from 'net'
-import { join, resolve, dirname } from 'path'
+import { join, resolve, dirname, isAbsolute } from 'path'
 import { existsSync, readFileSync, readlinkSync, writeFileSync } from 'fs'
 import { backendDecision, killPlan, normalizePath, portAfterStop, startupPort, type BackendInput, type Listener, type RuntimeHealth } from './backendMatch.mjs'
 import { backendEnvironment, resolveBackendDataDir } from '../../release-channel.mjs'
@@ -11,9 +11,11 @@ import { releaseIdentity } from './release'
 const EXE_NAME = `${releaseIdentity.serviceName}${process.platform === 'win32' ? '.exe' : ''}`
 const PREFERRED_PORT = releaseIdentity.preferredPort
 const READY_TITLE = 'spider-gd 控制接口'
-type BackendLaunch = { command: string; args: string[]; cwd: string }
-type Run = { generation: number; proc: ChildProcess; expected: Omit<BackendInput, 'health' | 'listener'>; port: number; verified?: Listener; cleanup?: Promise<boolean>; exited?: boolean }
-type Connection = { generation: number; expected: Run['expected']; port: number; listener: Listener }
+type BackendLaunch = { command: string; args: string[]; cwd: string; sourcePython?: boolean }
+type Run = { generation: number; proc: ChildProcess; expected: Omit<BackendInput, 'health' | 'listener'>; port: number; launcherExe?: string; verified?: Listener; cleanup?: Promise<boolean>; exited?: boolean }
+type Connection = { generation: number; expected: Run['expected']; port: number; listener: Listener; failureDetail?: string }
+type RuntimeRead = { health: RuntimeHealth | null; healthDiagnostic?: string; healthInvalid?: boolean }
+type Inspection = BackendInput & RuntimeRead
 let active: Run | null = null
 let connection: Connection | null = null
 let connectionTimer: ReturnType<typeof setTimeout> | null = null
@@ -53,7 +55,7 @@ function findBackendLaunch(): BackendLaunch | null {
   const root = resolve(app.getAppPath(), '..')
   const python = process.platform === 'win32' ? join(root, '.venv', 'Scripts', 'python.exe') : join(root, '.venv', 'bin', 'python')
   return existsSync(python) && existsSync(join(root, 'main.py'))
-    ? { command: python, args: ['main.py', '--config', 'configs/mode_dev.yaml', 'run'], cwd: root } : null
+    ? { command: python, args: ['main.py', '--config', 'configs/mode_dev.yaml', 'run'], cwd: root, sourcePython: true } : null
 }
 export function currentBackendLaunchCwd(): string {
   return findBackendLaunch()?.cwd ?? (app.isPackaged ? resolve(process.resourcesPath, 'backend') : resolve(app.getAppPath(), '..'))
@@ -70,18 +72,19 @@ export function whenBackendPort(): Promise<number> { return portReady }
 function notifyRenderer(win: BrowserWindow | null, status: string): void {
   win?.webContents.send('backend:status', status === 'ready' ? { status, base: currentBackendBase() } : { status })
 }
-function invalidate(message: string): void {
+function invalidate(message: string, retry?: Connection): void {
   if (connectionTimer) clearTimeout(connectionTimer)
   connectionTimer = null
-  connection = null
+  // A retry candidate is private evidence, never a usable/published connection.
+  connection = retry ?? null
   readyPort = null
   portReject?.(new Error(message))
   portResolve = undefined; portReject = undefined
   portReady = Promise.reject(new Error(message))
   void portReady.catch(() => {})
 }
-function fail(win: BrowserWindow | null, message: string): void {
-  invalidate(message)
+function fail(win: BrowserWindow | null, message: string, retry?: Connection): void {
+  invalidate(message, retry)
   notifyRenderer(win, 'error')
   if (win) dialog.showErrorBox('后端服务不可用', message)
 }
@@ -115,16 +118,61 @@ function expectedBuildId(launch: BackendLaunch): string {
   try { return String((JSON.parse(readFileSync(join(dirname(launch.command), 'build_stamp.json'), 'utf8')) as { build_id?: string }).build_id || '') }
   catch { return '' }
 }
-async function readOwnRuntime(port: number): Promise<RuntimeHealth | null> {
+/** Windows venv 的 Scripts\python.exe 是转发启动器；用同一解释器只读探测真实进程映像。 */
+async function probeSourcePythonImage(launch: BackendLaunch): Promise<string> {
+  const script = `import sys; sys.path.insert(0, ${JSON.stringify(join(launch.cwd, 'src'))}); from spider_gd.runtime_info import runtime_executable; print(runtime_executable())`
+  const stdout = await new Promise<Buffer>((done, reject) => {
+    execFile(launch.command, ['-B', '-X', 'utf8', '-c', script], { cwd: launch.cwd, timeout: 20000, encoding: 'buffer', windowsHide: true }, (error, out) => error ? reject(error) : done(out))
+  })
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(stdout).trim()
+  if (!text || /[\r\n]/.test(text) || !isAbsolute(text)) throw new Error(`解释器探针未返回有效的绝对路径：${JSON.stringify(text.slice(0, 200))}`)
+  return text
+}
+async function readOwnRuntime(port: number): Promise<RuntimeRead> {
+  let endpoint = '/openapi.json'
+  let status: number | undefined
+  let parsing = false
+  const diagnostic = () => `${endpoint}${status === undefined ? '' : `（HTTP ${status}）`}`
   try {
-    const spec = await net.fetch(`http://127.0.0.1:${port}/openapi.json`, { signal: AbortSignal.timeout(1500) })
-    if (!spec.ok) return null
-    if ((await spec.json() as { info?: { title?: string } }).info?.title !== READY_TITLE) return { runtime: 'foreign' }
-    const response = await net.fetch(`http://127.0.0.1:${port}/api/runtime`, { signal: AbortSignal.timeout(1500) })
-    if (response.status === 404) return { runtime: 'missing' }
-    if (!response.ok) return null
-    return { ...await response.json() as Omit<RuntimeHealth, 'runtime'>, runtime: 'ok' }
-  } catch { return null }
+    const spec = await net.fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: AbortSignal.timeout(1500) })
+    status = spec.status
+    if (!spec.ok) return { health: null, healthDiagnostic: `${diagnostic()}：请求失败` }
+    parsing = true
+    const title = (await spec.json() as { info?: { title?: unknown } } | null)?.info?.title
+    if (title == null || title === '') return { health: null, healthDiagnostic: `${diagnostic()}：缺少 info.title` }
+    if (title !== READY_TITLE) {
+      const description = typeof title === 'string' ? title : `非字符串（${Array.isArray(title) ? 'array' : typeof title}）`
+      return { health: { runtime: 'foreign' }, healthDiagnostic: `${diagnostic()}：异主标题 ${description}` }
+    }
+    endpoint = '/api/runtime'; status = undefined; parsing = false
+    const response = await net.fetch(`http://127.0.0.1:${port}${endpoint}`, { signal: AbortSignal.timeout(1500) })
+    status = response.status
+    // Keep the legacy startup replacement policy; only connection revalidation retries missing evidence.
+    if (status === 404) return { health: { runtime: 'missing' }, healthDiagnostic: `${diagnostic()}：运行身份接口暂时缺失` }
+    if (!response.ok) return { health: null, healthDiagnostic: `${diagnostic()}：请求失败` }
+    parsing = true
+    const body: unknown = await response.json()
+    if (body !== null && (typeof body !== 'object' || Array.isArray(body))) {
+      return { health: null, healthInvalid: true, healthDiagnostic: `${diagnostic()}：运行身份类型无效，必须是 JSON 对象` }
+    }
+    const identity = (body ?? {}) as Record<string, unknown>
+    const health: RuntimeHealth = { runtime: 'ok' }
+    const missing: string[] = [], invalid: string[] = []
+    // Only validated identity fields may reach policy coercion/normalization.
+    for (const field of ['pid', 'executable', 'channel', 'build_id', 'cwd', 'data_home'] as const) {
+      const actual = identity[field]
+      if (actual == null || (field !== 'pid' && actual === '')) { missing.push(field); continue }
+      if (field === 'pid' ? typeof actual !== 'number' || !Number.isSafeInteger(actual) || actual <= 0 : typeof actual !== 'string') {
+        invalid.push(field)
+      } else Object.assign(health, { [field]: actual })
+    }
+    if (invalid.length) {
+      return { health: null, healthInvalid: true, healthDiagnostic: `${diagnostic()}：运行身份字段类型或值无效 ${invalid.join(', ')}` }
+    }
+    return { health, ...(missing.length ? { healthDiagnostic: `${diagnostic()}：运行身份缺少字段 ${missing.join(', ')}` } : {}) }
+  } catch (error) {
+    return { health: null, healthDiagnostic: `${diagnostic()}：${parsing ? 'JSON 解析失败' : '请求失败'}：${String(error)}` }
+  }
 }
 
 const PS_UTF8 = "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); $OutputEncoding = [Console]::OutputEncoding;"
@@ -179,34 +227,83 @@ export async function queryListener(port: number): Promise<Listener | null> {
   }
   return queryProcess(pids[0])
 }
-async function inspect(port: number, expected: Run['expected']): Promise<BackendInput> {
+async function inspect(port: number, expected: Run['expected']): Promise<Inspection> {
   try {
     const listener = await queryListener(port)
-    const health = listener && normalizePath(listener.executable) === normalizePath(expected.expectedExe) ? await readOwnRuntime(port) : null
-    return { ...expected, preferredPort: port, listener, health }
+    const runtime = listener && normalizePath(listener.executable) === normalizePath(expected.expectedExe) ? await readOwnRuntime(port) : { health: null }
+    return { ...expected, preferredPort: port, listener, ...runtime }
   } catch (error) {
     return { ...expected, preferredPort: port, listener: null, health: null, listenerError: String(error) }
+  }
+}
+/** Check supplied fields before treating any absent fields as transient evidence loss. */
+function runtimeConflict(health: RuntimeHealth | null, current: Connection): string | undefined {
+  if (health?.runtime === 'foreign') return '健康接口标题不属于本后端'
+  if (health?.runtime !== 'ok') return
+  if (health.pid != null && Number(health.pid) !== Number(current.listener.pid)) return '运行身份 PID 与已核实监听进程不一致'
+  for (const [field, actual, expected] of [
+    ['executable', health.executable, current.listener.executable],
+    ['channel', health.channel, current.expected.expectedChannel],
+    ['build_id', health.build_id, current.expected.expectedBuild],
+    ['cwd', health.cwd, current.expected.expectedCwd],
+    ['data_home', health.data_home, current.expected.expectedHome]
+  ] as const) {
+    if (actual == null || actual === '') continue
+    const path = field === 'executable' || field === 'cwd' || field === 'data_home'
+    if ((path ? normalizePath(actual) : actual) !== (path ? normalizePath(expected) : expected)) {
+      return `运行身份 ${field} 与已核实连接不一致`
+    }
   }
 }
 function watchConnection(current: Connection, win: BrowserWindow | null): void {
   connection = current
   connectionFailures = 0
+  current.failureDetail = undefined
   connectionTimer = setTimeout(() => { void verifyConnection(current, win) }, 2000)
 }
 async function verifyConnection(current: Connection, win: BrowserWindow | null): Promise<void> {
-  const candidate = await inspect(current.port, current.expected)
   if (stopping || generation !== current.generation || connection !== current) return
-  const unchanged = killPlan({ expectedExe: current.expected.expectedExe, reportedPid: current.listener.pid, reportedExe: current.listener.executable, listener: candidate.listener })
-  if (!unchanged.kill || backendDecision(candidate).action !== 'attach') {
-    // 单次复核失败可能只是 OS 查询超时或一时无法读取进程身份；
-    // 连续多次才判定失效，避免把瞬时抖动升级成永久错误。
-    connectionFailures += 1
-    if (connectionFailures < 3) {
-      connectionTimer = setTimeout(() => { void verifyConnection(current, win) }, 2000)
-      return
+  let candidate = await inspect(current.port, current.expected)
+  if (stopping || generation !== current.generation || connection !== current) return
+  const owner = { expectedExe: current.expected.expectedExe, reportedPid: current.listener.pid, reportedExe: current.listener.executable }
+  let unchanged = killPlan({ ...owner, listener: candidate.listener })
+  // Recovery must not publish the OS snapshot taken before the HTTP identity read.
+  // Do not let a later query error mask an already observed ownership change.
+  if (readyPort === null && unchanged.kill && backendDecision(candidate).action === 'attach') {
+    try { candidate = { ...candidate, listener: await queryListener(current.port) } }
+    catch (error) { candidate = { ...candidate, listener: null, listenerError: String(error) } }
+    if (stopping || generation !== current.generation || connection !== current) return
+    unchanged = killPlan({ ...owner, listener: candidate.listener })
+  }
+  const decision = unchanged.kill ? backendDecision(candidate) : undefined
+  if (!unchanged.kill || decision?.action !== 'attach') {
+    // Missing HTTP/identity evidence is retryable only without any observed contradiction.
+    // An explicitly empty listener or changed OS/runtime identity permanently revokes it.
+    const conflict = candidate.healthInvalid ? '运行身份字段类型或值无效' : runtimeConflict(candidate.health, current)
+    const retryable = !conflict && (Boolean(candidate.listenerError) || unchanged.kill)
+    connectionFailures = Math.min(connectionFailures + 1, 3)
+    if (!retryable || connectionFailures >= 3) {
+      const reason = !unchanged.kill && !candidate.listenerError
+        ? (!candidate.listener ? '操作系统已确认端口没有监听进程' : unchanged.reason)
+        : conflict || candidate.listenerError || '健康或运行身份证据暂时不完整'
+      const detail = [reason, candidate.healthDiagnostic].filter(Boolean).join('；')
+      const message = `后端连接已失效，无法再次核实监听归属（端口 ${current.port}，原 PID ${current.listener.pid}）：${detail}。${retryable ? '已暂停连接，将自动重试核实；请检查系统进程查询权限及后端日志' : '已停止自动重连；请检查端口归属及后端身份后重新启动客户端'}`
+      if (!retryable || readyPort !== null || current.failureDetail !== detail) {
+        console.warn('[backend]', message, { generation: current.generation, listener: candidate.listener, health: candidate.health, healthDiagnostic: candidate.healthDiagnostic })
+        current.failureDetail = detail
+      }
+      if (!retryable || readyPort !== null) {
+        if (readyPort !== null) fail(win, message, retryable ? current : undefined)
+        else invalidate(message)
+      }
+      if (!retryable) return
     }
-    fail(win, '后端连接已失效，无法再次核实监听归属')
+    connectionTimer = setTimeout(() => { void verifyConnection(current, win) }, 2000)
     return
+  }
+  if (readyPort === null) {
+    portReady = pendingPort()
+    publishPort(current.port, win)
   }
   watchConnection(current, win)
 }
@@ -267,7 +364,8 @@ function cleanupRun(run: Run): Promise<boolean> {
       if (!run.exited && run.verified?.pid !== run.proc.pid && stoppedPid !== run.proc.pid) {
         const parent = await queryProcess(run.proc.pid)
         if (!run.exited) {
-          const plan = killPlan({ expectedExe: run.expected.expectedExe, reportedPid: run.proc.pid, listener: parent })
+          // 独立关闭启动进程只认本次 Run 生成的启动器映像证据。
+          const plan = killPlan({ expectedExe: run.launcherExe ?? run.expected.expectedExe, reportedPid: run.proc.pid, listener: parent })
           if (plan.kill) await stopPid(run.proc.pid)
           else { complete = false; console.warn('[backend]', plan.reason) }
         }
@@ -291,7 +389,8 @@ async function spawnedOwner(run: Run, listener: Listener): Promise<boolean> {
   if (listener.pid === run.proc.pid) return true
   if (!run.proc.pid || listener.parentPid !== run.proc.pid) return false
   const parent = await queryProcess(run.proc.pid)
-  return parent.pid === run.proc.pid && normalizePath(parent.executable) === normalizePath(run.expected.expectedExe)
+  // 父进程证据比对的是启动器映像（venv 转发器），不是探测出的真实监听映像。
+  return parent.pid === run.proc.pid && normalizePath(parent.executable) === normalizePath(run.launcherExe ?? run.expected.expectedExe)
 }
 async function waitForReady(run: Run, win: BrowserWindow | null): Promise<void> {
   // 现场机器装完包后杀软扫描/系统繁忙时，PowerShell 查监听可能要数秒；
@@ -333,7 +432,13 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
     }
     const launch = findBackendLaunch()
     if (!launch) { fail(win, `未找到后端服务 (${EXE_NAME})`); return }
-    const expected: Run['expected'] = { packaged: app.isPackaged, expectedExe: normalizePath(launch.command), expectedBuild: expectedBuildId(launch), expectedChannel: releaseIdentity.channel, expectedCwd: normalizePath(launch.cwd), expectedHome: normalizePath(dirname(currentBackendDataDir())) }
+    let expectedExe = normalizePath(launch.command)
+    if (launch.sourcePython && process.platform === 'win32') {
+      try { expectedExe = normalizePath(await probeSourcePythonImage(launch)) }
+      catch (error) { fail(win, `无法核实开发解释器的真实进程映像，已拒绝启动：${String(error)}`); return }
+      if (stopping || token !== generation) return
+    }
+    const expected: Run['expected'] = { packaged: app.isPackaged, expectedExe, expectedBuild: expectedBuildId(launch), expectedChannel: releaseIdentity.channel, expectedCwd: normalizePath(launch.cwd), expectedHome: normalizePath(dirname(currentBackendDataDir())) }
     const saved = readSavedPort()
     const ports = [...new Set([PREFERRED_PORT, ...(saved ? [saved] : [])])]
     const candidates: BackendInput[] = []
@@ -363,7 +468,7 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
     if (stopping || token !== generation) return
     const env = { ...backendEnv(), WEB__PORT: String(port), PYTHONUNBUFFERED: '1' }
     const proc = spawn(launch.command, launch.args, { cwd: launch.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-    const run: Run = { generation: token, proc, expected, port }
+    const run: Run = { generation: token, proc, expected, port, launcherExe: normalizePath(launch.command) }
     active = run
     let stdout = ''
     proc.stdout?.on('data', (data: Buffer) => {
@@ -380,11 +485,13 @@ export async function startBackend(win: BrowserWindow | null): Promise<void> {
       active = null; ++generation
       fail(win, `后端启动失败：${error.message}`)
     })
-    proc.on('exit', () => {
+    proc.on('exit', (code, signal) => {
+      const message = `后端已退出（PID ${proc.pid}，code=${code ?? 'null'}，signal=${signal ?? 'none'}）`
+      if (!run.exited) console.warn('[backend]', message)
       run.exited = true
       if (active !== run || token !== generation) return
       active = null; ++generation
-      invalidate('后端已退出'); notifyRenderer(win, 'stopped')
+      invalidate(message); notifyRenderer(win, 'stopped')
     })
     void waitForReady(run, win).catch((error: unknown) => failRun(run, win, String(error)))
   } catch (error) {

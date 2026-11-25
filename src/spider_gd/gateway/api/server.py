@@ -3603,27 +3603,40 @@ def create_app(
         """从 JSON 导入数据（覆盖当前数据，请谨慎使用）。"""
         imported: list[str] = []
         errors: list[str] = []
+        warnings: list[str] = []
 
         # 导入设置
         settings = payload.get("settings", {})
         if isinstance(settings, dict) and settings:
             try:
                 kv = {str(k): str(v) for k, v in settings.items()}
-                service._ctx.state_store.save_settings(kv)
-                imported.append(f"设置 ({len(kv)} 项)")
+                for key in ("downloadDir", "deliveryDesktopWechatProfilePath"):
+                    if not kv.get(key, "").strip():
+                        continue
+                    try:
+                        validate_write_path(kv[key], key)
+                    except ValueError:
+                        kv.pop(key)
+                        warnings.append(f"{key}: 未导入备份中的外部机器路径，沿用本机设置")
+                saved = await save_settings({"settings": kv})
+                imported.append(f"设置 ({len(saved['settings'])} 项)")
             except Exception as e:
                 errors.append(f"设置导入失败: {e}")
 
         # 导入任务
         tasks = payload.get("tasks", [])
         if isinstance(tasks, list):
+            imported_count = 0
             for t in tasks:
+                if not isinstance(t, dict) or not t.get("id"):
+                    errors.append("任务导入失败: 缺少任务 ID")
+                    continue
                 try:
-                    if "id" in t:
-                        service._ctx.state_store.save_task_config(t)
+                    service._ctx.state_store.save_task_config(t)
+                    imported_count += 1
                 except Exception as e:
                     errors.append(f"任务 {t.get('id','?')} 导入失败: {e}")
-            imported.append(f"任务 ({len(tasks)} 个)")
+            imported.append(f"任务 ({imported_count} 个)")
 
         # 导入路由规则
         rules = payload.get("route_rules", [])
@@ -3686,7 +3699,8 @@ def create_app(
                     errors.append(f"工作流 {wf.get('name','?')} 导入失败: {e}")
             imported.append(f"工作流 ({imported_count} 个)")
 
-        return {"status": "ok", "imported": imported, "errors": errors}
+        return {"status": "partial" if errors else "ok", "imported": imported,
+                "errors": errors, "warnings": warnings}
 
     @app.post("/api/data/reset")
     async def factory_reset() -> dict[str, Any]:

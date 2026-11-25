@@ -449,3 +449,185 @@ async def test_same_origin_old_tab_blocks_replay(tmp_path):
     assert old.url in warning["pages"]
     assert any(event["event"] == "error_pause" for event in events)
     assert not any(event["event"] == "page_recovery" for event in events)
+
+
+async def test_station_ensure_login_cancel_preserves_manual_tabs(tmp_path, monkeypatch):
+    import asyncio
+    import socket
+    import subprocess
+
+    import tests.unit.test_station_execution as station
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("登录暂停回归不允许真实网络或系统操作")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    page = station._StationPage()
+    session = station._locked_station_session(page)
+    configs = {
+        "login": {"name": "login", "type": "login", "needs_login": False,
+                  "steps": [{"action": "ensure_login"}]},
+        "a": {"name": "a", "needs_login": False, "steps": [{"action": "wait", "ms": 1}]},
+    }
+    runner = station._station_task(
+        tmp_path, stations=[{"name": "场站甲", "org_name": "单位甲"}], loader=configs.get,
+    )
+    events = []
+
+    def emit(event):
+        events.append(event)
+        if event["event"] == "error_pause":
+            session.pauses.put_nowait(None)
+
+    task = asyncio.create_task(runner.run(emit, session=session))
+    try:
+        await station._identity_pause(task, session, events)
+        assert any(event.get("action") == "ensure_login" for event in events)
+        landing = await page.context.new_page()
+        station._workbench(landing, "单位甲")
+        notes = await page.context.new_page()
+        notes.url = "https://notes.example.test/manual"
+        session.cancel(session.status()["run"]["id"])
+        await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert session.status()["run"]["state"] == "cancelled"
+        assert not session.status()["busy"]
+        assert not landing.closed and not notes.closed
+        assert not any(event.get("phase") == "indicator" for event in events)
+        assert not any(page.context.listeners.values())
+    finally:
+        await station._finish_test_task(task)
+
+
+def test_station_auth_proof_js_scopes_dirtiness_to_identity():
+    """Execute the real _STATION_AUTH_PROOF_JS in node against a minimal DOM shim.
+
+    The Python fake re-implements the observer; this drives the actual JS string
+    so the record filter itself is verified: benign churn stays clean, identity
+    edits (including change-and-revert and node replacement) stay fail closed.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not on PATH")
+    from task_runner import _STATION_AUTH_PROOF_JS
+
+    harness = r"""
+'use strict';
+const fn = eval(__SOURCE__);
+class ShimNode {
+  constructor(name, parent) { this.name = name; this.parent = parent || null; }
+  contains(other) {
+    let n = other; while (n) { if (n === this) return true; n = n.parent; } return false;
+  }
+  append(child) { child.parent = this; return child; }
+  detach(child) { child.parent = null; return child; }
+}
+const document = new ShimNode('document');
+const body = document.append(new ShimNode('body'));
+const main = body.append(new ShimNode('main'));
+const identity = main.append(new ShimNode('identity'));
+const identityText = identity.append(new ShimNode('#text'));
+const widget = body.append(new ShimNode('widget'));
+const clockText = widget.append(new ShimNode('#text'));
+let current = identity;
+document.querySelector = (sel) => (sel === '#identity' ? current : null);
+const observers = [];
+class MutationObserver {
+  constructor(cb) { this.cb = cb; this.queue = []; }
+  observe() { observers.push(this); }
+  disconnect() {
+    const i = observers.indexOf(this); if (i >= 0) observers.splice(i, 1); this.queue = [];
+  }
+  takeRecords() { const r = this.queue; this.queue = []; return r; }
+}
+const reports = [];
+const console = { debug: (...args) => reports.push(args.join(' ')) };
+const rec = (target, extra) => Object.assign(
+  { target, addedNodes: [], removedNodes: [] }, extra || {});
+const deliver = (record) => { for (const o of observers.slice()) o.queue.push(record); };
+const TOKEN = '__spider_station_auth_test';
+const arg = (op, selector) => (
+  { op, token: TOKEN, selector: selector === undefined ? '#identity' : selector });
+const check = (cond, msg) => {
+  if (!cond) { process.stdout.write('FAIL: ' + msg + '\n'); process.exit(1); }
+};
+
+// 1. Benign churn elsewhere: clock text, widget childList, unrelated body childList.
+check(fn(arg('station_auth_watch')) === true, 'watch must arm');
+deliver(rec(clockText));
+deliver(rec(widget, { addedNodes: [new ShimNode('row')] }));
+deliver(rec(body, { addedNodes: [new ShimNode('banner')] }));
+check(fn(arg('station_auth_flush')) === true, 'benign churn must not dirty');
+observers[0].cb([rec(clockText)]);  // callback delivery path must filter too
+check(fn(arg('station_auth_flush')) === true, 'benign callback must not dirty');
+// 2. Identity text change-and-revert stays dirty.
+deliver(rec(identityText));
+deliver(rec(identityText));
+check(fn(arg('station_auth_flush')) === false, 'identity change-and-revert must dirty');
+check(reports.indexOf(TOKEN) >= 0, 'dirty must console-report the nonce');
+check(fn(arg('station_auth_stop')) === true, 'stop must disarm');
+// 3. Identity node replaced then restored with identical text.
+fn(arg('station_auth_watch'));
+const replacement = main.append(new ShimNode('identity'));
+main.detach(identity);
+current = replacement;
+deliver(rec(main, { removedNodes: [identity], addedNodes: [replacement] }));
+check(fn(arg('station_auth_flush')) === false, 'identity replacement must dirty');
+fn(arg('station_auth_stop'));
+// 4. Identity removed and not restored (selector re-query returns null).
+current = identity;
+fn(arg('station_auth_watch'));
+main.detach(identity);
+current = null;
+deliver(rec(main, { removedNodes: [identity] }));
+check(fn(arg('station_auth_flush')) === false, 'identity removal must dirty');
+fn(arg('station_auth_stop'));
+// 5. Ancestor chain removal takes the identity with it.
+current = identity;
+main.append(identity);
+fn(arg('station_auth_watch'));
+body.detach(main);
+current = null;
+deliver(rec(body, { removedNodes: [main] }));
+check(fn(arg('station_auth_flush')) === false, 'ancestor removal must dirty');
+fn(arg('station_auth_stop'));
+// 6. Attribute change on the identity itself.
+body.append(main);
+current = identity;
+fn(arg('station_auth_watch'));
+deliver(rec(identity));
+check(fn(arg('station_auth_flush')) === false, 'identity attribute change must dirty');
+fn(arg('station_auth_stop'));
+// 7. Missing selector fails closed on any record.
+fn(arg('station_auth_watch', ''));
+deliver(rec(clockText));
+check(fn(arg('station_auth_flush', '')) === false, 'empty selector must fail closed');
+fn(arg('station_auth_stop'));
+// 8. Flush without watch is false; stop is idempotent.
+check(fn(arg('station_auth_flush')) === false, 'flush without watch must be false');
+check(fn(arg('station_auth_stop')) === true, 'stop without watch must be true');
+// 9. Selector querySelector cannot resolve (Playwright text= / shadow-root identity):
+//    the locator-visible identity exists and mutates, but the CSS-only proof is blind
+//    and MUST fail closed rather than report a clean proof.
+current = identity;
+fn(arg('station_auth_watch', 'text=单位甲'));
+deliver(rec(identityText));
+check(fn(arg('station_auth_flush', 'text=单位甲')) === false, 'unlocatable selector must fail closed');
+fn(arg('station_auth_stop'));
+// 10. Valid CSS selector whose identity is absent at flush also fails closed.
+current = null;
+fn(arg('station_auth_watch', '#identity'));
+deliver(rec(clockText));
+check(fn(arg('station_auth_flush', '#identity')) === false, 'absent identity must fail closed');
+fn(arg('station_auth_stop'));
+process.stdout.write('OK\n');
+"""
+    script = harness.replace("__SOURCE__", json.dumps(_STATION_AUTH_PROOF_JS))
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, f"real JS proof filter failed:\n{proc.stdout}\n{proc.stderr}"
+    assert "OK" in proc.stdout, f"real JS proof filter failed:\n{proc.stdout}\n{proc.stderr}"

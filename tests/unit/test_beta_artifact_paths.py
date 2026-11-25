@@ -433,6 +433,19 @@ async def test_beta_notice_download_rejects_output_base_before_mkdir(beta_home, 
     assert not outside.exists()
 
 
+def _api_workbook_bytes():
+    import io
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.append(["price"])
+    wb.active.append([42])
+    output = io.BytesIO()
+    wb.save(output)
+    wb.close()
+    return output.getvalue()
+
+
 class ApiPage(ArtifactPage):
     def __init__(self, result):
         super().__init__()
@@ -440,7 +453,7 @@ class ApiPage(ArtifactPage):
 
     async def evaluate(self, script, arg=None):
         if isinstance(arg, dict) and "jsonBody" in arg:
-            return {"ok": True, **self.result}
+            return {"ok": True, "status": 200, **self.result}
         return await super().evaluate(script, arg)
 
 
@@ -448,7 +461,11 @@ class ApiPage(ArtifactPage):
 async def test_beta_api_fallback_rechecks_suffix_changed_leaf(beta_home, tmp_path, custom):
     runner = workflow(beta_home, custom_filenames={"s0": "custom"} if custom else {})
     runner.config["api_fallback"] = {"url": "/local-fake"}
-    runner.pages = [ApiPage({"contentType": "application/octet-stream", "base64": "bmV3"})]
+    import base64
+
+    raw = _api_workbook_bytes()
+    runner.pages = [ApiPage({"contentType": "application/octet-stream",
+                             "base64": base64.b64encode(raw).decode()})]
     outside = tmp_path / "outside.xlsx"
     outside.write_bytes(b"keep")
     target = beta_home / ("custom.xlsx" if custom else "report.xlsx")
@@ -463,8 +480,12 @@ async def test_beta_api_fallback_rechecks_suffix_changed_leaf(beta_home, tmp_pat
 async def test_beta_api_fallback_saves_readable_binary_output(beta_home, custom):
     runner = workflow(beta_home, custom_filenames={"s0": "custom"} if custom else {})
     runner.config["api_fallback"] = {"url": "/local-fake"}
-    runner.pages = [ApiPage({"contentType": "application/octet-stream", "base64": "bmV3"})]
+    import base64
+
+    raw = _api_workbook_bytes()
+    runner.pages = [ApiPage({"contentType": "application/octet-stream",
+                             "base64": base64.b64encode(raw).decode()})]
     assert await runner._try_api_fallback("report.txt", RuntimeError("no download"))
     target = beta_home / ("custom.xlsx" if custom else "report.xlsx")
-    assert target.read_bytes() == b"new"
+    assert target.read_bytes() == raw
     assert (beta_home / ".file_versions.json").exists() == (not custom)

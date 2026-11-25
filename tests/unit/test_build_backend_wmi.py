@@ -143,7 +143,7 @@ def test_pywin32_dll_search_reads_known_folders(tmp_path: Path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("failure", [None, "wmi", "win32com.client", "pywintypes"])
-def test_wmi_probe_exec_initializes_com_before_import_and_always_releases(failure):
+def test_wmi_probe_keeps_com_alive_until_process_exit(failure):
     events = []
     pythoncom = SimpleNamespace(
         CoInitialize=lambda: events.append("initialize"),
@@ -169,7 +169,7 @@ def test_wmi_probe_exec_initializes_com_before_import_and_always_releases(failur
     expected = ["pythoncom", "initialize", "wmi", "win32com.client", "pywintypes"]
     if failure:
         expected = expected[:expected.index(failure) + 1]
-    assert events == [*expected, "uninitialize"]
+    assert events == expected
 
 
 @pytest.mark.unit

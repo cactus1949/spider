@@ -221,6 +221,8 @@ export default function SettingsModal({
   const [ukeyDownloading, setUkeyDownloading] = useState(false)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsError, setSettingsError] = useState('')
+  const settingsLoadGeneration = useRef(0)
+  const settingsOpen = useRef(open)
   const [saving, setSaving] = useState(false)
   const baselineRef = useRef<Record<string, string>>({})
   const usbOptions = [
@@ -246,7 +248,7 @@ export default function SettingsModal({
     }
   }).filter((group) => group.options.length > 0)
 
-  const applyLoadedSettings = useCallback((s: Record<string, string>): Record<string, string> => {
+  const applyLoadedSettings = useCallback((s: Record<string, string>, replaceStations = false): Record<string, string> => {
         const merged = { ...DEFAULTS }
         for (const [k, v] of Object.entries(s)) {
           if (v === 'true') (merged as any)[k] = true
@@ -309,7 +311,10 @@ export default function SettingsModal({
         form.setFieldsValue(formValues)
         setDir(merged.downloadDir)
         const savedStations = (merged as { stationProfiles?: string }).stationProfiles || ''
-        if (!stationsDirty.current) setStations(parseStationDrafts(savedStations))
+        if (replaceStations || !stationsDirty.current) {
+          setStations(parseStationDrafts(savedStations))
+          if (replaceStations) stationsDirty.current = false
+        }
         setStationsReady(true)
         const snapshot: Record<string, string> = {}
         for (const [key, val] of Object.entries(formValues)) {
@@ -321,29 +326,41 @@ export default function SettingsModal({
         return snapshot
   }, [form])
 
-  const loadSettings = useCallback(async (): Promise<void> => {
+  const loadSettings = useCallback(async (replaceStations = false): Promise<boolean> => {
+    if (!settingsOpen.current) return false
+    const generation = ++settingsLoadGeneration.current
     setSettingsError('')
     setSettingsLoaded(false)
     settingsStore.reset()
     try {
       const loaded = await settingsStore.load()
-      applyLoadedSettings(loaded)
+      if (generation !== settingsLoadGeneration.current || !settingsOpen.current) return false
+      applyLoadedSettings(loaded, replaceStations)
       setSettingsLoaded(true)
+      return true
     } catch (error: unknown) {
+      if (generation !== settingsLoadGeneration.current || !settingsOpen.current) return false
       setSettingsLoaded(false)
       setSettingsError(error instanceof Error ? error.message : '设置加载失败，未使用默认值，避免覆盖已保存的数据')
+      return false
     }
   }, [applyLoadedSettings])
 
   useEffect(() => {
+    settingsOpen.current = open
     if (!open) {
       stationsDirty.current = false
       setStationsReady(false)
+      setSettingsLoaded(false)
       return
     }
     stationsDirty.current = false
     setActiveSection('section-basic')
     void loadSettings()
+    return () => {
+      settingsOpen.current = false
+      settingsLoadGeneration.current += 1
+    }
   }, [open, loadSettings])
 
   const pickDir = async (): Promise<void> => {
@@ -1887,8 +1904,16 @@ export default function SettingsModal({
                         const text = await file.text()
                         const data = JSON.parse(text)
                         const res = await api.importAllData(data)
+                        const refreshed = await loadSettings(true)
+                        window.dispatchEvent(new Event('settings-updated'))
+                        const refreshWarning = refreshed ? '' : '；设置刷新失败，请重试或重新打开设置核对'
+                        const migrationWarning = res.warnings?.length ? '；' + res.warnings.join('; ') : ''
                         if (res.errors?.length) {
-                          message.warning('导入完成，但有错误: ' + res.errors.join('; '))
+                          message.warning('部分数据导入失败: ' + res.errors.join('; ') + migrationWarning + refreshWarning)
+                        } else if (!refreshed) {
+                          message.warning('数据已导入' + migrationWarning + refreshWarning)
+                        } else if (res.warnings?.length) {
+                          message.warning(`导入完成: ${res.imported?.join(', ') || ''}` + migrationWarning)
                         } else {
                           message.success(`导入完成: ${res.imported?.join(', ') || ''}`)
                         }

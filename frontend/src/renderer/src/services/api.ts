@@ -729,9 +729,12 @@ export const api = {
   // ---- 数据管理 ----
   exportAllData: () => req<Record<string, unknown>>('/api/data/export'),
   importAllData: (data: Record<string, unknown>) =>
-    req<{ status: string; imported: string[]; errors: string[] }>('/api/data/import', {
+    req<{ status: string; imported: string[]; errors: string[]; warnings: string[] }>('/api/data/import', {
       method: 'POST',
       body: JSON.stringify(data)
+    }).then((result) => {
+      settingsStore.reset()
+      return result
     }),
   factoryReset: () =>
     req<{ status: string; cleared: string[]; message: string }>('/api/data/reset', { method: 'POST' }),
@@ -765,6 +768,7 @@ export const api = {
 
 let _settingsCache: Record<string, string> | null = null
 let _settingsPromise: Promise<Record<string, string>> | null = null
+let _settingsGeneration = 0
 
 function maskStationProfiles(raw: string): string {
   try {
@@ -790,10 +794,13 @@ export const settingsStore = {
   async load(): Promise<Record<string, string>> {
     if (_settingsCache) return _settingsCache
     if (!_settingsPromise) {
+      const generation = _settingsGeneration
       _settingsPromise = api.getSettings().then(r => {
+        if (generation !== _settingsGeneration) return settingsStore.load()
         _settingsCache = r.settings || {}
         return _settingsCache
-      }).catch((error: unknown) => {
+      }, (error: unknown) => {
+        if (generation !== _settingsGeneration) return settingsStore.load()
         _settingsPromise = null
         _settingsCache = null
         throw error
@@ -804,8 +811,7 @@ export const settingsStore = {
 
   /** 丢掉缓存后重新读取，用来核对刚刚保存的值。 */
   async reload(): Promise<Record<string, string>> {
-    _settingsCache = null
-    _settingsPromise = null
+    this.reset()
     return this.load()
   },
 
@@ -821,17 +827,21 @@ export const settingsStore = {
 
   /** 保存并更新缓存 */
   async save(settings: Record<string, string>): Promise<Record<string, string>> {
+    const generation = _settingsGeneration
     const saved = await api.saveSettings(settings)
-    if (!_settingsCache) _settingsCache = {}
-    const cached = { ...settings }
-    if (cached.wifiPassword) cached.wifiPassword = '******'
-    if (cached.stationProfiles) cached.stationProfiles = maskStationProfiles(cached.stationProfiles)
-    Object.assign(_settingsCache, cached)
+    if (generation === _settingsGeneration) {
+      if (!_settingsCache) _settingsCache = {}
+      const cached = { ...settings }
+      if (cached.wifiPassword) cached.wifiPassword = '******'
+      if (cached.stationProfiles) cached.stationProfiles = maskStationProfiles(cached.stationProfiles)
+      Object.assign(_settingsCache, cached)
+    }
     return saved.settings || {}
   },
 
   /** 重置缓存（下次 load 重新拉） */
   reset(): void {
+    _settingsGeneration += 1
     _settingsCache = null
     _settingsPromise = null
   }

@@ -197,8 +197,6 @@ def _exercise_build_self_test(
     ]
     if failure:
         expected = expected[:expected.index(failure) + 1]
-    if platform == "win32" and failure not in ("pythoncom", "initialize"):
-        expected += ["uninitialize"]
     assert events == expected
     assert not home.exists()
     assert env_file.read_bytes() == original

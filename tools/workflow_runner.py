@@ -18,6 +18,7 @@ import random
 import re
 import sys
 import time
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,9 @@ from os.path import commonpath  # noqa: E402
 
 from spider_gd.core.workflow_outputs import OUTPUT_ACTIONS, save_as_filename  # noqa: E402
 
-def render_save_as(save_as: str, current: date | None) -> str:
+def render_save_as(
+    save_as: str, current: date | None, query_month: str | date | None = None,
+) -> str:
     """把 save_as 里的日期占位符换成具体文件名。
 
     Args:
@@ -82,6 +85,9 @@ def render_save_as(save_as: str, current: date | None) -> str:
     """
     today = current or date.today()
     previous = today.replace(day=1) - timedelta(days=1)
+    if query_month:
+        previous = (query_month if isinstance(query_month, date)
+                    else date.fromisoformat(f"{str(query_month)[:7]}-01"))
     rendered = str(save_as or "").strip()
     if not rendered:
         return ""
@@ -95,8 +101,8 @@ def render_save_as(save_as: str, current: date | None) -> str:
             previous_month=previous.strftime("%Y%m"),
             previous_month_iso=previous.strftime("%Y-%m"),
         )
-    except (KeyError, IndexError, ValueError):
-        pass
+    except (KeyError, IndexError, ValueError) as exc:
+        raise WorkflowExecutionError(f"未知文件名占位符：{save_as}") from exc
     return save_as_filename(rendered)
 
 
@@ -210,7 +216,7 @@ def plan_download_files(
     def one(step: dict, position: str, current: date | None, date_text: str) -> dict[str, Any]:
         """组装一个预期文件。"""
         save_as = str(step.get("save_as") or "")
-        filename = render_save_as(save_as, current)
+        filename = render_save_as(save_as, current, query_month)
         template = names.get(position, "")
         if template:
             from spider_gd.core.custom_filename import (
@@ -892,6 +898,27 @@ class WorkflowRunner:
         self._query_request_metadata: dict[Any, dict] = {}
         self._query_request_history: list[dict] = []
         self._query_frame_generations: dict[Any, int] = {}
+        # 只有观测到该框架的 document 传输（真实跨文档导航）才推进文档代际；
+        # hash/pushState/replaceState 的 framenavigated 不作废已有查询证明。
+        # 按帧计数在途 document 传输：旧请求的迟到失败只减自己的计数，
+        # 不能清掉同帧 newer 导航的凭据（否则真实跨文档导航漏推进代际）。
+        self._query_frame_document_pending: dict[Any, int] = {}
+        # Safety evidence is not diagnostic history: retain one latest query/document
+        # and compact successful transport generation per tracked frame (max 64).
+        # Active declared queries/documents retain identity independently (max 128).
+        self._query_frame_safety: dict[Any, dict] = {}
+        self._query_active_requests: dict[Any, dict] = {}
+        self._query_pending_bodies: dict[Any, dict] = {}
+        self._query_body_overflow = 0
+        # 截断按当前溢出状态实时判定（见 _query_safety_truncated 属性）；
+        # 只有观测器挂载失败这类不可恢复损失才永久粘死。
+        self._query_safety_lost = False
+        self._manual_query_recovery: dict | None = None
+        self._manual_query_replacements: dict[Any, dict] = {}
+        # window.open("") 弹窗创建时还是 about:blank，源校验推迟到首次真实导航。
+        self._manual_popup_deferred: dict[Any, dict] = {}
+        self._manual_query_navigation_requests: dict[Any, dict] = {}
+        self._manual_query_context_observers: list = []
         self._query_metadata_dropped = 0
         self._query_history_dropped = 0
         self._query_frames_truncated = False
@@ -993,19 +1020,9 @@ class WorkflowRunner:
           {previous_month} → 上月，例如 202605
           {previous_month_iso} → 上月，例如 2026-05
         """
-        today = self.target_date or date.today()
-        _month_start, month_end = self._settlement_month_bounds()
-        rendered = str(save_as or "").strip().format(
-            date=today.isoformat(),
-            date_compact=today.strftime("%Y%m%d"),
-            year=today.strftime("%Y"),
-            month=today.strftime("%Y%m"),
-            month_iso=today.strftime("%Y-%m"),
-            previous_month=month_end.strftime("%Y%m"),
-            previous_month_iso=month_end.strftime("%Y-%m"),
-        )
-        name = save_as_filename(rendered)
-        if name != rendered:
+        name = render_save_as(save_as, self.target_date, self.query_month)
+        raw = str(save_as or "").strip()
+        if save_as_filename(raw) != raw:
             logger.warning(
                 "  save_as 含目录，已忽略：{}；目录请在任务存储结构中配置", save_as,
             )
@@ -1368,18 +1385,73 @@ class WorkflowRunner:
     # ----- 新标签页回调 -----
 
     async def _on_new_page(self, new_page) -> None:
-        if self._shared_session is not None:
+        recovery = self._manual_query_recovery if self._paused else None
+        opener_proven = False
+        blank_popup = False
+        if self._shared_session is not None or recovery:
             opener = await new_page.opener()
             if opener not in self.pages:
                 return
+            if recovery:
+                if recovery is not self._manual_query_recovery or not self._paused:
+                    return
+                new_url = self._page_url(new_page)
+                # CDP 下 window.open("") 再设 location 的导出/打印弹窗，目标创建时
+                # 还是 about:blank/空 URL：源校验推迟到首次真实导航，其余即刻校验。
+                blank_popup = new_url in ("", "about:blank")
+                if (new_page in recovery["known_pages"]
+                        or getattr(new_page, "context", None) is not recovery["context"]
+                        or getattr(opener, "context", None) is not recovery["context"]
+                        or self._manual_query_origin(opener) != recovery["origin"]
+                        or (not blank_popup and (
+                            self._manual_query_origin(new_page) != recovery["origin"]
+                            or is_public_portal_url(new_url)))
+                        or is_public_portal_url(self._page_url(opener))):
+                    return
+                opener_proven = True
         if new_page in self.pages:
             return
         logger.info("  检测到新标签页 #{}", len(self.pages))
+        self._observe_manual_query_binding(self.page, new_page, opener_proven=opener_proven)
+        if opener_proven:
+            if blank_popup:
+                self._manual_popup_deferred[new_page] = {"recovery": recovery, "previous": self.page}
+            else:
+                self._adopt_manual_query_navigation(new_page)
         self.pages.append(new_page)
         self._current_page_idx = len(self.pages) - 1
         self._observe_page(new_page)
         # 新标签若没被选中，标签栏会空着，后台页的签名也容易被拒。
         await self._bring_page_to_front(new_page)
+
+    def _resolve_deferred_popup_origin(self, frame) -> None:
+        """空白弹窗的首次真实导航：此刻校验源，合法则收编导航传输，否则撤销收编。"""
+        page = getattr(frame, "page", None)
+        entry = self._manual_popup_deferred.get(page)
+        if entry is None or frame is not getattr(page, "main_frame", None):
+            return
+        url = self._page_url(page)
+        if url in ("", "about:blank"):
+            return
+        del self._manual_popup_deferred[page]
+        recovery = entry["recovery"]
+        if (recovery is not self._manual_query_recovery or not self._paused
+                or getattr(page, "context", None) is not recovery["context"]
+                or self._manual_query_origin(page) != recovery["origin"]
+                or is_public_portal_url(url)):
+            self._revoke_manual_popup(page, entry["previous"])
+            return
+        self._adopt_manual_query_navigation(page)
+
+    def _revoke_manual_popup(self, page, previous) -> None:
+        """首次导航暴露出错误源/公开页/过期暂停范围：撤销收编，不作为导出目标。"""
+        replacement = self._manual_query_replacements.get(previous)
+        if replacement and replacement["new_page"] is page:
+            del self._manual_query_replacements[previous]
+        if page in self.pages:
+            self.pages.remove(page)
+            self._current_page_idx = (self.pages.index(previous)
+                                      if previous in self.pages else 0)
 
     # ----- 页面观测：网关拒绝 / 控制台异常 / 网络静默 -----
 
@@ -1444,15 +1516,381 @@ class WorkflowRunner:
         except ValueError:
             return ""
 
+    def _bind_query_templates(self, value: Any) -> Any:
+        """Bind only known date tokens, preserving JSON braces and non-string values."""
+        if isinstance(value, dict):
+            return {key: self._bind_query_templates(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._bind_query_templates(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        target = self.target_date or date.today()
+        first, last = self._settlement_month_bounds()
+        replacements = {
+            "date": target.isoformat(), "date_compact": target.strftime("%Y%m%d"),
+            "target": target.isoformat(), "target_ym": f"{target.year}年{target.month}月",
+            "year": target.strftime("%Y"), "month": target.strftime("%Y%m"),
+            "month_iso": target.strftime("%Y-%m"),
+            "previous_month": last.strftime("%Y%m"),
+            "previous_month_iso": last.strftime("%Y-%m"),
+            "previous_month_start": first.isoformat(), "previous_month_end": last.isoformat(),
+        }
+        def replace(match):
+            token = match.group(1)
+            if token not in replacements:
+                raise WorkflowExecutionError(f"未知查询日期占位符：{{{token}}}")
+            return replacements[token]
+        return re.sub(r"\{([A-Za-z_]\w*)\}", replace, value)
+
+    def _query_scope(self) -> str:
+        return f"{self.target_date or date.today()}|{self.query_month or ''}"
+
+    @property
+    def _query_safety_truncated(self) -> bool:
+        """安全追踪是否正处于溢出截断状态（实时判定，溢出期间一律 fail closed）。
+
+        请求完成/页面关闭/正文排空使溢出条件消失后自动解除，人工弹窗恢复
+        不会被整轮粘死；观测器挂载失败是不可恢复损失，保持粘死。
+        """
+        return (self._query_safety_lost
+                or len(self._query_active_requests) >= 128
+                or self._query_body_overflow > 0
+                or len(self._manual_query_replacements) >= 64
+                or len(self._manual_query_navigation_requests) >= 64)
+
+    def _query_request_matches(self, request) -> tuple[bool, bool]:
+        """query_result declares the endpoint, current params/form/json and business contract.
+
+        Unknown endpoints have no success proof. A date-scoped query must explicitly
+        bind its date/month; a static URL alone cannot prove the selected result date.
+        """
+        from urllib.parse import parse_qs, urljoin, urlsplit
+
+        contract = self.config.get("query_result") or {}
+        if not contract:
+            return False, False
+        try:
+            raw_url = contract.get("url") or contract.get("api_path") or ""
+            url = self._bind_query_templates(raw_url)
+            expected_url = urlsplit(urljoin(self._page_url(self._request_owner_page(request)), url))
+            actual_url = urlsplit(request.url)
+            endpoint = bool(raw_url) and (
+                expected_url.scheme, expected_url.netloc, expected_url.path
+            ) == (actual_url.scheme, actual_url.netloc, actual_url.path)
+            if not endpoint:
+                return False, False
+            if request.method.upper() != str(contract.get("method", "GET")).upper():
+                return True, False
+            binding = {key: contract.get(key) for key in ("url", "api_path", "params", "form", "json")}
+            if (self.target_date or self.query_month) and not re.search(
+                r"\{(?:date|date_compact|target|target_ym|month|month_iso|previous_month(?:_iso|_start|_end)?)\}",
+                json.dumps(binding),
+            ):
+                return True, False
+            expected_params = parse_qs(expected_url.query, keep_blank_values=True)
+            for key, value in self._bind_query_templates(contract.get("params") or {}).items():
+                expected_params[key] = [str(value).lower() if isinstance(value, bool) else str(value)]
+            params = parse_qs(actual_url.query, keep_blank_values=True)
+            if any(params.get(key) != value for key, value in expected_params.items()):
+                return True, False
+            if "json" in contract:
+                actual = json.loads(request.post_data or "null")
+                expected = self._bind_query_templates(contract["json"])
+                # 与 _validated_business_data 一致：类型+值严格相等，
+                # 契约 {"n": 1} 不能被 true/1.0 蒙混匹配。
+                if not isinstance(actual, dict) or any(
+                    key not in actual or type(actual[key]) is not type(value)
+                    or actual[key] != value
+                    for key, value in expected.items()
+                ):
+                    return True, False
+            if contract.get("form"):
+                actual = parse_qs(request.post_data or "", keep_blank_values=True)
+                expected = self._bind_query_templates(contract["form"])
+                if any(actual.get(k) != [str(v)] for k, v in expected.items()):
+                    return True, False
+            return True, True
+        except (AttributeError, TypeError, ValueError, WorkflowExecutionError):
+            return True, False
+
+    def _query_metadata(self, request) -> dict:
+        try:
+            metadata = self._query_active_requests.get(request)
+            if metadata is None:
+                metadata = self._query_request_metadata.get(request)
+            if metadata is not None:
+                return metadata
+            safety = self._query_frame_safety.get(getattr(request, "frame", None), {})
+            for kind in ("query", "document"):
+                observed_request, metadata = safety.get(kind, (None, {}))
+                if observed_request is request:
+                    return metadata
+            # Truncation loses generation proof, never declared endpoint identity.
+            # This cannot authorize success or supersession, but still blocks polling
+            # exclusion and validates completed invalid bodies as errors.
+            endpoint, matches = self._query_request_matches(request)
+            return {"query_endpoint": endpoint, "query_match": matches} if endpoint else {}
+        except TypeError:  # unobserved/unhashable response doubles have no generation proof
+            return {}
+
+    def _update_query_safety(self, request, metadata: dict, *, started: bool = False) -> None:
+        frame = getattr(request, "frame", None)
+        relevant = metadata.get("query_endpoint") or metadata.get("resource_type") == "document"
+        if not relevant or frame not in self._query_frame_generations:
+            return
+        safety = self._query_frame_safety.setdefault(frame, {})
+        if started:
+            kind = "query" if metadata.get("query_endpoint") else "document"
+            safety[kind] = (request, metadata)
+            if len(self._query_active_requests) < 128:
+                self._query_active_requests[request] = metadata
+            # 达到上限时 _query_safety_truncated 实时为 True；完成/关闭后自动解除。
+        generation = metadata.get("observed_document_generation")
+        if (metadata.get("document_success") and metadata.get("state") == "finished"
+                and isinstance(generation, int)):
+            if generation >= safety.get("document_generation", -1):
+                safety["document_generation"] = generation
+                safety["document_request_id"] = metadata.get("request_id")
+
+    def _current_query_body_pending(self) -> bool:
+        # requestfinished can precede body classification, including an older query
+        # in the same document. New document supersession still applies normally.
+        return self._query_body_overflow > 0 or any(
+            self._request_owner_page(request) in (None, self.page)
+            and not self._query_record_superseded(metadata)
+            for request, metadata in self._query_pending_bodies.items()
+        )
+
+    def _validated_current_query(self, frame_id: str | None = None) -> dict:
+        # Export probes self.page's main document; a child's business result cannot
+        # authorize that export. Explicit frames are used only for frame-local recovery.
+        if self._query_safety_lost:
+            return {}
+        if frame_id is None:
+            frame = getattr(self.page, "main_frame", None)
+            if frame is None:
+                return {}
+            frame_id = str(id(frame))
+        for frame, generation in self._query_frame_generations.items():
+            if str(id(frame)) != frame_id:
+                continue
+            _request, latest = self._query_frame_safety.get(frame, {}).get("query", (None, {}))
+            if (latest.get("page_id") == str(id(self.page))
+                    and latest.get("query_scope") == self._query_scope()
+                    and latest.get("observed_document_generation") == generation
+                    and latest.get("query_match") and latest.get("business_success")
+                    and latest.get("state") == "finished"):
+                return latest
+        return {}
+
+    @staticmethod
+    def _manual_query_origin(page) -> str:
+        from urllib.parse import urlsplit
+
+        try:
+            parts = urlsplit(page if isinstance(page, str) else WorkflowRunner._page_url(page))
+            return f"{parts.scheme}://{parts.netloc}" if parts.scheme in ("http", "https") and parts.netloc else ""
+        except ValueError:
+            return ""
+
+    def _observe_manual_query_binding(self, previous, new_page, *, opener_proven: bool = False) -> None:
+        if not self._paused or previous is new_page:
+            return
+        # Manual tabs are never candidates for automatic close/replay.
+        self._protected_pages.add(new_page)
+        recovery = self._manual_query_recovery
+        if (not recovery or recovery["old_page"] is not previous or not opener_proven
+                or new_page in recovery["known_pages"]):
+            return
+        if getattr(new_page, "context", None) is not recovery["context"]:
+            return
+        if previous not in self._manual_query_replacements and len(self._manual_query_replacements) >= 64:
+            return  # Losing provenance must fail closed, not evict established relationships.
+        self._manual_query_replacements[previous] = {
+            **recovery, "new_page": new_page, "binding_sequence": self._query_request_sequence,
+            "validated_query_id": None,
+        }
+
+    def _arm_manual_query_navigation(self, context) -> None:
+        handlers = {
+            "request": lambda request: self._capture_manual_query_navigation(request, "started"),
+            "response": lambda response: self._capture_manual_query_navigation(
+                response.request, "response", status=int(response.status)),
+            "requestfinished": lambda request: self._capture_manual_query_navigation(request, "finished"),
+            "requestfailed": lambda request: self._capture_manual_query_navigation(request, "failed"),
+        }
+        try:
+            for event, handler in handlers.items():
+                context.on(event, handler)
+                self._manual_query_context_observers.append((context, event, handler))
+        except Exception:
+            self._query_safety_lost = True
+            self._release_manual_query_navigation()
+
+    def _release_manual_query_navigation(self) -> None:
+        for context, event, handler in self._manual_query_context_observers:
+            with contextlib.suppress(Exception):
+                context.remove_listener(event, handler)
+        self._manual_query_context_observers.clear()
+        self._manual_query_navigation_requests.clear()
+
+    def _capture_manual_query_navigation(self, request, state: str, *, status: int | None = None) -> None:
+        recovery = self._manual_query_recovery
+        if not self._paused or not recovery:
+            return
+        try:
+            if state == "started":
+                if (request.resource_type != "document" or not request.is_navigation_request()
+                        or self._manual_query_origin(request.url) != recovery["origin"]
+                        or self._request_owner_page(request) in recovery["known_pages"]):
+                    return
+                if len(self._manual_query_navigation_requests) >= 64:
+                    return
+                self._query_request_sequence += 1
+                self._manual_query_navigation_requests[request] = {
+                    "sequence": self._query_request_sequence, "state": "started", "status": None,
+                }
+            entry = self._manual_query_navigation_requests.get(request)
+            if entry is not None:
+                if state == "response":
+                    entry["status"] = status
+                else:
+                    entry["state"] = state
+        except Exception:
+            return
+
+    def _adopt_manual_query_navigation(self, page) -> None:
+        recovery = self._manual_query_recovery
+        if not recovery or self._query_safety_truncated:
+            return
+        for request, entry in self._manual_query_navigation_requests.items():
+            if (self._request_owner_page(request) is not page
+                    or getattr(request, "frame", None) is not getattr(page, "main_frame", None)
+                    or entry["sequence"] <= recovery["started_before"]):
+                continue
+            self._record_query_request(request, "started", sequence=entry["sequence"])
+            metadata = self._query_metadata(request)
+            metadata["document_success"] = entry["status"] is not None and 200 <= entry["status"] < 300
+            self._inflight.add(request)
+            if entry["state"] != "started":
+                self._on_page_request_done(request, entry["state"])
+            if metadata["document_success"]:
+                self._on_page_frame_navigated(page.main_frame)
+            replacement = self._manual_query_replacements.get(recovery["old_page"])
+            if replacement and replacement["new_page"] is page:
+                replacement["binding_sequence"] = recovery["started_before"]
+
+    def _manual_query_replacement_proof(self, replacement: dict) -> dict:
+        page = self.page
+        if (self._query_safety_truncated or replacement["new_page"] is not page or not self._page_is_open(page)
+                or getattr(page, "context", None) is not replacement["context"]
+                or getattr(replacement["old_page"], "context", None) is not replacement["context"]
+                or self._manual_query_origin(page) != replacement["origin"]
+                or is_public_portal_url(self._page_url(page))
+                or replacement["query_scope"] != self._query_scope()):
+            return {}
+        current = self._validated_current_query()  # actual main-frame export document
+        safety = self._query_frame_safety.get(getattr(page, "main_frame", None), {})
+        try:
+            document_id = int(safety.get("document_request_id"))
+            query_id = int(current.get("request_id"))
+        except (TypeError, ValueError):
+            return {}
+        if (replacement["binding_sequence"] < document_id < query_id
+                and 0 <= safety.get("document_generation", -1)
+                    < current["observed_document_generation"]):
+            return current
+        return {}
+
+    async def _validate_manual_query_replacements(self) -> None:
+        for replacement in self._manual_query_replacements.values():
+            replacement["validated_query_id"] = None
+            current = self._manual_query_replacement_proof(replacement)
+            if not current:
+                continue
+            session = self._shared_session
+            station = self.config.get("_station") or {}
+            station_org = station.get("org_name", "") if isinstance(station, dict) else ""
+            session_org = getattr(session, "_station_org_name", "")
+            expected_identity = (getattr(session, "_config", {}) or {}).get("expected_identity")
+            if station_org or session_org or expected_identity:
+                # Reuse the real station/account guard. No session or station scope
+                # means identity cannot be proven here, not permission to bypass it.
+                if session is None or (station_org and station_org != session_org):
+                    continue
+                auth = await session.check_auth(page=self.page)
+                if auth.get("state") != "authenticated":
+                    continue
+                if self._manual_query_replacement_proof(replacement) is not current:
+                    continue  # binding/query may change during the asynchronous identity check
+            replacement["validated_query_id"] = current["request_id"]
+
+    def _manual_query_record_superseded(self, item: dict) -> bool:
+        if not item.get("query_endpoint") or not isinstance(item.get("observed_document_generation"), int):
+            return False
+        replacement = self._manual_query_replacements.get(item.get("_page"))
+        if not replacement:
+            return False
+        current = self._manual_query_replacement_proof(replacement)
+        try:
+            related = int(item.get("request_id")) <= replacement["started_before"]
+        except (TypeError, ValueError):
+            return False
+        return bool(current and replacement["validated_query_id"] == current["request_id"]
+                    and related and item.get("page_id") == str(id(replacement["old_page"]))
+                    and item.get("frame_id") == replacement["old_frame_id"]
+                    and item.get("query_scope") == replacement["query_scope"])
+
+    def _query_record_superseded(self, item: dict) -> bool:
+        """Only a new document's validated, date-bound query supersedes its old query.
+
+        Same-document errors, unknown generations, unfinished responses and arbitrary
+        old business endpoints remain blocking. History is never acknowledged here.
+        """
+        if self._manual_query_record_superseded(item):
+            return True
+        if not item.get("query_endpoint") or not item.get("frame_id"):
+            return False
+        current = self._validated_current_query(item["frame_id"])
+        old_generation = item.get("observed_document_generation")
+        if not (current and isinstance(old_generation, int)
+                and old_generation < current["observed_document_generation"]
+                and item.get("page_id") == current["page_id"]):
+            return False
+        # framenavigated also fires for same-document history/hash changes. Require
+        # a successfully finished document transport in this frame after the error's
+        # generation, as well as the independently validated current business query.
+        return any(str(id(frame)) == item["frame_id"]
+                   and old_generation <= safety.get("document_generation", -1)
+                       < current["observed_document_generation"]
+                   for frame, safety in self._query_frame_safety.items())
+
     def _on_page_frame_navigated(self, frame) -> None:
+        self._resolve_deferred_popup_origin(frame)
         if frame not in self._query_frame_generations:
             if len(self._query_frame_generations) >= 64:
                 self._query_frames_truncated = True
                 return
-            self._query_frame_generations[frame] = 0
-        self._query_frame_generations[frame] += 1
+            # 首次见到该框架即是一份新文档。
+            self._query_frame_generations[frame] = 1
+            self._query_frame_document_pending.pop(frame, None)
+            return
+        # framenavigated 也会为 hash/pushState/replaceState 触发。只有观测到该
+        # 框架的 document 传输（真实跨文档导航）才推进代际；同文档历史变化
+        # 不作废已校验的查询证明，也不能伪造新文档的 supersession。
+        if frame in self._query_frame_document_pending:
+            remaining = self._query_frame_document_pending[frame] - 1
+            if remaining:
+                self._query_frame_document_pending[frame] = remaining
+            else:
+                del self._query_frame_document_pending[frame]
+            self._query_frame_generations[frame] += 1
+        elif not self.config.get("query_result"):
+            # 未声明查询契约时没有任何证明机制消费代际（supersession/校验/
+            # 人工恢复都要求契约），代际只是诊断计数，保留逐次计数。
+            self._query_frame_generations[frame] += 1
 
-    def _record_query_request(self, request, state: str) -> None:
+    def _record_query_request(self, request, state: str, *, sequence: int | None = None) -> None:
         try:
             if getattr(request, "resource_type", "") not in ("xhr", "fetch", "document"):
                 return
@@ -1465,10 +1903,22 @@ class WorkflowRunner:
                         self._query_frame_generations[frame] = 0
                     else:
                         self._query_frames_truncated = True
-                self._query_request_sequence += 1
+                if (request.resource_type == "document" and frame is not None
+                        and frame in self._query_frame_generations):
+                    # 真实跨文档导航的凭据：随后的 framenavigated 才推进代际。
+                    self._query_frame_document_pending[frame] = (
+                        self._query_frame_document_pending.get(frame, 0) + 1
+                    )
+                if sequence is None:
+                    self._query_request_sequence += 1
+                    sequence = self._query_request_sequence
                 page = self._request_owner_page(request)
+                endpoint, matches = self._query_request_matches(request)
                 metadata = {
-                    "request_id": str(self._query_request_sequence),
+                    "query_endpoint": endpoint, "query_match": matches,
+                    "resource_type": request.resource_type,
+                    "query_scope": self._query_scope(),
+                    "request_id": str(sequence),
                     "path": self._query_path(request.url),
                     "page_id": str(id(page)) if page is not None else None,
                     "frame_id": str(id(frame)) if frame is not None else None,
@@ -1482,10 +1932,28 @@ class WorkflowRunner:
                     self._query_request_metadata.pop(next(iter(self._query_request_metadata)))
                     self._query_metadata_dropped += 1
             else:
-                metadata = self._query_request_metadata.pop(request, None)
-                if metadata is None:
-                    metadata = {"request_id": None, "path": self._query_path(request.url),
-                                "observed": False, "started_at": None}
+                # Active/latest safety state survives expendable diagnostic eviction.
+                metadata = self._query_metadata(request)
+                if "started_at" not in metadata:
+                    metadata = {
+                        **metadata, "request_id": None,
+                        "path": self._query_path(request.url),
+                        "observed": False, "started_at": None,
+                    }
+                if state == "failed" and getattr(request, "resource_type", "") == "document":
+                    # 传输失败不会提交新文档；只减该请求自己的计数，既避免清掉
+                    # 同帧 newer 导航的凭据，也避免悬空标记把后续同文档
+                    # framenavigated 误当成跨文档导航。
+                    frame = getattr(request, "frame", None)
+                    remaining = self._query_frame_document_pending.get(frame, 0) - 1
+                    if remaining > 0:
+                        self._query_frame_document_pending[frame] = remaining
+                    else:
+                        self._query_frame_document_pending.pop(frame, None)
+            metadata["state"] = state
+            self._update_query_safety(request, metadata, started=state == "started")
+            if state != "started":
+                self._query_active_requests.pop(request, None)
             entry = {key: value for key, value in metadata.items() if key != "started_at"}
             entry["state"] = state
             entry["at_ms"] = at_ms
@@ -1520,6 +1988,7 @@ class WorkflowRunner:
             "metadata_dropped": self._query_metadata_dropped,
             "history_dropped": self._query_history_dropped,
             "frames_truncated": self._query_frames_truncated,
+            "safety_truncated": self._query_safety_truncated,
             "frames": [{"frame_id": str(id(frame)), "observed_document_generation": generation}
                        for frame, generation in self._query_frame_generations.items()],
             "recent": self._query_request_history,
@@ -1542,6 +2011,7 @@ class WorkflowRunner:
                 "pageerror": self._on_page_pageerror,
                 "framenavigated": self._on_page_frame_navigated,
                 "websocket": self._on_page_websocket,
+                "close": self._on_page_close,
             }
             installed = self._page_observers.setdefault(page, {})
             for name, handler in handlers.items():
@@ -1550,6 +2020,8 @@ class WorkflowRunner:
                 page.on(name, handler)
                 installed[name] = handler
         except Exception as exc:  # 观测失败不能影响主流程
+            # 挂载失败是不可恢复损失：代际/错误证据可能残缺，证明必须粘死 fail closed。
+            self._query_safety_lost = True
             logger.debug("  页面观测器挂载失败: {}", exc)
 
     def _release_page_observers(self) -> None:
@@ -1563,10 +2035,46 @@ class WorkflowRunner:
         self._query_request_metadata.clear()
         self._query_request_history.clear()
         self._query_frame_generations.clear()
+        self._query_frame_document_pending.clear()
+        self._query_frame_safety.clear()
+        self._query_active_requests.clear()
+        self._query_pending_bodies.clear()
+        self._query_body_overflow = 0
+        self._query_safety_lost = False
+        self._manual_query_recovery = None
+        self._release_manual_query_navigation()
+        self._manual_query_replacements.clear()
+        self._manual_popup_deferred.clear()
         for websocket, handler in self._websocket_handlers:
             with contextlib.suppress(Exception):
                 websocket.remove_listener("close", handler)
         self._websocket_handlers.clear()
+
+    def _on_page_close(self, page) -> None:
+        """页面关闭：清掉它名下永远不会再 finished/failed 的在途追踪。
+
+        不清理会让长多标签运行慢慢漂到 128 上限并永久截断。只清该页自己的
+        条目，其他页的在途证明和上限的 fail-closed 行为不受影响。
+        """
+        try:
+            for request in list(self._query_active_requests):
+                if self._request_owner_page(request) is page:
+                    del self._query_active_requests[request]
+            for request in list(self._inflight):
+                if self._request_owner_page(request) is page:
+                    self._inflight.discard(request)
+            for frame in list(self._query_frame_document_pending):
+                if getattr(frame, "page", None) is page:
+                    del self._query_frame_document_pending[frame]
+            # 关闭页的框架不会再有事件；不驱逐会让 64 上限被死帧占满，
+            # 新帧无法追踪代际，长多标签运行永久拿不到导出证明。
+            for frame in list(self._query_frame_generations):
+                if getattr(frame, "page", None) is page:
+                    del self._query_frame_generations[frame]
+                    self._query_frame_safety.pop(frame, None)
+            self._manual_popup_deferred.pop(page, None)
+        except Exception:
+            pass
 
     def _on_page_request(self, request) -> None:
         try:
@@ -1591,6 +2099,7 @@ class WorkflowRunner:
             pass
 
     def _on_page_request_failed(self, request) -> None:
+        metadata = dict(self._query_metadata(request))
         self._on_page_request_done(request, "failed")
         try:
             failure = getattr(request, "failure", None) or ""
@@ -1602,7 +2111,7 @@ class WorkflowRunner:
             page = request.frame.page if request.frame else None
             if (page not in self._retired_pages and getattr(request, "resource_type", "") in ("xhr", "fetch")
                     and self._same_origin(request.url, self._page_url(page))):
-                self._page_errors.append({"status": 0, "url": request.url,
+                self._page_errors.append({**metadata, "status": 0, "url": request.url,
                     "resource_type": request.resource_type, "page_url": self._page_url(page),
                     "_page": page, "at": time.strftime("%H:%M:%S"), "failure": failure})
         except Exception:
@@ -1633,7 +2142,9 @@ class WorkflowRunner:
 
     _GATEWAY_BODY_MAX = 64
 
-    async def _remember_calendar_payload(self, response, request, status: int, url: str, content_type: str) -> None:
+    async def _remember_calendar_payload(
+        self, response, request, status: int, url: str, content_type: str, *, body: bytes | None = None,
+    ) -> None:
         """记下 findTradeCalendar 的响应正文，供周明细直接使用。
 
         这是网络监听，不在页面里执行脚本。正文只留这一条接口，并且截断。
@@ -1655,7 +2166,8 @@ class WorkflowRunner:
         page = request.frame.page if getattr(request, "frame", None) is not None else None
         text = ""
         try:
-            body = await asyncio.wait_for(response.body(), timeout=2)
+            if body is None:
+                body = await asyncio.wait_for(response.body(), timeout=2)
             text = body[:1_000_000].decode("utf-8", "replace")
         except Exception:
             text = ""
@@ -1682,10 +2194,12 @@ class WorkflowRunner:
         self._response_tasks.add(task)
         task.add_done_callback(self._response_tasks.discard)
 
-    async def _drain_response_captures(self) -> None:
+    async def _drain_response_captures(self, *, timeout: float = 2) -> None:
         pending = [task for task in self._response_tasks if not task.done()]
         if pending:
-            await asyncio.wait(pending, timeout=2)
+            # Waiting is bounded by the caller; unfinished captures are not cancelled
+            # or classified as business failures when a query waiting budget expires.
+            await asyncio.wait(pending, timeout=max(timeout, 0))
 
     async def _capture_page_response(self, response) -> None:
         """先登记错误，再读取小响应形态；正文分类期间同样禁止放行。"""
@@ -1705,20 +2219,70 @@ class WorkflowRunner:
                         content_type=content_type, page=self._trace_url(self._page_url(origin_page)),
                         context=str(id(origin_page.context)))
             self._record_auth_traffic(request, response, status, url, content_type, None)
-            if "findtradecalendar" in url.split("?", 1)[0].lower():
-                await self._remember_calendar_payload(response, request, status, url, content_type)
-            if status < 400 or url.split("?", 1)[0].lower().endswith(self._STATIC_SUFFIXES):
+            metadata = self._query_metadata(request)
+            if resource_type == "document":
+                metadata["document_success"] = 200 <= status < 300
+                self._update_query_safety(request, metadata)
+            business_error = ""
+            body = None
+            if metadata.get("query_endpoint") and 200 <= status < 300:
+                # Playwright emits response at headers. body() waits for transport
+                # completion; the export gate owns its budget, and runner cleanup
+                # cancels pending captures. An unread body is not an invalid body.
+                tracked = len(self._query_pending_bodies) < 128
+                if tracked:
+                    self._query_pending_bodies[request] = metadata
+                else:
+                    self._query_body_overflow += 1
+                try:
+                    try:
+                        body = await response.body()
+                    except Exception:
+                        return  # requestfailed records transport failure independently
+                    if metadata.get("state") == "failed":
+                        return
+                    try:
+                        payload = json.loads(body)
+                        self._validated_business_data(
+                            payload, self._bind_query_templates(self.config["query_result"]),
+                            require_success=True,
+                        )
+                        metadata["business_success"] = metadata.get("query_match") is True
+                    except Exception as exc:
+                        metadata["business_success"] = False
+                        business_error = f"查询业务结果未通过校验：{type(exc).__name__}"
+                finally:
+                    if tracked:
+                        self._query_pending_bodies.pop(request, None)
+                    else:
+                        self._query_body_overflow = max(0, self._query_body_overflow - 1)
+            calendar = "findtradecalendar" in url.split("?", 1)[0].lower()
+            if ((status < 400 and not business_error)
+                    or url.split("?", 1)[0].lower().endswith(self._STATIC_SUFFIXES)):
+                if calendar:
+                    await self._remember_calendar_payload(
+                        response, request, status, url, content_type, body=body,
+                    )
                 return
             page = request.frame.page if request.frame is not None else None
             page_url = self._page_url(page)
             if page in self._retired_pages or not self._same_origin(url, page_url):
+                if calendar:
+                    await self._remember_calendar_payload(
+                        response, request, status, url, content_type, body=body,
+                    )
                 return
             entry = {
-                "status": status, "url": url, "resource_type": resource_type,
+                **metadata, "status": status, "url": url, "resource_type": resource_type,
                 "content_type": content_type, "body_size": None, "body_blank": False,
                 "page_url": page_url, "_page": page, "at": time.strftime("%H:%M:%S"),
+                "failure": business_error,
             }
             self._page_errors.append(entry)
+            if calendar:
+                await self._remember_calendar_payload(
+                    response, request, status, url, content_type, body=body,
+                )
             # 记录出错时页面是否在前台：后台/遮挡会节流页面的签名心跳。
             if page is not None:
                 with contextlib.suppress(Exception):
@@ -1734,7 +2298,8 @@ class WorkflowRunner:
                 entry["body_size"] = int(length)
             else:
                 try:
-                    body = await asyncio.wait_for(response.body(), timeout=2)
+                    if body is None:
+                        body = await asyncio.wait_for(response.body(), timeout=2)
                     entry.update(body_size=len(body), body_blank=not body.strip())
                 except Exception:
                     pass  # 未知正文保留为普通请求错误，必须暂停。
@@ -1907,7 +2472,8 @@ class WorkflowRunner:
             pass
 
     def _unacknowledged_page_errors(self) -> list[dict]:
-        return [item for item in self._page_errors if not item.get("_resolved")]
+        return [item for item in self._page_errors
+                if not item.get("_resolved") and not self._query_record_superseded(item)]
 
     def _acknowledge_page_errors(self, errors: list[dict] | None = None) -> None:
         for item in self._page_errors if errors is None else errors:
@@ -1968,26 +2534,35 @@ class WorkflowRunner:
         size = entry.get("body_size")
         return isinstance(size, int) and 0 <= size <= cls._GATEWAY_BODY_MAX and entry.get("body_blank") is True
 
-    async def _wait_network_quiet(self, idle_ms: int = 600, timeout: int = 15000) -> None:
-        """等待页面没有在途请求（含长轮询上限保护）。
+    async def _wait_network_quiet(self, idle_ms: int = 600, timeout: int = 15000) -> bool:
+        """Wait for current-page work to finish; False means the bounded wait expired.
 
-        用于“业务数据真的请求完了再操作”的场景：日期切换后立刻点导出、
-        或新标签页刚打开就点菜单，都会撞上页面自己的初始化请求。
+        A constant positive count is not completion. This settling helper is not
+        business-result proof; export still requires its own current-query gate.
         """
-        if not self._inflight:
-            return
+        def pending():
+            page = self.page
+            return [request for request in self._inflight
+                    if self._request_owner_page(request) in (None, page)
+                    and not self._is_query_polling(request)
+                    and not self._query_record_superseded(self._query_metadata(request))]
+
+        if not pending():
+            return True
         deadline = time.monotonic() + max(timeout, 0) / 1000
-        idle_deadline = time.monotonic() + max(idle_ms, 0) / 1000
-        last_seen = len(self._inflight)
-        while time.monotonic() < deadline:
-            if not self._inflight:
-                return
-            if len(self._inflight) < last_seen:
-                idle_deadline = time.monotonic() + max(idle_ms, 0) / 1000
-                last_seen = len(self._inflight)
-            if time.monotonic() >= idle_deadline:
-                return
-            await asyncio.sleep(0.1)
+        quiet_since = None
+        while True:
+            now = time.monotonic()
+            if pending():
+                quiet_since = None
+            else:
+                if quiet_since is None:
+                    quiet_since = now
+                if now - quiet_since >= max(idle_ms, 0) / 1000:
+                    return True
+            if now >= deadline:
+                return False
+            await asyncio.sleep(min(0.1, deadline - now))
 
     _MANUAL_DOC_HINT = "请回到已登录页重新点现货交易，不要刷新当前文档。"
 
@@ -2095,13 +2670,36 @@ class WorkflowRunner:
 
         没有等待回调，或用户取消，就结束这次运行。继续后由调用方再检查一次。
         """
+        source = None
+        if self.config.get("query_result"):
+            with contextlib.suppress(Exception):
+                source = self.page
+        frame = getattr(source, "main_frame", None)
+        context = getattr(source, "context", None)
+        origin = self._manual_query_origin(source)
+        self._manual_query_recovery = None
+        if (self.config.get("query_result") and frame in self._query_frame_generations
+                and context is not None and origin and not is_public_portal_url(self._page_url(source))):
+            self._manual_query_recovery = {
+                "old_page": source, "old_frame_id": str(id(frame)), "context": context,
+                "origin": origin, "query_scope": self._query_scope(),
+                "started_before": self._query_request_sequence,
+                "known_pages": set(context.pages) | set(self.pages),
+            }
         self._paused = True
+        if self._manual_query_recovery and self._wait_continue:
+            self._arm_manual_query_navigation(context)
         self._emit("error_pause", error=message, message=message)
         self._emit("waiting_input", message="已暂停整个任务，等待人工处理")
         if not self._wait_continue:
+            self._manual_query_recovery = None
             self._mark_failed(message)
             raise WorkflowPaused(message)
-        continued = await self._wait_continue()
+        try:
+            continued = await self._wait_continue()
+        finally:
+            self._manual_query_recovery = None
+            self._release_manual_query_navigation()
         if not continued:
             self._stopped = True
             self._mark_failed("用户取消")
@@ -2154,11 +2752,31 @@ class WorkflowRunner:
         """
         self._replay_index = index
         self._recovery_block_reason = ""
+        step = self.steps[index]
+        export_step = None
+        if (self.config.get("query_result") and self.config.get("type") != "login"
+                and not step.get("_login_step")):
+            export_step = next((item for item in self.steps[index:]
+                                if item.get("action") == "export"), None)
+
+        async def wait_resumed_query(resume_errors: set[int]) -> None:
+            if export_step is not None:
+                await self._pause_until_export_ready(
+                    timeout=int(export_step.get("query_wait_timeout", export_step.get("timeout", 30000))),
+                    settle_ms=0, resume_errors=resume_errors, recovery_errors=True,
+                )
+
+        async def pause(message: str) -> None:
+            resume_errors = {id(item) for item in self._unacknowledged_page_errors()}
+            await self._pause_and_wait(message)
+            await wait_resumed_query(resume_errors)
+
         while True:
             await self._drain_response_captures()
-            if self._inflight:
+            if self._inflight and self._unacknowledged_page_errors():
                 await self._wait_network_quiet(idle_ms=300, timeout=3000)
                 await self._drain_response_captures()
+            await self._validate_manual_query_replacements()
             errors = self._unacknowledged_page_errors()
             if not errors:
                 return False
@@ -2170,7 +2788,7 @@ class WorkflowRunner:
                 if self._login_submit_seen:
                     self._emit_http_rejection(index, errors, gateway=False)
                     described = "；".join(self._describe_page_errors(errors))[:500]
-                    await self._pause_and_wait(
+                    await pause(
                         "登录提交后请求异常，已暂停整个任务，不会继续执行后续步骤。"
                         f"{described}。请处理证书/账号/验证码或网络问题后再继续。"
                     )
@@ -2179,7 +2797,7 @@ class WorkflowRunner:
                 gateway = [item for item in errors if self._is_gateway_form(item)]
                 if gateway and len(gateway) == len(errors):
                     self._emit_http_rejection(index, gateway, gateway=True)
-                    await self._pause_and_wait(
+                    await pause(
                         "登录提交后出现网关形态的空 HTML 400，已暂停。"
                         "不要刷新当前文档，不要重复点击立即登录。"
                         + self._MANUAL_DOC_HINT
@@ -2192,7 +2810,7 @@ class WorkflowRunner:
             if other:
                 self._emit_http_rejection(index, other, gateway=False)
                 described = "；".join(self._describe_page_errors(other))[:500]
-                await self._pause_and_wait(
+                await pause(
                     "请求异常已记录，不会自动关闭标签重放。"
                     f"{described}。JSON 业务错误、401、403、404、429 和 5xx 需要暂停诊断。"
                     + self._MANUAL_DOC_HINT
@@ -2207,22 +2825,24 @@ class WorkflowRunner:
             )
             if not can_auto:
                 logger.warning("  {}", self._recovery_hold_message(index, gateway))
-                await self._pause_and_wait(self._recovery_hold_message(index, gateway))
+                await pause(self._recovery_hold_message(index, gateway))
                 continue
             failed_pages = {item.get("_page") for item in gateway}
             if len(failed_pages) != 1 or None in failed_pages or self.page not in failed_pages:
-                await self._pause_and_wait("错误不属于当前唯一业务页面，不能自动关闭标签。" + self._MANUAL_DOC_HINT)
+                await pause("错误不属于当前唯一业务页面，不能自动关闭标签。" + self._MANUAL_DOC_HINT)
                 continue
             replayed = self.steps[checkpoint + 1:index + (stage == "after")]
             if any(item.get("action") not in ("click", "wait", "pick_date", "pick_date_range")
                    for item in replayed):
-                await self._pause_and_wait("重放范围含导出或其他有副作用的步骤，禁止自动重做。" + self._MANUAL_DOC_HINT)
+                await pause("重放范围含导出或其他有副作用的步骤，禁止自动重做。" + self._MANUAL_DOC_HINT)
                 continue
             reason = "；".join(self._describe_page_errors(gateway))[:500]
+            resume_errors = {id(item) for item in errors}
             if await self._rebuild_document(checkpoint, reason, stage=stage):
                 self._recovery_budget[checkpoint] = 1
                 self._replay_index = checkpoint
                 return True
+            await wait_resumed_query(resume_errors)
 
     async def _rebuild_document(
         self, checkpoint: int, reason: str, *, stage: str = "after"
@@ -2496,6 +3116,11 @@ class WorkflowRunner:
             self._active_file_key = self._active_output_key()
         trigger_actions = ("click", "pick_date", "pick_date_range", "export", "captcha", "fill", "check")
         if action in trigger_actions and self.page in self._poisoned_pages:
+            poisoned = [item for item in self._page_errors
+                        if item.get("_page") is self.page and self._is_gateway_form(item)]
+            if poisoned and all(self._query_record_superseded(item) for item in poisoned):
+                self._poisoned_pages.discard(self.page)
+        if action in trigger_actions and self.page in self._poisoned_pages:
             await self._pause_and_wait(
                 "当前文档已被网关以空 HTML 400 拒绝过，继续在这份文档上操作只会继续 400。"
                 "请新开一个业务文档，或在浏览器里重新点「现货交易」进入新文档后再继续。"
@@ -2666,28 +3291,32 @@ class WorkflowRunner:
 
     async def _do_ensure_login(self, step: dict) -> None:
         """只验证现有页面并等待手工登录；不导航、不清存储、不提交表单。"""
-        while True:
-            reason = ""
-            expected_origin = step.get("origin", "")
-            if expected_origin and not self._same_origin(self._page_url(self.page), expected_origin):
-                reason = "请在绑定的浏览器页面手工打开业务门户并登录"
-            elif is_public_portal_url(self._page_url(self.page)):
-                reason = "当前是门户公开首页或登录页，请先完成登录"
-            else:
-                try:
-                    selector = step.get("success_selector", GD_LOGIN_SUCCESS_SELECTOR)
-                    if (selector in ("text=现货交易", ".el-menu", ".ant-menu-horizontal, .el-menu")
-                            and self._same_origin(self._page_url(self.page), "https://pm.gd.csg.cn")):
-                        selector = GD_LOGIN_SUCCESS_SELECTOR
-                    if not await self._dom_visible(selector):
-                        reason = "尚未出现门户业务入口，请在当前页面手工完成登录"
-                    elif login_error := await self._read_login_error(step):
-                        reason = f"页面仍有登录错误提示：{login_error}，请人工处理"
-                except Exception:
-                    reason = "无法确认绑定页面的登录状态，请检查页面是否仍打开"
-            if not reason:
-                return
-            await self._pause_and_wait(reason + "；完成后点击继续。不要刷新失败页面。")
+        session = self._shared_session
+        guard = getattr(self, "_protect_auth_pause_pages", None)
+        with (guard(session) if callable(guard) and session is not None
+              and getattr(session, "_station_org_name", "") else contextlib.nullcontext()):
+            while True:
+                reason = ""
+                expected_origin = step.get("origin", "")
+                if expected_origin and not self._same_origin(self._page_url(self.page), expected_origin):
+                    reason = "请在绑定的浏览器页面手工打开业务门户并登录"
+                elif is_public_portal_url(self._page_url(self.page)):
+                    reason = "当前是门户公开首页或登录页，请先完成登录"
+                else:
+                    try:
+                        selector = step.get("success_selector", GD_LOGIN_SUCCESS_SELECTOR)
+                        if (selector in ("text=现货交易", ".el-menu", ".ant-menu-horizontal, .el-menu")
+                                and self._same_origin(self._page_url(self.page), "https://pm.gd.csg.cn")):
+                            selector = GD_LOGIN_SUCCESS_SELECTOR
+                        if not await self._dom_visible(selector):
+                            reason = "尚未出现门户业务入口，请在当前页面手工完成登录"
+                        elif login_error := await self._read_login_error(step):
+                            reason = f"页面仍有登录错误提示：{login_error}，请人工处理"
+                    except Exception:
+                        reason = "无法确认绑定页面的登录状态，请检查页面是否仍打开"
+                if not reason:
+                    return
+                await self._pause_and_wait(reason + "；完成后点击继续。不要刷新失败页面。")
 
     async def _do_login(self, step: dict) -> None:
         """打开登录页。显式登录工作流会继续执行点击、填写和验证码。
@@ -2902,6 +3531,7 @@ class WorkflowRunner:
             >>> runner.page is page
             True
         """
+        self._observe_manual_query_binding(self.page, page)
         if page not in self.pages:
             self.pages.append(page)
         self._current_page_idx = self.pages.index(page)
@@ -4153,6 +4783,20 @@ class WorkflowRunner:
         except Exception:
             return None
 
+    def _is_query_polling(self, request) -> bool:
+        """Only systemSwitch/getSwitch is classified as switch polling (calendar reader).
+
+        Its failures still block export. Do not guess from heartbeat/getSwitch names.
+        An explicit query_result declaration takes precedence over this classification.
+        """
+        from urllib.parse import urlsplit
+
+        try:
+            return (not self._query_metadata(request).get("query_endpoint")
+                    and urlsplit(request.url).path.endswith("/systemSwitch/getSwitch"))
+        except (AttributeError, ValueError):
+            return False
+
     def _inflight_query_requests(self) -> list:
         """当前绑定页上仍在途的 xhr/fetch。
 
@@ -4172,7 +4816,7 @@ class WorkflowRunner:
         found = []
         for request in list(self._inflight):
             try:
-                if getattr(request, "resource_type", "") not in ("xhr", "fetch"):
+                if getattr(request, "resource_type", "") not in ("xhr", "fetch", "document"):
                     continue
                 owner = self._request_owner_page(request)
                 if owner is not None and (owner is not page or not self._page_is_open(owner)):
@@ -4183,7 +4827,8 @@ class WorkflowRunner:
                 if page_url and not self._same_origin(url, page_url):
                     continue
                 path = url.split("?", 1)[0].lower()
-                if path.endswith(self._STATIC_SUFFIXES):
+                if (path.endswith(self._STATIC_SUFFIXES) or self._is_query_polling(request)
+                        or self._query_record_superseded(self._query_metadata(request))):
                     continue
                 found.append(request)
             except Exception:
@@ -4239,7 +4884,8 @@ class WorkflowRunner:
         return text
 
     async def _pause_until_export_ready(
-        self, *, timeout: int = 60000, settle_ms: int = 1200
+        self, *, timeout: int = 60000, settle_ms: int = 1200,
+        resume_errors: set[int] | None = None, recovery_errors: bool = False,
     ) -> None:
         """导出前等待当前页查询完成，再给页面一个短暂稳定时间。
 
@@ -4259,18 +4905,32 @@ class WorkflowRunner:
         """
         deadline = time.monotonic() + max(int(timeout), 0) / 1000
         settle_s = max(int(settle_ms), 0) / 1000
+        resume_errors = set(resume_errors or ())
+        blocking_errors = self._unacknowledged_page_errors if recovery_errors else self._export_blocking_errors
         while True:
-            await self._drain_response_captures()
-            gateway = self._export_blocking_errors()
+            await self._drain_response_captures(timeout=min(0.1, max(0, deadline - time.monotonic())))
+            await self._validate_manual_query_replacements()
+            gateway = blocking_errors()
             inflight = self._inflight_query_requests()
-            if not gateway and not inflight:
+            unvalidated = bool(self.config.get("query_result") and (
+                not self._validated_current_query() or self._current_query_body_pending()
+            ))
+            if not gateway and not inflight and not unvalidated:
                 if settle_s:
                     await asyncio.sleep(settle_s)
-                    await self._drain_response_captures()
-                    if self._export_blocking_errors() or self._inflight_query_requests():
+                    await self._drain_response_captures(
+                        timeout=min(0.1, max(0, deadline - time.monotonic()))
+                    )
+                    await self._validate_manual_query_replacements()
+                    if (blocking_errors() or self._inflight_query_requests()
+                            or (self.config.get("query_result") and (
+                                not self._validated_current_query() or self._current_query_body_pending()
+                            ))):
                         continue
                 return
             parts = []
+            if unvalidated:
+                parts.append("当前日期/月份的查询业务结果尚未通过校验")
             if gateway:
                 parts.append(
                     "仍有未处理的请求异常："
@@ -4279,7 +4939,13 @@ class WorkflowRunner:
             inflight_text = self._describe_inflight(inflight)
             if inflight_text:
                 parts.append(inflight_text)
-            if not gateway and time.monotonic() < deadline:
+            # Already reported errors remain blocking while a resumed query is in
+            # flight. Give its response the fresh budget; a newly observed error
+            # still pauses immediately. Nothing is acknowledged or exported here.
+            waiting_resumed_query = (inflight or self._current_query_body_pending()) and all(
+                id(item) in resume_errors for item in gateway
+            )
+            if (not gateway or waiting_resumed_query) and time.monotonic() < deadline:
                 await asyncio.sleep(0.1)
                 continue
             if not gateway:
@@ -4289,6 +4955,9 @@ class WorkflowRunner:
             await self._pause_and_wait(
                 "导出前暂停。" + " ".join(parts) + "。不会在请求未确认时导出。"
             )
+            # Continue renews only the waiting budget, never errors or result validity.
+            deadline = time.monotonic() + max(int(timeout), 0) / 1000
+            resume_errors = {id(item) for item in gateway}
 
     async def _do_download_notice_reports(self, step: dict) -> None:
         """按目标日期下载“资讯公告 → 市场运行报告”的附件。
@@ -4859,11 +5528,11 @@ class WorkflowRunner:
             return False
 
     async def _fetch_api_fallback(self, fallback: dict) -> dict:
-        api_url = fallback.get("url") or fallback.get("api_path") or ""
+        api_url = self._bind_query_templates(fallback.get("url") or fallback.get("api_path") or "")
         method = str(fallback.get("method", "GET")).upper()
-        params = fallback.get("params") or {}
-        form = fallback.get("form") or fallback.get("data") or {}
-        json_body = fallback.get("json")
+        params = self._bind_query_templates(fallback.get("params") or {})
+        form = self._bind_query_templates(fallback.get("form") or fallback.get("data") or {})
+        json_body = self._bind_query_templates(fallback.get("json"))
         timeout = int(fallback.get("timeout", 30000))
         js_code = """
         async ({url, method, params, form, jsonBody, timeout}) => {
@@ -4923,27 +5592,98 @@ class WorkflowRunner:
             raise WorkflowExecutionError(f"API fallback HTTP {result.get('status')}: {result.get('statusText')}")
         return result
 
+    @staticmethod
+    def _validated_business_data(data: Any, contract: dict, *, require_success: bool = False) -> Any:
+        """Validate the declared success field and table shape, not merely HTTP 200.
+
+        Default JSON envelopes use code=200 and data (as the existing mock APIs do).
+        Bare nonempty tables remain valid for fallback. Query proof requires an explicit
+        success verdict; response_path and required_fields can tighten the contract.
+        """
+        def at_path(value, path):
+            for key in str(path).split("."):
+                if not isinstance(value, dict) or key not in value:
+                    raise WorkflowExecutionError(f"业务结果缺少字段：{path}")
+                value = value[key]
+            return value
+
+        if isinstance(data, dict) and (data.get("_error") or data.get("success") is False):
+            raise WorkflowExecutionError("API 返回业务错误")
+        success_field = contract.get("success_field", "code")
+        if require_success or "success_field" in contract or (isinstance(data, dict) and success_field in data):
+            verdict = at_path(data, success_field)
+            expected = contract.get("success_value", 200)
+            if type(verdict) is not type(expected) or verdict != expected:
+                raise WorkflowExecutionError("API 业务状态未成功")
+        for path, expected in (contract.get("response_match") or {}).items():
+            actual = at_path(data, path)
+            if type(actual) is not type(expected) or actual != expected:
+                raise WorkflowExecutionError(f"API 业务结果不属于当前查询：{path}")
+        response_path = contract.get("response_path")
+        if response_path:
+            data = at_path(data, response_path)
+        elif isinstance(data, dict) and "data" in data:
+            data = data["data"]
+        elif isinstance(data, dict) and any(key in data for key in ("code", "success", "message", "msg")):
+            raise WorkflowExecutionError("API 业务响应缺少数据")
+        rows = data if isinstance(data, list) else [data]
+        scalar = (str, int, float, bool, type(None))
+        required = contract.get("required_fields") or []
+        if not rows or not all(isinstance(row, dict) and row
+                               and all(isinstance(value, scalar) for value in row.values())
+                               and all(key in row for key in required) for row in rows):
+            raise WorkflowExecutionError("API 数据不是非空的有效记录表")
+        return data
+
     def _save_api_fallback_result(self, result: dict, save_path: Path) -> None:
         save_path = validate_write_path(save_path, "API 降级输出文件")
-        raw = base64.b64decode(result.get("base64") or "")
-        content_type = (result.get("contentType") or "").lower()
-        if (
-            "spreadsheet" in content_type
-            or "excel" in content_type
-            or "octet-stream" in content_type
-            or save_path.suffix.lower() in (".xlsx", ".xls")
-        ) and not ("json" in content_type or "text" in content_type):
+        raw = base64.b64decode(result.get("base64") or "", validate=True)
+        # Content-Type and an .xlsx output suffix do not prove this is a spreadsheet.
+        # Preserve valid raw XLSX bytes, including octet-stream downloads.
+        if raw.startswith(b"PK\x03\x04"):
+            from openpyxl import load_workbook
+
+            contract = self.config.get("api_fallback") or {}
+            if (contract.get("response_match") or any(
+                key in contract for key in ("success_field", "success_value", "response_path")
+            )):
+                raise WorkflowExecutionError("API 原始工作簿无法验证配置的 JSON 响应约束")
+            wb = load_workbook(io.BytesIO(raw), read_only=True)
+            try:
+                required = (self.config.get("api_fallback") or {}).get("required_fields") or []
+                valid_table = False
+                for sheet in wb.worksheets:
+                    header = None
+                    has_records = False
+                    # Consume the XML too: opening the ZIP/header alone does not
+                    # validate worksheet contents. Keep the original bytes on save.
+                    for row in sheet.iter_rows(values_only=True):
+                        if not any(value is not None for value in row):
+                            continue
+                        if header is None:
+                            header = row
+                        else:
+                            has_records = True
+                    if header is not None and (not required or (
+                        has_records and all(field in header for field in required)
+                    )):
+                        valid_table = True
+                if not valid_table:
+                    raise WorkflowExecutionError("API 工作簿没有符合当前配置的数据表")
+            finally:
+                wb.close()
             if self._overwrite_current:
                 save_path.write_bytes(raw)
             else:
                 save_versioned_bytes(save_path, raw)
             return
-
-        text = raw.decode("utf-8", errors="replace")
         try:
-            data = json.loads(text)
-        except Exception:
-            data = {"text": text}
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WorkflowExecutionError("API 返回的不是有效工作簿或 JSON 数据") from exc
+        data = self._validated_business_data(
+            data, self._bind_query_templates(self.config.get("api_fallback") or {}),
+        )
         self._save_data_as_xlsx(data, save_path, overwrite=self._overwrite_current)
 
     @staticmethod
@@ -4959,6 +5699,37 @@ class WorkflowRunner:
         save_versioned_bytes(save_path, data)
 
     @staticmethod
+    def _deterministic_workbook_bytes(wb) -> bytes:
+        # openpyxl 在 core.xml 写入秒级 created/modified，ZIP 条目也带当前时间；
+        # 相同数据跨秒保存会得到不同字节，使哈希版本管理误增版本。固定这些无关时间戳，
+        # 让字节只反映数据内容。
+        buf = io.BytesIO()
+        wb.save(buf)
+        src = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+            for info in src.infolist():
+                data = src.read(info.filename)
+                if info.filename == "docProps/core.xml":
+                    text = data.decode("utf-8")
+                    text = re.sub(
+                        r"(<dcterms:created[^>]*>)[^<]*(</dcterms:created>)",
+                        r"\g<1>1970-01-01T00:00:00Z\g<2>",
+                        text,
+                    )
+                    text = re.sub(
+                        r"(<dcterms:modified[^>]*>)[^<]*(</dcterms:modified>)",
+                        r"\g<1>1970-01-01T00:00:00Z\g<2>",
+                        text,
+                    )
+                    data = text.encode("utf-8")
+                entry = zipfile.ZipInfo(info.filename, date_time=(1980, 1, 1, 0, 0, 0))
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                entry.external_attr = info.external_attr
+                archive.writestr(entry, data)
+        return out.getvalue()
+
+    @staticmethod
     def _save_workbook_versioned(save_path: Path, wb, *, overwrite: bool = False) -> None:
         save_path = validate_write_path(save_path, "工作流工作簿输出文件")
         tmp_path = validate_write_path(
@@ -4966,7 +5737,7 @@ class WorkflowRunner:
             "工作流临时工作簿",
         )
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        wb.save(str(tmp_path))
+        tmp_path.write_bytes(WorkflowRunner._deterministic_workbook_bytes(wb))
         if overwrite:
             from spider_gd.core.custom_filename import overwrite_file
             overwrite_file(tmp_path, save_path)

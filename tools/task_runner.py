@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import re as _re
@@ -52,6 +53,85 @@ from workflow_runner import (
     WorkflowRunner,
     plan_download_files,
 )
+
+
+# A proof-local, read-only DOM watch. The nonce is not business state or storage.
+# Dirtiness is scoped to the identity element: benign dashboard churn (clocks,
+# polling widgets) elsewhere on the page must not block recovery, while any edit
+# on the identity subtree — including change-and-revert and node replacement —
+# stays fail closed. Navigation invalidation is handled by Python listeners.
+_STATION_AUTH_PROOF_JS = r"""({op, token, selector}) => {
+  if (op === 'station_auth_stop') {
+    const proof = globalThis[token];
+    if (proof) proof.observer.disconnect();
+    delete globalThis[token];
+    return true;
+  }
+  if (op === 'station_auth_watch') {
+    const report = console.debug.bind(console);
+    const proof = {dirty: false};
+    const mark = () => {
+      if (!proof.dirty) { proof.dirty = true; report(token); }
+    };
+    proof.mark = mark;
+    const query = () => {
+      try { return selector ? document.querySelector(selector) : null; }
+      catch (_err) { return null; }
+    };
+    const within = (node, root) => !!node && !!root
+      && (node === root || root.contains(node));
+    // A record dirties only if it edits the identity subtree, or adds/removes
+    // the identity node (or an ancestor carrying it). Re-query the selector so
+    // a removed-then-restored identity is still caught via the captured node.
+    const hits = (record, roots) => {
+      for (const root of roots) {
+        if (!root) continue;
+        if (within(record.target, root)) return true;
+        // Scan add/remove lists unconditionally: a detached identity is no
+        // longer contained by its old ancestor, but its removal must dirty.
+        for (const list of [record.addedNodes, record.removedNodes]) {
+          if (!list) continue;
+          for (const node of list) {
+            if (within(node, root) || (node && node.contains && node.contains(root))) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    };
+    proof.node = query();
+    proof.filter = (records) => {
+      if (!selector) return records.length > 0;  // no identity scope: fail closed
+      const roots = [proof.node, query()];
+      // querySelector is CSS-only and cannot pierce shadow DOM: a Playwright
+      // text=/xpath= selector or shadow-root identity leaves both roots null.
+      // A blind proof must fail closed, never report clean while check_auth's
+      // locator still sees (and could be fooled by) the identity.
+      if (!roots[0] && !roots[1]) return true;
+      for (const record of records) {
+        if (hits(record, roots)) return true;
+      }
+      return false;
+    };
+    proof.observer = new MutationObserver((records) => {
+      if (proof.filter(records)) mark();
+    });
+    proof.observer.observe(document, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+    globalThis[token] = proof;
+    return true;
+  }
+  const proof = globalThis[token];
+  if (!proof) return false;
+  if (proof.filter(proof.observer.takeRecords())) proof.mark();
+  return !proof.dirty;
+}"""
+
+# Bounded teardown: a wedged renderer must not hold the hardware lease forever.
+_AUTH_PROOF_EVAL_TIMEOUT = 5.0
+_AUTH_PROOF_CLEANUP_DEADLINE = 15.0
 
 
 def _sanitize_name(name: str) -> str:
@@ -727,6 +807,7 @@ class TaskRunner:
         self._shared_session = None
         self._protected_pages: set = set()
         self._kept_pages: set = set()
+        self._auth_proof_cleanup: set[asyncio.Task] = set()
         self._workbench_page = None
         self._summary = {"success": 0, "failed": 0, "skipped": 0}
 
@@ -820,12 +901,12 @@ class TaskRunner:
         return None
 
     async def run(self, on_event=None, wait_continue=None, *, session=None, hardware_lease=None):
-        from spider_gd.core.crawler.shared_browser import get_shared_browser
+        from spider_gd.core.crawler.shared_browser import get_shared_browser, station_auth_scope
         session = session or get_shared_browser()
         async with session.execution(
             self.config.get("_control_name", self.name), on_event,
             hardware_lease=hardware_lease,
-        ) as emit:
+        ) as emit, station_auth_scope(session):
             self._shared_session = session
             base_emit = emit
 
@@ -901,7 +982,21 @@ class TaskRunner:
             multi = len(stations) > 1
             self._defer_terminal = multi
             self._rolled = {"success": 0, "failed": 0, "skipped": 0}
+            pending_runs = runs
+            station, station_index = None, 0
             try:
+                from spider_gd.core.ukey_plan import configured_ukey_ids
+
+                if (not self._station_queue
+                        and (self._skipped_stations or configured_ukey_ids(self.config))
+                        and (self.login_name or any(
+                            cfg and cfg.get("needs_login", True) for cfg in configs.values()
+                        ))):
+                    if self._stopped or session._cancel_requested:
+                        raise WorkflowExecutionError("用户取消")
+                    self._emit_skipped_download_plans(runs, _emit)
+                    self._mark_plan_skipped(runs, _emit, "没有可执行的场站")
+                    raise WorkflowExecutionError("没有可执行的场站，不能复用其他单位的业务登录态")
                 for station_index, station in enumerate(stations):
                     user_cancelled = bool(self._stopped or session._cancel_requested)
                     if user_cancelled:
@@ -1076,9 +1171,37 @@ class TaskRunner:
             finally:
                 with contextlib.suppress(Exception):
                     self._emit_station_report(_emit)
+                cleanup_interrupted = False
+                if self._auth_proof_cleanup:
+                    cleanup = asyncio.gather(*self._auth_proof_cleanup, return_exceptions=True)
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + _AUTH_PROOF_CLEANUP_DEADLINE
+                    while True:
+                        remaining = deadline - loop.time()
+                        try:
+                            if remaining <= 0:
+                                raise TimeoutError
+                            # Repeated disconnects must not cancel remote disposal or
+                            # release the hardware lease while it is still in flight.
+                            await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
+                            break
+                        except TimeoutError:
+                            # Hard deadline: abandon wedged cleanup, still release the
+                            # lease / finish indicator pages below.
+                            cleanup.cancel()
+                            logger.warning(
+                                "场站认证监视清理超过 {}s，放弃剩余清理以释放硬件租约",
+                                _AUTH_PROOF_CLEANUP_DEADLINE,
+                            )
+                            break
+                        except asyncio.CancelledError:
+                            cleanup_interrupted = True
+                    self._auth_proof_cleanup.clear()
                 with contextlib.suppress(Exception):
                     await self._finish_indicator_pages()
                 session._active_runner = None
+                if cleanup_interrupted:
+                    raise asyncio.CancelledError
 
     def _close_station(self, station, index: int, total: int, _emit, *, failed: bool, count_failure: bool = False) -> str:
         """记下这一站的结果，并决定后面的站还跑不跑。
@@ -1234,6 +1357,8 @@ class TaskRunner:
         if cert_password:
             self._cert_password = cert_password
         self._current_station = dict(station)
+        if self._shared_session is not None:
+            self._shared_session._station_org_name = str(station.get("org_name") or "").strip()
         if name and total > 1:
             from spider_gd.core.output_paths import sanitize_segment, station_scoped_path
 
@@ -1618,6 +1743,177 @@ class TaskRunner:
             session._pages = [page]
             session._current_page_idx = 0
 
+    @contextlib.contextmanager
+    def _protect_auth_pause_pages(self, session):
+        """仅在本任务的认证暂停/重查期间保留新增人工标签，不收编已有自动化页。"""
+        active = session._active_runner
+        if session is not self._shared_session or (
+            active is not self
+            and getattr(active, "_protect_auth_pause_pages", None) != self._protect_auth_pause_pages
+        ):
+            yield
+            return
+        context = self._context
+        if context is None:
+            yield
+            return
+        before = set(context.pages)
+
+        def protect(page):
+            if (page not in before and getattr(page, "context", None) is context
+                    and self._page_open(page)):
+                self._kept_pages.add(page)
+                self._protected_pages.add(page)
+
+        context.on("page", protect)
+        try:
+            yield
+        finally:
+            try:
+                for page in list(context.pages):
+                    protect(page)
+            finally:
+                context.remove_listener("page", protect)
+
+    async def _recover_station_auth_page(self) -> bool | None:
+        """只接管同 Context、同源且唯一认证的页；False 要求继续暂停，None 保留原流程。"""
+        from urllib.parse import urlsplit
+
+        from workbench_tabs import page_role
+
+        session = self._shared_session
+        if session is None or not getattr(session, "_station_org_name", ""):
+            return
+        try:
+            bound = session.page
+        except RuntimeError:
+            bound = None
+        if bound is None:
+            # 绑定页被用户关掉时仍扫描其余候选页；未绑定/加载失败等保留原流程。
+            tracked = list(getattr(session, "_pages", []) or [])
+            context = getattr(session, "_context", None)
+            if not tracked or all(self._page_open(p) for p in tracked) or context is None:
+                return
+        else:
+            context = bound.context
+        target = urlsplit(session._config["target_origin"])
+
+        def candidate(page):
+            if not self._page_open(page) or getattr(page, "context", None) is not context:
+                return False
+            url = self._url(page)
+            try:
+                parts = urlsplit(url)
+            except ValueError:
+                return False
+            return ((parts.scheme, parts.netloc) == (target.scheme, target.netloc)
+                    and page_role(url) in {"workbench", "business"})
+
+        # 未绑定或公开登录页仍走原有登录流程，不以其它标签绕过。
+        if bound is not None and not candidate(bound):
+            return
+
+        def snapshot():
+            return {
+                page: (getattr(page, "context", None), self._url(page))
+                for page in list(context.pages) if self._page_open(page)
+            }
+
+        import uuid
+
+        examined = snapshot()
+        token = "__spider_station_auth_" + uuid.uuid4().hex
+        selector = session._config.get("identity_selector", "")
+        changed = False
+        watched = []
+
+        def invalidate(*_args):
+            nonlocal changed
+            changed = True
+
+        def console_changed(message):
+            if message.text == token:
+                invalidate()
+
+        def stable():
+            return (not changed and snapshot() == examined
+                    and not session._cancel_requested and not self._stopped)
+
+        async def evidence():
+            return {page: await session.check_auth(page) for page in examined if candidate(page)}
+
+        async def stop_watch(page):
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    page.evaluate(_STATION_AUTH_PROOF_JS, {
+                        "op": "station_auth_stop", "token": token,
+                    }),
+                    timeout=_AUTH_PROOF_EVAL_TIMEOUT,
+                )
+
+        context.on("page", invalidate)
+        for page in examined:
+            page.on("framenavigated", invalidate)
+            page.on("close", invalidate)
+            page.on("console", console_changed)
+        try:
+            # Arm every candidate before reading any auth. A URL snapshot or two
+            # scans alone misses an earlier page's identity changing at a later await.
+            for page in examined:
+                if candidate(page):
+                    watched.append(page)  # Also dispose an interrupted/failed installation.
+                    if await asyncio.wait_for(
+                        page.evaluate(_STATION_AUTH_PROOF_JS, {
+                            "op": "station_auth_watch", "token": token, "selector": selector,
+                        }),
+                        timeout=_AUTH_PROOF_EVAL_TIMEOUT,
+                    ) is not True:
+                        return False
+            initial = await evidence()
+            verified = [page for page, auth in initial.items()
+                        if auth["state"] == "authenticated"]
+            if not stable() or len(verified) != 1:
+                return False
+            page = verified[0]
+            await self._activate(page)
+            # Activation is not admission. Re-read all identities/uniqueness, not
+            # just the selected page; never bind until the complete proof settles.
+            if await evidence() != initial or not stable():
+                return False
+            for observed in watched:
+                if await asyncio.wait_for(
+                    observed.evaluate(_STATION_AUTH_PROOF_JS, {
+                        "op": "station_auth_flush", "token": token,
+                    }),
+                    timeout=_AUTH_PROOF_EVAL_TIMEOUT,
+                ) is not True:
+                    return False
+            # All watches/listeners remain live through the LAST awaited flush.
+            # No await between this fence and binding/require_auth's successful return.
+            # DOM/console evidence is not atomic server auth, nor a shadow-DOM or
+            # CSS-animation monitor; any observed identity mutation fails closed.
+            if not stable() or not candidate(page):
+                return False
+            self._kept_pages.add(page)
+            self._protected_pages.add(page)
+            self._workbench_page = page
+            self._bind_session_page(page)
+            return True
+        except Exception as exc:
+            logger.warning("场站认证恢复证据无法确认: {}", exc)
+            return False
+        finally:
+            context.remove_listener("page", invalidate)
+            for page in examined:
+                page.remove_listener("framenavigated", invalidate)
+                page.remove_listener("close", invalidate)
+                page.remove_listener("console", console_changed)
+            # Awaiting observer teardown here would create another unguarded
+            # admission window. Dispose after the decision; run() settles cleanup
+            # before releasing the execution/hardware lease, including Cancel.
+            for page in watched:
+                self._auth_proof_cleanup.add(asyncio.create_task(stop_watch(page)))
+
     async def _activate(self, page) -> None:
         """把留下的标签设成窗口里选中的那一个。
 
@@ -1709,11 +2005,14 @@ class TaskRunner:
         runner._protected_pages = self._protected_pages
         runner._workbench_page = self._workbench_page
         if self._shared_session is not None:
+            # 登录工作流的最终认证也属于本任务；仅在实际执行作用域暴露暂停保护。
+            runner._protect_auth_pause_pages = self._protect_auth_pause_pages
             self._shared_session._active_runner = runner
             self._context.on("page", runner._on_new_page)
         try:
             await runner._execute_steps(self._on_event, self._wait_continue, shared=True)
         finally:
+            runner._protect_auth_pause_pages = None
             if (getattr(runner, "_stopped", False)
                     or (self._shared_session and self._shared_session._cancel_requested)):
                 self._stopped = True
@@ -2253,7 +2552,11 @@ class TaskRunner:
               phase="indicator", name=indicator_name, status="running",
               message=prepared["running_message"], target_date=prepared["target_text"])
 
-        if self._shared_session is not None and prepared["needs_login"]:
+        if self._shared_session is not None and (
+            prepared["needs_login"] or (
+                self.login_name and getattr(self._shared_session, "_station_org_name", "")
+            )
+        ):
             # 指标未配置登录流程时，未登录只暂停，不转去自动登录。
             self._login_done = await self._shared_session.require_auth(allow_auto=False)
 

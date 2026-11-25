@@ -35,6 +35,45 @@ def test_generated_xlsx_reuses_same_hash_and_archives_changed_version(tmp_path):
 
 
 @pytest.mark.unit
+def test_generated_xlsx_bytes_ignore_save_clock(tmp_path, monkeypatch):
+    # openpyxl 写入秒级 created/modified 与 ZIP 条目时间，跨秒保存会让相同数据产生不同字节，
+    # 哈希版本管理据此误判为新版本。固定时钟前进以确定性复现，不依赖真实 sleep。
+    import datetime as dt
+    import itertools
+    import time as time_mod
+    import types
+
+    import openpyxl.packaging.core as ox_core
+    import openpyxl.writer.excel as ox_excel
+
+    ticks = itertools.count()
+
+    class _FakeDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return dt.datetime(2021, 1, 1) + dt.timedelta(seconds=next(ticks) * 5)
+
+    fake = types.SimpleNamespace(datetime=_FakeDateTime, timezone=dt.timezone)
+    monkeypatch.setattr(ox_core, "datetime", fake)
+    monkeypatch.setattr(ox_excel, "datetime", fake)
+    zip_ticks = itertools.count()
+    monkeypatch.setattr(
+        time_mod, "localtime", lambda *a: (2021, 1, 1, 0, 0, next(zip_ticks) * 5, 0, 0, 0)
+    )
+
+    target = tmp_path / "api.xlsx"
+    WorkflowRunner._save_data_as_xlsx([{"price": 1}], target)
+    first_bytes = target.read_bytes()
+    WorkflowRunner._save_data_as_xlsx([{"price": 1}], target)
+
+    assert target.read_bytes() == first_bytes
+    assert not (tmp_path / "_versions").exists()
+
+    WorkflowRunner._save_data_as_xlsx([{"price": 2}], target)
+    assert len(list((tmp_path / "_versions").glob("api_*.xlsx"))) == 1
+
+
+@pytest.mark.unit
 def test_generated_text_reuses_same_hash_and_archives_changed_version(tmp_path):
     target = tmp_path / "extracted.json"
 

@@ -92,3 +92,103 @@ def test_build_stamp_written_for_freeze_is_restored():
 def test_frozen_ocr_entrypoint_is_not_run_off_windows(capsys):
     build_backend.assert_frozen_ocr(Path("/no/such/spider-gd-service.exe"))
     assert "只在 Windows" in capsys.readouterr().out
+
+
+def _patch_windows_image(monkeypatch, write):
+    """只替换 OS 调用（GetModuleFileNameW）本身；缓冲区与失败分支走真实代码。"""
+    from types import SimpleNamespace
+
+    from spider_gd import runtime_info
+
+    calls = []
+
+    class FakeCall:
+        argtypes = None
+        restype = None
+
+        def __call__(self, module, buffer, size):
+            calls.append({"module": module, "size": size, "argtypes": self.argtypes, "restype": self.restype})
+            return write(buffer, size)
+
+    call = FakeCall()
+    monkeypatch.setattr(runtime_info.os, "name", "nt")
+    monkeypatch.setattr(runtime_info, "_kernel32", lambda: SimpleNamespace(GetModuleFileNameW=call))
+    return calls
+
+
+@pytest.mark.unit
+def test_runtime_executable_off_windows_is_resolved_sys_executable(monkeypatch):
+    from spider_gd import runtime_info
+
+    monkeypatch.setattr(runtime_info.os, "name", "posix")
+    assert runtime_info.runtime_executable() == Path(sys.executable).resolve()
+
+
+@pytest.mark.unit
+def test_windows_runtime_executable_reports_real_process_image(monkeypatch):
+    from spider_gd import runtime_info
+
+    base = "C:\\Users\\jayden\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+
+    def write(buffer, size):
+        buffer.value = base
+        return len(base)
+
+    calls = _patch_windows_image(monkeypatch, write)
+    assert runtime_info.runtime_executable() == Path(base)
+    assert len(calls) == 1
+    assert calls[0]["module"] is None
+    assert calls[0]["size"] >= 32768
+    assert calls[0]["argtypes"] is not None and len(calls[0]["argtypes"]) == 3
+    assert calls[0]["restype"] is not None
+
+
+@pytest.mark.unit
+def test_windows_runtime_executable_fails_closed_on_zero_result(monkeypatch):
+    from spider_gd import runtime_info
+
+    _patch_windows_image(monkeypatch, lambda buffer, size: 0)
+    with pytest.raises(OSError):
+        runtime_info.runtime_executable()
+
+
+@pytest.mark.unit
+def test_windows_runtime_executable_fails_closed_on_truncation(monkeypatch):
+    from spider_gd import runtime_info
+
+    def write(buffer, size):
+        buffer.value = "C:\\short"
+        return size
+
+    _patch_windows_image(monkeypatch, write)
+    with pytest.raises(OSError):
+        runtime_info.runtime_executable()
+
+
+@pytest.mark.unit
+def test_runtime_identity_uses_runtime_executable(tmp_path, monkeypatch):
+    from spider_gd import runtime_info
+
+    monkeypatch.chdir(tmp_path)
+    sentinel = Path(sys.executable).resolve().parent / "real-image-python"
+    monkeypatch.setattr(runtime_info, "runtime_executable", lambda: sentinel)
+    assert runtime_info.runtime_identity()["executable"] == str(sentinel)
+
+
+@pytest.mark.unit
+def test_importing_runtime_info_creates_no_service_or_home(tmp_path):
+    import os
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SPIDER_GD")}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", "import spider_gd.runtime_info"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(tmp_path.iterdir()) == []

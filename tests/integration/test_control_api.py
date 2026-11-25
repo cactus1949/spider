@@ -204,6 +204,120 @@ def test_beta_task_write_paths_reject_foreign_targets_without_replacing_task(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("linked", [False, True])
+def test_beta_backup_import_preserves_own_paths_and_imports_business_settings(
+    beta_client, tmp_path, linked,
+):
+    client, home = beta_client
+    own = str(home / "downloads")
+    profile = str(home / "wechat")
+    assert client.put("/api/settings", json={
+        "downloadDir": own, "deliveryDesktopWechatProfilePath": profile,
+        "siteUrl": "original", "certPassword": "stored-secret",
+    }).status_code == 200
+    foreign = tmp_path / "formal"
+    foreign.mkdir()
+    marker = foreign / "marker"
+    marker.write_bytes(b"formal data")
+    imported_path = foreign / "downloads"
+    if linked:
+        link = home / "foreign-link"
+        link.symlink_to(foreign, target_is_directory=True)
+        imported_path = link / "downloads"
+
+    response = client.post("/api/data/import", json={
+        "version": 1,
+        "settings": {
+            "downloadDir": str(imported_path),
+            "deliveryDesktopWechatProfilePath": str(foreign / "wechat"),
+            "siteUrl": "imported-site", "certPassword": "******",
+        },
+        "tasks": [{"id": "backup-task", "name": "backup", "enabled": False}],
+    })
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "ok"
+    assert result["errors"] == []
+    assert len(result["warnings"]) == 2
+    settings = client.get("/api/settings").json()["settings"]
+    assert settings["siteUrl"] == "imported-site"
+    assert settings["downloadDir"] == own
+    assert settings["deliveryDesktopWechatProfilePath"] == profile
+    exported = client.get("/api/data/export").json()["settings"]
+    assert exported["certPassword"] == "stored-secret"
+    assert client.get("/api/task-configs/backup-task").status_code == 200
+    assert marker.read_bytes() == b"formal data"
+    assert list(foreign.iterdir()) == [marker]
+
+
+@pytest.mark.integration
+def test_backup_import_uses_ordinary_settings_update_pipeline(beta_client, monkeypatch):
+    from spider_gd.core.crawler.shared_browser import get_shared_browser
+    from spider_gd.core.station_profile import parse_station_profiles
+
+    client, home = beta_client
+    original = [
+        {"id": "keep", "name": "单位甲", "wifiPassword": "wifi-secret",
+         "certPassword": "pin-secret", "orgName": "单位甲"},
+        {"id": "removed", "name": "旧场站"},
+    ]
+    assert client.put("/api/settings", json={
+        "stationProfiles": json.dumps(original), "certPassword": "global-secret",
+        "downloadDir": str(home / "old-downloads"),
+    }).status_code == 200
+    refreshed = []
+
+    def alert_gateway(settings, store):
+        refreshed.append(store.get_all_settings())
+        return object()
+
+    monkeypatch.setattr("spider_gd.app.build_alert_gateway", alert_gateway)
+    imported = [
+        {"id": "keep", "name": "单位甲新名", "wifiPassword": "******",
+         "certPassword": "", "orgName": "单位甲"},
+        {"id": "new", "name": "单位乙", "orgName": "单位乙"},
+    ]
+    directory = home / "imported-downloads"
+    response = client.post("/api/data/import", json={"settings": {
+        "stationProfiles": json.dumps(imported), "certPassword": "******",
+        "downloadDir": str(directory),
+    }})
+
+    assert response.status_code == 200
+    assert response.json()["errors"] == []
+    stored = client.get("/api/data/export").json()["settings"]
+    stations = parse_station_profiles(stored["stationProfiles"])
+    assert [station.id for station in stations] == ["keep", "new"]
+    assert stations[0].wifi_password == "wifi-secret"
+    assert stations[0].cert_password == "pin-secret"
+    assert stations[0].name == "单位甲新名"
+    assert stored["certPassword"] == "global-secret"
+    assert get_shared_browser()._download_root == directory.resolve()
+    assert len(refreshed) == 1
+    assert refreshed[0]["stationProfiles"] == stored["stationProfiles"]
+
+
+@pytest.mark.integration
+def test_backup_import_reports_only_saved_tasks_when_one_fails(beta_client, tmp_path):
+    client, home = beta_client
+    response = client.post("/api/data/import", json={"tasks": [
+        {"id": "valid", "name": "valid", "enabled": False},
+        {"id": "invalid", "name": "invalid", "enabled": False,
+         "download_dir": str(tmp_path / "formal")},
+    ]})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "partial"
+    assert "任务 (1 个)" in result["imported"]
+    assert len(result["errors"]) == 1
+    assert client.get("/api/task-configs/valid").status_code == 200
+    assert client.get("/api/task-configs/invalid").status_code == 404
+    assert not (tmp_path / "formal").exists()
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("folder", ["tasks", "workflows"])
 def test_beta_yaml_writes_reject_foreign_file_links(beta_client, tmp_path, folder):
     client, home = beta_client

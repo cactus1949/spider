@@ -286,8 +286,12 @@ def plan_task_execution(
         ) == ""
     ]
     if not ready:
-        # 任务没选钥匙，当前也没有可跑的场站：按原来的方式跑，不切换场站。
-        return TaskUKeyPlan(started=True)
+        return TaskUKeyPlan(started=True, skipped=[
+            StationDecision(station.id, station.name, "skipped", station_block_reason(
+                station, present_device_ids, certs, certs_checked=certs_checked,
+            ))
+            for station in stations
+        ])
     if mode == "scheduled":
         return TaskUKeyPlan(
             started=True,

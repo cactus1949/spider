@@ -279,6 +279,64 @@ async def test_query_pause_logs_request_lifecycle_without_changing_export_guard(
             await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_export_call_chain_accepts_validated_new_document_without_replaying_clicks(tmp_path):
+    from datetime import date
+
+    page = _QueryPage()
+    runner = WorkflowRunner({"name": "current result", "steps": [
+        {"action": "wait", "ms": 50},
+        {"action": "export", "selector": "#export", "timeout": 1000,
+         "query_wait_timeout": 0, "query_settle_ms": 0},
+    ], "query_result": {"url": "/pfxh/api/query", "params": {"date": "{date}"},
+                        "required_fields": ["price"]}},
+        download_dir=str(tmp_path), target_date=date(2026, 10, 1))
+    runner.pages = [page]
+    events = []
+    task = asyncio.create_task(runner._execute_steps(events.append, None, shared=True))
+
+    async def response(request, status, body):
+        async def read():
+            return body
+        await runner._capture_page_response(SimpleNamespace(
+            request=request, url=request.url, status=status,
+            headers={"content-type": "text/html" if status == 400 else "application/json"},
+            body=read,
+        ))
+
+    try:
+        await asyncio.wait_for(page.observed.wait(), timeout=5)
+        old = _Request(page.main_frame, "/pfxh/api/query")
+        old.url = old.url.split("#")[0] + "&date=2026-10-01"
+        page.emit("request", old)
+        await response(old, 400, b"\r\n")
+        page.emit("requestfinished", old)
+        navigation = _Request(page.main_frame, "/pfxh/stc/new-document")
+        navigation.resource_type = "document"
+        page.emit("request", navigation)
+        await response(navigation, 200, b"{}")
+        page.emit("framenavigated", page.main_frame)
+        page.emit("requestfinished", navigation)
+        current = _Request(page.main_frame, "/pfxh/api/query")
+        current.url = current.url.split("#")[0] + "&date=2026-10-01"
+        page.emit("request", current)
+        page.emit("requestfinished", current)
+        await response(current, 200, b'{"code":200,"data":[{"price":42}]}')
+        await asyncio.wait_for(task, timeout=5)
+        assert not runner.failed, runner.failure_reason
+        assert page.clicks == ["#export"]
+        assert page.download_attempts == 1
+        assert (tmp_path / "query.csv").read_bytes() == b"date,value\n2026-11-01,1\n"
+        assert not any(event["event"] == "error_pause" for event in events)
+        assert sum(event["event"] == "export_saved" for event in events) == 1
+        assert events[-1]["event"] == "workflow_done"
+        assert len(runner._page_errors) == 1
+        assert not runner._page_errors[0].get("_resolved")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_query_diagnostics_bound_history_and_mark_unobserved_requests(tmp_path):
     page = _QueryPage()
     runner = WorkflowRunner({"name": "有界查询诊断", "steps": [

@@ -12,6 +12,7 @@ import platform
 import sys
 import zipfile
 from datetime import datetime, timedelta
+from itertools import chain, zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -466,8 +467,9 @@ def build_diagnostics_zip(
         except Exception as exc:
             notes.append(f"导出任务配置失败: {exc}")
 
+    log_files: list[Path] = []
     if log_dir and log_dir.exists():
-        for path in sorted(log_dir.rglob("*")):
+        for path in log_dir.rglob("*"):
             if not path.is_file():
                 continue
             keep = path.name in {"app.log", "error.log"} or _recent(path, cutoff)
@@ -476,22 +478,58 @@ def build_diagnostics_zip(
             suffix = path.suffix.lower()
             if suffix not in {".log", ".txt", ".zip", ""} and "log" not in path.name:
                 continue
-            relative = path.relative_to(log_dir).as_posix()
-            add_bytes(f"logs/{relative}", _tail_bytes(path, _MAX_FILE_BYTES))
+            log_files.append(path)
+        log_files.sort(key=lambda path: (
+            path.name not in {"app.log", "error.log"},
+            -(path.stat().st_mtime if path.exists() else 0),
+        ))
 
+    logs = []
     if store is not None and hasattr(store, "list_execution_logs"):
         start = cutoff.strftime("%Y-%m-%d %H:%M:%S")
         try:
             logs = store.list_execution_logs(page=1, page_size=200, start_time=start)
         except Exception as exc:
-            logs = []
             notes.append(f"导出执行日志失败: {exc}")
-        for item in logs:
+
+    failure_files: list[tuple[Path, Path]] = []
+    for root in download_dirs or []:
+        failure_files.extend((root, path) for path in _walk_named(
+            root, cutoff, {"_failures", "login_diagnostics_", "diagnostics_"},
+        ))
+    failure_files.sort(key=lambda entry: (
+        entry[1].stat().st_mtime if entry[1].exists() else 0
+    ), reverse=True)
+
+    # 先收齐主日志、最新执行和失败现场，避免历史执行挤掉现场的其余文件。
+    materials = chain(
+        ((path, None, None) for path in log_files if path.name in {"app.log", "error.log"}),
+        ((None, item, None) for item in logs[:1]),
+        ((None, None, failure) for failure in failure_files),
+        zip_longest(
+            (path for path in log_files if path.name not in {"app.log", "error.log"}),
+            logs[1:], (),
+        ),
+    )
+    failure_index = 0
+    for log_path, item, failure in materials:
+        if log_path is not None:
+            relative = log_path.relative_to(log_dir).as_posix()
+            add_bytes(f"logs/{relative}", _tail_bytes(log_path, _MAX_FILE_BYTES))
+        if item is not None:
             body = (
                 f"exec_id: {item.exec_id}\nname: {item.name}\ntype: {item.type}\n"
                 f"status: {item.status}\nreason: {item.reason}\n\n{item.detail_log or ''}"
             )
             add_text(f"execution_logs/{item.exec_id}.txt", body)
+        if failure is not None:
+            failure_index += 1
+            root, path = failure
+            try:
+                relative = path.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                relative = path.name
+            add_bytes(f"failures/{failure_index:02d}_{relative}", _tail_bytes(path, _MAX_FILE_BYTES))
 
     if store is not None and hasattr(store, "list_workflow_configs"):
         try:
@@ -506,16 +544,6 @@ def build_diagnostics_zip(
             continue
         for path in sorted(folder.glob("*.yml")):
             add_text(f"workflows/{path.name}", path.read_text(encoding="utf-8", errors="replace"))
-
-    shot_index = 0
-    for root in download_dirs or []:
-        for path in _walk_named(root, cutoff, {"_failures", "login_diagnostics_", "diagnostics_"}):
-            shot_index += 1
-            try:
-                relative = path.resolve().relative_to(root.resolve()).as_posix()
-            except ValueError:
-                relative = path.name
-            add_bytes(f"failures/{shot_index:02d}_{relative}", _tail_bytes(path, _MAX_FILE_BYTES))
 
     readme = "诊断包已脱敏。若仍发现密钥，请不要外传并联系维护人员。\n" + "\n".join(notes)
     add_text("README.txt", readme, essential=True)
