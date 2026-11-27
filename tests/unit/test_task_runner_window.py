@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from pathlib import Path
@@ -439,6 +439,44 @@ def test_build_catchup_config_keeps_each_indicator_period():
             indicators=["日前", "日清"],
             indicator_months={"日清": ["2026-08"]},
         )
+
+
+@pytest.mark.unit
+def test_build_catchup_config_allows_up_to_one_year_days_and_five_years_months():
+    leap_year = [(date(2024, 1, 1) + timedelta(days=i)).isoformat() for i in range(366)]
+    five_years = [f"{2022 + i // 12}-{(i % 12) + 1:02d}" for i in range(60)]
+
+    cfg = build_catchup_config(
+        login="",
+        indicators=["日前", "日清"],
+        indicator_dates={"日前": leap_year},
+        indicator_months={"日清": five_years},
+    )
+    assert len(cfg["indicator_dates"]["日前"]) == 366
+    assert len(cfg["indicator_months"]["日清"]) == 60
+
+    cfg_target = build_catchup_config(
+        login="",
+        indicators=["日前"],
+        target_dates=leap_year,
+        target_months=five_years,
+    )
+    assert len(cfg_target["target_dates"]) == 366
+    assert len(cfg_target["target_months"]) == 60
+
+    too_many_days = [*leap_year, "2025-01-01"]
+    too_many_months = [*five_years, "2027-01"]
+
+    with pytest.raises(ValueError, match="366 天"):
+        build_catchup_config(login="", indicators=["日前"], indicator_dates={"日前": too_many_days})
+    with pytest.raises(ValueError, match="366 天"):
+        build_catchup_config(login="", indicators=["日前"], output_dates={"日前::出清": too_many_days})
+    with pytest.raises(ValueError, match="366 天"):
+        build_catchup_config(login="", indicators=["日前"], target_dates=too_many_days)
+    with pytest.raises(ValueError, match="60 个月"):
+        build_catchup_config(login="", indicators=["日清"], indicator_months={"日清": too_many_months})
+    with pytest.raises(ValueError, match="60 个月"):
+        build_catchup_config(login="", indicators=["日清"], target_months=too_many_months)
 
 
 def test_month_indicator_runs_once_even_when_dates_are_passed():

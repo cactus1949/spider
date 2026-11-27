@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { App as AntApp, Button, DatePicker, Input, Modal, Segmented, Select, Space, Steps, Tag, Typography } from 'antd'
+import { Alert, App as AntApp, Button, Input, Modal, Segmented, Select, Space, Steps, Tag, Tooltip, Typography } from 'antd'
 import { FolderOpenOutlined } from '@ant-design/icons'
 import dayjs, { type Dayjs } from 'dayjs'
 import { settingsStore, type WorkflowInfo, type WorkflowGroup, type WorkflowOutput } from '../services/api'
@@ -11,10 +11,36 @@ import StoragePathModal, { type PathFolder } from './StoragePathModal'
 import type { CustomFileNames } from './customFilename'
 import { TASK_EDITOR_STEPS } from './taskEditorSteps'
 import TaskUploadFields from './TaskUploadFields'
+import CatchupPeriodPicker from './CatchupPeriodPicker'
+import {
+  CATCHUP_LIMITS,
+  CATCHUP_SOFT_WARN_DAYS,
+  DEFAULT_PREVIEW_SEGMENTS,
+  clonePeriodSelection,
+  emptyPeriodSelection,
+  formatPeriodSegment,
+  formatPeriodSummary,
+  formatRangeLabel,
+  groupConsecutivePeriods,
+  groupOutputPreviews,
+  groupPreviewRows,
+  periodKindLabel,
+  periodUnitLabel,
+  resolveCustomIso,
+  selectionCount,
+  selectionExceedsLimit,
+  toIsoList,
+  weekMonday,
+  type OutputPreviewEntry,
+  type PeriodKind,
+  type PeriodSegment,
+  type PeriodSelection,
+  type PreviewItemInput
+} from './catchupDates'
 
 const { Text } = Typography
-const MAX_DAYS = 62
-const MAX_MONTHS = 24
+const EMPTY_SELECTION: PeriodSelection = emptyPeriodSelection('range')
+const PERIOD_KINDS: PeriodKind[] = ['day', 'week', 'month']
 
 /** 用来给补数默认存储路径的任务摘要。字段与任务卡片一致，多出来的字段可以一起传入。 */
 export interface CatchupTaskHint {
@@ -65,6 +91,12 @@ const OUTPUT_MODES: { label: string; value: OutputMode }[] = [
   { label: '不补', value: 'skip' }
 ]
 
+function periodKindOf(item: WorkflowInfo): PeriodKind {
+  if (item.date_kind === 'month') return 'month'
+  if (item.date_kind === 'week') return 'week'
+  return 'day'
+}
+
 /** 按日指标里落在日期循环里、能单独选日期的导出；只有一个时不必另选 */
 function ownableOutputs(item: WorkflowInfo): WorkflowOutput[] {
   if (item.date_kind === 'month' || item.date_kind === 'week') return []
@@ -108,41 +140,6 @@ interface Props {
   onRun: (selection: CatchupSelection) => void
 }
 
-function describeList(values: string[]): string {
-  return values.join('、')
-}
-
-function weekMonday(value: Dayjs): Dayjs {
-  return value.subtract((value.day() + 6) % 7, 'day').startOf('day')
-}
-
-function recentPeriods(count: number, endOffset: number, unit: 'day' | 'week' | 'month'): Dayjs[] {
-  const end = (unit === 'week' ? weekMonday(dayjs()) : dayjs().startOf(unit)).subtract(endOffset, unit)
-  return Array.from({ length: count }, (_, index) => end.subtract(count - index - 1, unit))
-}
-
-const DAY_PRESETS = [
-  { label: '近三天', count: 3, endOffset: 0 },
-  { label: '近七天', count: 7, endOffset: 0 },
-  { label: '近一个月', count: 30, endOffset: 0 }
-]
-
-const MONTH_PRESETS = [
-  { label: '上个月', count: 1, endOffset: 1 },
-  { label: '近三月', count: 3, endOffset: 1 },
-  { label: '近一年', count: 12, endOffset: 1 }
-]
-
-const WEEK_PRESETS = [
-  { label: '本周', count: 1, endOffset: 0 },
-  { label: '近四周', count: 4, endOffset: 0 },
-  { label: '近十二周', count: 12, endOffset: 0 }
-]
-
-function toIso(values: Dayjs[] | undefined, pattern: string): string[] {
-  return [...new Set((values || []).map((item) => item.format(pattern)))].sort()
-}
-
 function defaultWindow(item: WorkflowInfo): [number, number] {
   const month = item.date_kind === 'month'
   const week = item.date_kind === 'week'
@@ -165,13 +162,22 @@ function defaultPeriods(item: WorkflowInfo, reference: Dayjs): Dayjs[] {
 }
 
 function describeDefault(item: WorkflowInfo, values: string[]): string {
-  const month = item.date_kind === 'month'
-  const week = item.date_kind === 'week'
+  const kind = periodKindOf(item)
   const [start, end] = defaultWindow(item)
-  const format = month ? formatMOffset : week ? formatWOffset : formatDOffset
+  const format = kind === 'month' ? formatMOffset : kind === 'week' ? formatWOffset : formatDOffset
   const offset = start === end ? format(start) : `${format(start)} ～ ${format(end)}`
   const dates = values.length === 1 ? values[0] : `${values[0]} ～ ${values[values.length - 1]}`
-  return `${offset}（${dates}，共 ${values.length} ${month ? '个月' : week ? '周' : '天'}）`
+  return `${offset}（${dates}，共 ${values.length} ${periodUnitLabel(kind)}）`
+}
+
+function describeOverflow(sel: PeriodSelection, kind: PeriodKind): string {
+  const count = selectionCount(sel, kind)
+  const limit = CATCHUP_LIMITS[kind]
+  const unit = periodUnitLabel(kind)
+  const span = sel.mode === 'range' ? formatRangeLabel(sel.range, kind) : ''
+  return span
+    ? `${span}（已选 ${count} ${unit}，超过上限 ${limit} ${unit}）`
+    : `已选 ${count} ${unit}，超过上限 ${limit} ${unit}`
 }
 
 export default function CatchupModal({
@@ -187,11 +193,18 @@ export default function CatchupModal({
   const [step, setStep] = useState(0)
   const [login, setLogin] = useState(defaultLogin)
   const [indicators, setIndicators] = useState<string[]>([])
-  const [datesByIndicator, setDatesByIndicator] = useState<Record<string, Dayjs[]>>({})
-  const [monthsByIndicator, setMonthsByIndicator] = useState<Record<string, Dayjs[]>>({})
+  const [selectionsByIndicator, setSelectionsByIndicator] = useState<Record<string, PeriodSelection>>({})
   const [outputModes, setOutputModes] = useState<Record<string, OutputMode>>({})
-  const [outputPicks, setOutputPicks] = useState<Record<string, Dayjs[]>>({})
+  const [outputSelections, setOutputSelections] = useState<Record<string, PeriodSelection>>({})
+  const [batchDrafts, setBatchDrafts] = useState<Record<PeriodKind, PeriodSelection>>(() => ({
+    day: emptyPeriodSelection('range'),
+    week: emptyPeriodSelection('range'),
+    month: emptyPeriodSelection('range')
+  }))
+  const [batchKind, setBatchKind] = useState<PeriodKind>('day')
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [mergeSamePreview, setMergeSamePreview] = useState(true)
+  const [expandedPreviewRows, setExpandedPreviewRows] = useState<Record<string, boolean>>({})
   const [referenceDate] = useState(() => dayjs().startOf('day'))
   const [uploadProfileId, setUploadProfileId] = useState('')
   const [autoUpload, setAutoUpload] = useState(false)
@@ -234,71 +247,273 @@ export default function CatchupModal({
     if (step !== 2) structureBaseline.current = null
   }, [step])
 
-  const selected = indicators
-    .map((name) => workflows.find((item) => item.name === name))
-    .filter(Boolean) as WorkflowInfo[]
-  const dayIndicators = selected.filter((item) => item.date_kind !== 'month')
-  const monthIndicators = selected.filter((item) => item.date_kind === 'month')
-  const defaults = Object.fromEntries(selected.map((item) => [item.name, defaultPeriods(item, referenceDate)])) as Record<string, Dayjs[]>
+  const selected = useMemo(
+    () => indicators
+      .map((name) => workflows.find((item) => item.name === name))
+      .filter(Boolean) as WorkflowInfo[],
+    [indicators, workflows]
+  )
+
+  const byKind = useMemo(() => {
+    const grouped: Record<PeriodKind, WorkflowInfo[]> = { day: [], week: [], month: [] }
+    for (const item of selected) grouped[periodKindOf(item)].push(item)
+    return grouped
+  }, [selected])
+
+  const dayAndWeekIndicators = useMemo(
+    () => selected.filter((item) => item.date_kind !== 'month'),
+    [selected]
+  )
+  const monthIndicators = byKind.month
+  const batchKinds = useMemo(
+    () => PERIOD_KINDS.filter((kind) => byKind[kind].length >= 2),
+    [byKind]
+  )
+  const activeBatchKind: PeriodKind | null = batchKinds.includes(batchKind)
+    ? batchKind
+    : (batchKinds[0] ?? null)
+
+  const defaults = useMemo(
+    () => Object.fromEntries(
+      selected.map((item) => [item.name, defaultPeriods(item, referenceDate)])
+    ) as Record<string, Dayjs[]>,
+    [selected, referenceDate]
+  )
+
   const indicatorDates = useMemo(() => {
     const next: Record<string, string[]> = {}
-    for (const item of dayIndicators) {
-      const values = datesByIndicator[item.name]?.length ? datesByIndicator[item.name] : defaults[item.name]
-      next[item.name] = toIso(item.date_kind === 'week' ? values.map(weekMonday) : values, 'YYYY-MM-DD')
+    for (const item of dayAndWeekIndicators) {
+      const kind = periodKindOf(item)
+      const sel = selectionsByIndicator[item.name]
+      const custom = selectionCount(sel, kind) > 0
+      next[item.name] = custom
+        ? resolveCustomIso(sel, kind)
+        : toIsoList(defaults[item.name], kind)
     }
     return next
-  }, [dayIndicators, datesByIndicator, defaults])
+  }, [dayAndWeekIndicators, selectionsByIndicator, defaults])
+
   const indicatorMonths = useMemo(() => {
     const next: Record<string, string[]> = {}
-    for (const item of monthIndicators) next[item.name] = toIso(monthsByIndicator[item.name]?.length ? monthsByIndicator[item.name] : defaults[item.name], 'YYYY-MM')
+    for (const item of monthIndicators) {
+      const sel = selectionsByIndicator[item.name]
+      const custom = selectionCount(sel, 'month') > 0
+      next[item.name] = custom
+        ? resolveCustomIso(sel, 'month')
+        : toIsoList(defaults[item.name], 'month')
+    }
     return next
-  }, [monthIndicators, monthsByIndicator, defaults])
-  const daysReady = dayIndicators.every((item) => {
-    const count = indicatorDates[item.name].length
-    return count > 0 && count <= MAX_DAYS
-  })
-  const monthsReady = monthIndicators.every((item) => {
-    const count = indicatorMonths[item.name].length
-    return count > 0 && count <= MAX_MONTHS
-  })
+  }, [monthIndicators, selectionsByIndicator, defaults])
+
   const outputDates = useMemo(() => {
     const next: Record<string, string[]> = {}
-    for (const item of dayIndicators) {
+    for (const item of byKind.day) {
       for (const output of ownableOutputs(item)) {
         const key = `${item.name}::${output.key}`
         const mode = outputModes[key] || 'follow'
         if (mode === 'skip') next[key] = []
-        else if (mode === 'own') next[key] = toIso(outputPicks[key], 'YYYY-MM-DD')
+        else if (mode === 'own') next[key] = resolveCustomIso(outputSelections[key], 'day')
       }
     }
     return next
-  }, [dayIndicators, outputModes, outputPicks])
-  const outputsReady = Object.entries(outputDates).every(([key, values]) =>
-    outputModes[key] === 'skip' || (values.length > 0 && values.length <= MAX_DAYS))
-  const datesReady = indicators.length > 0 && daysReady && monthsReady && outputsReady
+  }, [byKind.day, outputModes, outputSelections])
+
+  const hasOverLimit = useMemo(() => {
+    for (const item of selected) {
+      const kind = periodKindOf(item)
+      if (selectionExceedsLimit(selectionsByIndicator[item.name], kind)) return true
+    }
+    for (const item of byKind.day) {
+      for (const output of ownableOutputs(item)) {
+        const key = `${item.name}::${output.key}`
+        if (outputModes[key] === 'own' && selectionExceedsLimit(outputSelections[key], 'day')) {
+          return true
+        }
+      }
+    }
+    return false
+  }, [selected, byKind.day, selectionsByIndicator, outputModes, outputSelections])
+
+  const indicatorsReady = selected.every((item) => {
+    const kind = periodKindOf(item)
+    const sel = selectionsByIndicator[item.name]
+    if (selectionExceedsLimit(sel, kind)) return false
+    const values = kind === 'month' ? indicatorMonths[item.name] : indicatorDates[item.name]
+    return values.length > 0 && values.length <= CATCHUP_LIMITS[kind]
+  })
+
+  const outputsReady = useMemo(() => {
+    for (const item of byKind.day) {
+      for (const output of ownableOutputs(item)) {
+        const key = `${item.name}::${output.key}`
+        if (outputModes[key] !== 'own') continue
+        const count = selectionCount(outputSelections[key], 'day')
+        if (count === 0 || count > CATCHUP_LIMITS.day) return false
+      }
+    }
+    return true
+  }, [byKind.day, outputModes, outputSelections])
+
+  const longSpanStats = useMemo(() => {
+    let maxDays = 0
+    let warnItems = 0
+    let totalDayRuns = 0
+    for (const item of byKind.day) {
+      const sel = selectionsByIndicator[item.name]
+      const indOver = selectionExceedsLimit(sel, 'day')
+      const indDates = indOver ? [] : (indicatorDates[item.name] || [])
+      const outputs = ownableOutputs(item)
+      let effectiveDays = indDates.length
+      if (outputs.length > 0) {
+        const union = new Set<string>()
+        for (const output of outputs) {
+          const key = `${item.name}::${output.key}`
+          const mode = outputModes[key] || 'follow'
+          if (mode === 'skip') continue
+          if (mode === 'own') {
+            if (!selectionExceedsLimit(outputSelections[key], 'day')) {
+              const outList = outputDates[key] || []
+              for (const day of outList) union.add(day)
+              if (outList.length > CATCHUP_SOFT_WARN_DAYS) {
+                warnItems += 1
+                maxDays = Math.max(maxDays, outList.length)
+              }
+            }
+          } else {
+            for (const day of indDates) union.add(day)
+          }
+        }
+        effectiveDays = union.size
+      }
+      totalDayRuns += effectiveDays
+      if (effectiveDays > CATCHUP_SOFT_WARN_DAYS) {
+        warnItems += 1
+        maxDays = Math.max(maxDays, effectiveDays)
+      }
+    }
+    return { maxDays, warnItems, totalDayRuns }
+  }, [byKind.day, selectionsByIndicator, indicatorDates, outputModes, outputSelections, outputDates])
+
+  const previewItems = useMemo(() => {
+    interface RichPreviewItem extends PreviewItemInput {
+      item: WorkflowInfo
+      selection: PeriodSelection
+      segments: PeriodSegment[]
+      ownTexts: string[]
+    }
+    return selected.map((item): RichPreviewItem => {
+      const kind = periodKindOf(item)
+      const sel = selectionsByIndicator[item.name] || EMPTY_SELECTION
+      const isDefault = selectionCount(sel, kind) === 0
+      const overLimit = selectionExceedsLimit(sel, kind)
+      const values = overLimit
+        ? []
+        : (kind === 'month' ? indicatorMonths[item.name] : indicatorDates[item.name]) || []
+      const segments = overLimit ? [] : groupConsecutivePeriods(values, kind)
+      const ownEntries: OutputPreviewEntry[] = kind !== 'day'
+        ? []
+        : ownableOutputs(item)
+          .filter((output) => (outputModes[`${item.name}::${output.key}`] || 'follow') !== 'follow')
+          .map((output) => {
+            const key = `${item.name}::${output.key}`
+            const mode = outputModes[key]
+            if (mode === 'skip') {
+              return { label: output.label, summary: '不补', signature: 'skip' }
+            }
+            const outSel = outputSelections[key] || EMPTY_SELECTION
+            const outCount = selectionCount(outSel, 'day')
+            if (outCount === 0) {
+              return { label: output.label, summary: '未选日期', signature: 'empty' }
+            }
+            if (outCount > CATCHUP_LIMITS.day) {
+              return {
+                label: output.label,
+                summary: `超出上限（${outCount}/${CATCHUP_LIMITS.day} 天）`,
+                signature: `over:${outCount}`
+              }
+            }
+            const outDates = outputDates[key] || []
+            return {
+              label: output.label,
+              summary: formatPeriodSummary(outDates, 'day'),
+              signature: `own:${outDates.join(',')}`
+            }
+          })
+      const groupedOwn = groupOutputPreviews(ownEntries)
+      const ownTexts = groupedOwn.map((group) => `${group.labels.join('、')}：${group.summary}`)
+      const ownSignature = ownEntries.map((entry) => `${entry.label}=${entry.signature}`).join(';')
+      return {
+        id: item.name,
+        name: workflowPath(item, groups),
+        kind,
+        isDefault,
+        overLimit,
+        values,
+        ownSignature,
+        item,
+        selection: sel,
+        segments,
+        ownTexts
+      }
+    })
+  }, [selected, groups, selectionsByIndicator, indicatorDates, indicatorMonths, outputModes, outputSelections, outputDates])
+
+  const groupedPreviewRows = useMemo(() => groupPreviewRows(previewItems), [previewItems])
+  const canMergePreview = groupedPreviewRows.length < previewItems.length
+  const visiblePreviewRows = canMergePreview && mergeSamePreview
+    ? groupedPreviewRows
+    : previewItems.map((entry) => ({ key: entry.id, items: [entry] }))
+
+  const previewMetaText = useMemo(() => {
+    if (selected.length === 0) return ''
+    const parts: string[] = [`共 ${selected.length} 个指标`]
+    if (longSpanStats.totalDayRuns > 0) parts.push(`按日 ${longSpanStats.totalDayRuns} 指标日`)
+    const weekRuns = byKind.week.reduce((sum, item) => sum + (indicatorDates[item.name]?.length || 0), 0)
+    if (weekRuns > 0) parts.push(`按周 ${weekRuns} 指标周`)
+    const monthRuns = byKind.month.reduce((sum, item) => sum + (indicatorMonths[item.name]?.length || 0), 0)
+    if (monthRuns > 0) parts.push(`按月 ${monthRuns} 指标月`)
+    return parts.join(' · ')
+  }, [selected.length, longSpanStats.totalDayRuns, byKind.week, byKind.month, indicatorDates, indicatorMonths])
+
+  const datesReady = indicators.length > 0 && !hasOverLimit && indicatorsReady && outputsReady
   const canRun = datesReady && !structureBlocked
   const loginOptions = workflows
     .filter((item) => item.type === 'login')
     .map((item) => ({ label: item.label || item.name, value: item.name }))
 
   const copyToSameKind = (source: WorkflowInfo): void => {
-    const month = source.date_kind === 'month'
-    const peers = month ? monthIndicators : dayIndicators
-    if (month) {
-      const values = monthsByIndicator[source.name] || []
-      setMonthsByIndicator((prev) => {
-        const next = { ...prev }
-        for (const item of peers) next[item.name] = [...values]
-        return next
-      })
-      return
-    }
-    const values = datesByIndicator[source.name] || []
-    setDatesByIndicator((prev) => {
+    const kind = periodKindOf(source)
+    const peers = byKind[kind]
+    const current = selectionsByIndicator[source.name] || EMPTY_SELECTION
+    setSelectionsByIndicator((prev) => {
       const next = { ...prev }
-      for (const item of peers) next[item.name] = [...values]
+      for (const item of peers) next[item.name] = clonePeriodSelection(current)
       return next
     })
+    message.success(`已复制到全部 ${peers.length} 个${periodKindLabel(kind)}指标`)
+  }
+
+  const applyBatch = (kind: PeriodKind): void => {
+    const draft = batchDrafts[kind]
+    const peers = byKind[kind]
+    if (!peers.length || selectionCount(draft, kind) === 0 || selectionExceedsLimit(draft, kind)) return
+    setSelectionsByIndicator((prev) => {
+      const next = { ...prev }
+      for (const item of peers) next[item.name] = clonePeriodSelection(draft)
+      return next
+    })
+    message.success(`已应用到 ${peers.length} 个${periodKindLabel(kind)}指标`)
+  }
+
+  const clearBatch = (kind: PeriodKind): void => {
+    const peers = byKind[kind]
+    setSelectionsByIndicator((prev) => {
+      const next = { ...prev }
+      for (const item of peers) delete next[item.name]
+      return next
+    })
+    setBatchDrafts((prev) => ({ ...prev, [kind]: emptyPeriodSelection(prev[kind].mode) }))
+    message.info(`已恢复 ${peers.length} 个${periodKindLabel(kind)}指标为默认时间`)
   }
 
   const rememberDownload = (dir: string): void => {
@@ -331,15 +546,19 @@ export default function CatchupModal({
     setStorageNonce((value) => value + 1)
   }
 
+  const dateValidationMessage = (): string => {
+    if (hasOverLimit) return '部分指标或导出超过了单次补数上限，请缩小时间范围'
+    if (!outputsReady) return '请为单独选择的导出补上日期，或改成跟随 / 不补'
+    return '请检查每个指标的补数日期'
+  }
+
   const goNext = (): void => {
     if (step === 0 && indicators.length === 0) {
       message.warning('请选择要补的指标')
       return
     }
     if (step === 1 && !datesReady) {
-      message.warning(!outputsReady
-        ? '请为单独选择的导出补上日期，或改成跟随 / 不补'
-        : '请检查每个指标的补数日期')
+      message.warning(dateValidationMessage())
       return
     }
     setStep((current) => Math.min(current + 1, TASK_EDITOR_STEPS.length - 1))
@@ -347,7 +566,7 @@ export default function CatchupModal({
 
   const submit = (): void => {
     if (!datesReady) {
-      message.warning(indicators.length === 0 ? '请选择要补的指标' : '请检查每个指标的补数日期')
+      message.warning(indicators.length === 0 ? '请选择要补的指标' : dateValidationMessage())
       setStep(indicators.length === 0 ? 0 : 1)
       return
     }
@@ -358,7 +577,7 @@ export default function CatchupModal({
     }
     const dates: Record<string, string[]> = {}
     const months: Record<string, string[]> = {}
-    for (const item of dayIndicators) dates[item.name] = indicatorDates[item.name]
+    for (const item of dayAndWeekIndicators) dates[item.name] = indicatorDates[item.name]
     for (const item of monthIndicators) months[item.name] = indicatorMonths[item.name]
     const structureEdited = Boolean(override?.structureEdited)
     onRun({
@@ -396,7 +615,9 @@ export default function CatchupModal({
         {outputs.map((output, index) => {
           const key = keys[index]
           const mode = outputModes[key] || 'follow'
-          const picks = outputPicks[key] || []
+          const sel = outputSelections[key] || EMPTY_SELECTION
+          const count = selectionCount(sel, 'day')
+          const overLimit = count > CATCHUP_LIMITS.day
           return (
             <div key={key} className={`task-output-item${mode === 'skip' ? ' is-muted' : ''}`}>
               <OutputName output={output} duplicateHint="同一工作流里有重名导出，去工作流给这一步补上 name 才能稳定区分" />
@@ -407,19 +628,18 @@ export default function CatchupModal({
                 onChange={(value) => setOutputModes((prev) => ({ ...prev, [key]: value as OutputMode }))}
               />
               {mode === 'own' ? (
-                <div className="task-output-detail">
-                  <DatePicker
-                    multiple
+                <div className="task-output-detail catchup-output-detail">
+                  <CatchupPeriodPicker
+                    kind="day"
                     size="small"
-                    style={{ flex: 1, minWidth: 220 }}
-                    value={picks}
-                    status={picks.length === 0 || picks.length > MAX_DAYS ? 'error' : undefined}
-                    placeholder="选择这个导出要补的日期"
-                    maxTagCount="responsive"
-                    onChange={(value) => setOutputPicks((prev) => ({ ...prev, [key]: (value as Dayjs[] | null) || [] }))}
+                    value={sel}
+                    referenceDate={referenceDate}
+                    status={count === 0 || overLimit ? 'error' : undefined}
+                    multiplePlaceholder="选择这个导出要补的日期"
+                    onChange={(next) => setOutputSelections((prev) => ({ ...prev, [key]: next }))}
                   />
-                  {picks.length === 0 && <span className="task-output-error">请选择日期</span>}
-                  {picks.length > MAX_DAYS && <span className="task-output-error">{`最多 ${MAX_DAYS} 天`}</span>}
+                  {count === 0 && <span className="task-output-error">请选择日期</span>}
+                  {overLimit && <span className="task-output-error">{`最多 ${CATCHUP_LIMITS.day} 天`}</span>}
                 </div>
               ) : (
                 <span className="task-output-follow">
@@ -430,6 +650,71 @@ export default function CatchupModal({
           )
         })}
       </OutputPanel>
+    )
+  }
+
+  const renderBatchBar = (): JSX.Element | null => {
+    if (!activeBatchKind) return null
+    const peers = byKind[activeBatchKind]
+    const draft = batchDrafts[activeBatchKind]
+    const draftCount = selectionCount(draft, activeBatchKind)
+    const draftOver = selectionExceedsLimit(draft, activeBatchKind)
+    const anyCustom = peers.some((item) => selectionCount(selectionsByIndicator[item.name], activeBatchKind) > 0)
+    const unit = periodUnitLabel(activeBatchKind)
+    return (
+      <div className="catchup-batch-bar">
+        <div className="catchup-batch-head">
+          <span className="catchup-batch-title">
+            {batchKinds.length === 1
+              ? `批量设置（${peers.length} 个${periodKindLabel(activeBatchKind)}指标）`
+              : '批量设置时间'}
+          </span>
+          {batchKinds.length > 1 && (
+            <Segmented
+              size="small"
+              value={activeBatchKind}
+              options={batchKinds.map((kind) => ({
+                label: `${periodKindLabel(kind)} (${byKind[kind].length})`,
+                value: kind
+              }))}
+              onChange={(value) => setBatchKind(value as PeriodKind)}
+            />
+          )}
+          <span className="catchup-batch-tip">选好后点右侧「应用到全部」，个别指标仍可单独修改</span>
+        </div>
+        <div className="catchup-batch-controls">
+          <CatchupPeriodPicker
+            kind={activeBatchKind}
+            value={draft}
+            referenceDate={referenceDate}
+            multiplePlaceholder={`批量选择${periodKindLabel(activeBatchKind)}时间`}
+            onChange={(next) => setBatchDrafts((prev) => ({ ...prev, [activeBatchKind]: next }))}
+          />
+          <Space size={6} className="catchup-batch-actions">
+            <Button
+              type="primary"
+              ghost
+              disabled={draftCount === 0 || draftOver}
+              onClick={() => applyBatch(activeBatchKind)}
+            >
+              应用到全部
+            </Button>
+            <Button
+              type="link"
+              size="small"
+              disabled={!anyCustom && draftCount === 0}
+              onClick={() => clearBatch(activeBatchKind)}
+            >
+              清空已选
+            </Button>
+          </Space>
+        </div>
+        {draftOver && (
+          <Text type="danger" style={{ fontSize: 12 }}>
+            {`已选 ${draftCount} ${unit}，一次最多补 ${CATCHUP_LIMITS[activeBatchKind]} ${unit}。`}
+          </Text>
+        )}
+      </div>
     )
   }
 
@@ -503,11 +788,14 @@ export default function CatchupModal({
                     value={indicators}
                     onChange={(names: string[]) => {
                       setIndicators(names)
-                      setDatesByIndicator((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => names.includes(key))))
-                      setMonthsByIndicator((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => names.includes(key))))
+                      setSelectionsByIndicator((prev) =>
+                        Object.fromEntries(Object.entries(prev).filter(([key]) => names.includes(key)))
+                      )
                       const kept = (key: string): boolean => names.includes(key.split('::')[0])
                       setOutputModes((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => kept(key))))
-                      setOutputPicks((prev) => Object.fromEntries(Object.entries(prev).filter(([key]) => kept(key))))
+                      setOutputSelections((prev) =>
+                        Object.fromEntries(Object.entries(prev).filter(([key]) => kept(key)))
+                      )
                     }}
                   />
                 </div>
@@ -517,67 +805,51 @@ export default function CatchupModal({
 
           {step === 1 && (
             <>
-              <div className="catchup-step-note">时间留空时使用该指标的默认采集范围，具体日期见下方预览。这一步不会改任务卡片上的区间。</div>
+              <div className="catchup-step-note">默认按起止「时间段」快捷选择，也可切换到「指定日期」点选零散日期；留空则使用该指标默认采集范围，不会改任务卡片。</div>
+              {renderBatchBar()}
               <div className="task-section-heading">
                 <span>每个指标的补数时间</span>
-                <span>可留空使用默认，也可点选多个日期或月份</span>
+                <span>{`单次上限：按日 ${CATCHUP_LIMITS.day} 天 · 按周 ${CATCHUP_LIMITS.week} 周 · 按月 ${CATCHUP_LIMITS.month} 个月`}</span>
               </div>
               {indicators.length === 0 ? (
                 <div className="task-window-empty">先选择要补数的指标，再设置每项的时间。</div>
               ) : (
                 selected.map((item) => {
-                  const month = item.date_kind === 'month'
-                  const week = item.date_kind === 'week'
-                  const peers = month ? monthIndicators : dayIndicators
-                  const values = month ? (monthsByIndicator[item.name] || []) : (datesByIndicator[item.name] || [])
-                  const tooMany = month ? values.length > MAX_MONTHS : values.length > MAX_DAYS
-                  const canCopy = peers.length > 1 && values.length > 0
+                  const kind = periodKindOf(item)
+                  const peers = byKind[kind]
+                  const sel = selectionsByIndicator[item.name] || EMPTY_SELECTION
+                  const count = selectionCount(sel, kind)
+                  const overLimit = selectionExceedsLimit(sel, kind)
+                  const canCopy = peers.length > 1 && count > 0 && !overLimit
+                  const unit = periodUnitLabel(kind)
                   return (
                     <div key={item.name} className="task-window-block">
                       <div className="catchup-time-row">
                         <div className="task-window-label">
-                          <Tag color={month ? 'cyan' : week ? 'purple' : 'blue'}>{month ? '按月' : week ? '按周' : '按日'}</Tag>
+                          <Tag color={kind === 'month' ? 'cyan' : kind === 'week' ? 'purple' : 'blue'}>
+                            {periodKindLabel(kind)}
+                          </Tag>
                           <span>{workflowPath(item, groups)}</span>
                         </div>
                         <div className="catchup-time-control">
-                          <DatePicker
-                            multiple
-                            picker={month ? 'month' : week ? 'week' : 'date'}
-                            style={{ width: '100%' }}
-                            value={values}
-                            placeholder={month ? '留空使用默认月份' : week ? '留空使用默认周' : '留空使用默认日期'}
-                            maxTagCount="responsive"
-                            renderExtraFooter={() => (
-                              <div className="catchup-date-presets">
-                                <span>快捷选择</span>
-                                {(month ? MONTH_PRESETS : week ? WEEK_PRESETS : DAY_PRESETS).map((preset) => (
-                                  <Button
-                                    key={preset.label}
-                                    type="link"
-                                    size="small"
-                                    onClick={() => {
-                                      const next = recentPeriods(preset.count, preset.endOffset, month ? 'month' : week ? 'week' : 'day')
-                                      if (month) setMonthsByIndicator((prev) => ({ ...prev, [item.name]: next }))
-                                      else setDatesByIndicator((prev) => ({ ...prev, [item.name]: next }))
-                                    }}
-                                  >
-                                    {preset.label}
-                                  </Button>
-                                ))}
-                              </div>
-                            )}
-                            onChange={(value) => {
-                              const next = (value as Dayjs[] | null) || []
-                              if (month) setMonthsByIndicator((prev) => ({ ...prev, [item.name]: next }))
-                              else setDatesByIndicator((prev) => ({ ...prev, [item.name]: next }))
+                          <CatchupPeriodPicker
+                            kind={kind}
+                            value={sel}
+                            referenceDate={referenceDate}
+                            onChange={(next) => {
+                              setSelectionsByIndicator((prev) => ({ ...prev, [item.name]: next }))
                             }}
                           />
-                          {values.length === 0 && (
+                          {count === 0 && (
                             <div className="catchup-default-hint">
-                              默认：{describeDefault(item, toIso(defaults[item.name], month ? 'YYYY-MM' : 'YYYY-MM-DD'))}
+                              默认：{describeDefault(item, toIsoList(defaults[item.name], kind))}
                             </div>
                           )}
-                          {tooMany ? <Text type="danger">{month ? `一次最多补 ${MAX_MONTHS} 个月。` : week ? `一次最多补 ${MAX_DAYS} 周。` : `一次最多补 ${MAX_DAYS} 天。`}</Text> : null}
+                          {overLimit && (
+                            <Text type="danger" style={{ fontSize: 12 }}>
+                              {`已选 ${count} ${unit}，一次最多补 ${CATCHUP_LIMITS[kind]} ${unit}。`}
+                            </Text>
+                          )}
                         </div>
                         {canCopy ? (
                           <Button type="link" size="small" className="catchup-copy" onClick={() => copyToSameKind(item)}>
@@ -590,36 +862,98 @@ export default function CatchupModal({
                   )
                 })
               )}
+              {longSpanStats.warnItems > 0 && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  className="catchup-long-warn"
+                  message={`本次包含较长时间跨度（最长 ${longSpanStats.maxDays} 天，按日合计 ${longSpanStats.totalDayRuns} 个指标日），执行耗时较久，请保持网络和数字证书连接稳定。`}
+                />
+              )}
               <div className="catchup-summary">
-                <div className="catchup-summary-title">本次补数预览</div>
+                <div className="catchup-summary-head">
+                  <div className="catchup-summary-title">本次补数预览</div>
+                  {previewMetaText && <span className="catchup-summary-meta">{previewMetaText}</span>}
+                  {canMergePreview && (
+                    <Button
+                      type="link"
+                      size="small"
+                      className="catchup-summary-toggle"
+                      onClick={() => setMergeSamePreview((prev) => !prev)}
+                    >
+                      {mergeSamePreview ? `展开逐项（${previewItems.length}）` : '合并相同项'}
+                    </Button>
+                  )}
+                </div>
                 {selected.length === 0 ? (
                   <Text type="secondary">为每个指标选好时间后即可继续。</Text>
-                ) : selected.map((item) => {
-                  const month = item.date_kind === 'month'
-                  const values = month ? indicatorMonths[item.name] : indicatorDates[item.name]
-                  const isDefault = !(month ? monthsByIndicator[item.name] : datesByIndicator[item.name])?.length
-                  const own = month ? [] : ownableOutputs(item)
-                    .filter((output) => `${item.name}::${output.key}` in outputDates)
-                    .map((output) => {
-                      const picked = outputDates[`${item.name}::${output.key}`]
-                      return `${output.label}：${picked.length ? describeList(picked) : '不补'}`
-                    })
+                ) : visiblePreviewRows.map((row) => {
+                  const first = row.items[0]
+                  const names = row.items.map((entry) => entry.name)
+                  const nameLabel = names.length <= 2
+                    ? names.join('、')
+                    : `${names.slice(0, 2).join('、')} 等 ${names.length} 个${periodKindLabel(first.kind)}指标`
+                  const total = first.values.length
+                  const unit = periodUnitLabel(first.kind)
+                  const allSegmentTexts = first.segments.map(formatPeriodSegment)
+                  const hasMoreSegments = allSegmentTexts.length > DEFAULT_PREVIEW_SEGMENTS
+                  const isSegmentsExpanded = Boolean(expandedPreviewRows[row.key])
+                  const shownSegments = hasMoreSegments && !isSegmentsExpanded
+                    ? allSegmentTexts.slice(0, DEFAULT_PREVIEW_SEGMENTS)
+                    : allSegmentTexts
                   return (
-                    <div key={item.name} className="catchup-summary-row">
-                      <span className="catchup-summary-name">{workflowPath(item, groups)}</span>
+                    <div key={row.key} className="catchup-summary-row">
+                      <span className="catchup-summary-name">
+                        {names.length > 2 ? (
+                          <Tooltip title={names.join('、')}>
+                            <span className="catchup-summary-group-name">{nameLabel}</span>
+                          </Tooltip>
+                        ) : (
+                          nameLabel
+                        )}
+                      </span>
                       <span className="catchup-summary-value">
-                        {isDefault && <span className="catchup-summary-default">默认</span>}
-                        {describeList(values)}
-                        {own.length > 0 && `（${own.join('；')}）`}
+                        {first.isDefault && <span className="catchup-summary-default">默认</span>}
+                        {first.overLimit ? (
+                          <Text type="danger">{describeOverflow(first.selection, first.kind)}</Text>
+                        ) : (
+                          <>
+                            <span className="catchup-summary-segments">
+                              {shownSegments.map((text, idx) => (
+                                <span key={`${text}-${idx}`} className="catchup-summary-seg">{text}</span>
+                              ))}
+                              {hasMoreSegments && (
+                                <Tooltip title={!isSegmentsExpanded ? allSegmentTexts.join('、') : undefined}>
+                                  <button
+                                    type="button"
+                                    className="catchup-summary-more"
+                                    onClick={() => setExpandedPreviewRows((prev) => ({
+                                      ...prev,
+                                      [row.key]: !prev[row.key]
+                                    }))}
+                                  >
+                                    {isSegmentsExpanded ? '收起' : `+${allSegmentTexts.length - DEFAULT_PREVIEW_SEGMENTS} 段`}
+                                  </button>
+                                </Tooltip>
+                              )}
+                              {total > 1 && (
+                                <span className="catchup-summary-total">{`共 ${total} ${unit}`}</span>
+                              )}
+                            </span>
+                          </>
+                        )}
+                        {first.ownTexts.length > 0 && (
+                          <span className="catchup-summary-own">{`（${first.ownTexts.join('；')}）`}</span>
+                        )}
                       </span>
                     </div>
                   )
                 })}
-              {monthIndicators.length > 0 ? (
-                <div className="catchup-summary-help">
-                  <Text type="secondary">按月指标会查询所选月份的整月数据。</Text>
-                </div>
-              ) : null}
+                {monthIndicators.length > 0 ? (
+                  <div className="catchup-summary-help">
+                    <Text type="secondary">按月指标会查询所选月份的整月数据。</Text>
+                  </div>
+                ) : null}
               </div>
             </>
           )}

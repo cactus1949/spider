@@ -1,4 +1,4 @@
-# 版本只改仓库根目录的 VERSION。本脚本会把它写入 package.json 和 pyproject.toml。
+﻿# 版本只改仓库根目录的 VERSION。本脚本会把它写入 package.json 和 pyproject.toml。
 # 在 Windows 虚拟机里、仓库根目录执行：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\package_win.ps1
 #
@@ -22,20 +22,20 @@ function Die([string]$Message) {
     exit 1
 }
 
+$Utf8 = New-Object System.Text.UTF8Encoding $false
 $VersionFile = Join-Path $Root "VERSION"
 if (-not (Test-Path -LiteralPath $VersionFile)) { Die "找不到 VERSION" }
-$Version = (Get-Content -LiteralPath $VersionFile -Raw).Trim()
+$Version = [System.IO.File]::ReadAllText($VersionFile, $Utf8).Trim()
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { Die "VERSION 必须是 x.y.z，当前是 $Version" }
 Write-Output ("VERSION=" + $Version)
 
-$Utf8 = New-Object System.Text.UTF8Encoding $false
 $PackageJson = Join-Path $Root "frontend\package.json"
-$PackageText = Get-Content -LiteralPath $PackageJson -Raw
+$PackageText = [System.IO.File]::ReadAllText($PackageJson, $Utf8)
 $PackageText = [regex]::Replace($PackageText, '(?m)^  "version": ".*"', "  `"version`": `"$Version`"", 1)
 [System.IO.File]::WriteAllText($PackageJson, $PackageText, $Utf8)
 
 $ProjectFile = Join-Path $Root "pyproject.toml"
-$ProjectText = Get-Content -LiteralPath $ProjectFile -Raw
+$ProjectText = [System.IO.File]::ReadAllText($ProjectFile, $Utf8)
 $ProjectText = [regex]::Replace($ProjectText, '(?m)^version = ".*"', "version = `"$Version`"", 1)
 [System.IO.File]::WriteAllText($ProjectFile, $ProjectText, $Utf8)
 
@@ -110,9 +110,12 @@ if (-not (Test-Path -LiteralPath $RuntimeDll)) {
 $RuntimeArch = & $Py -c "import build_backend,pathlib; print(hex(build_backend.pe_machine_of(pathlib.Path(r'C:\build\vc-x64\MSVCP140_1.dll').read_bytes())))"
 if ($RuntimeArch.Trim() -ne "0x8664") { Die "MSVCP140_1.dll 不是 x64：$RuntimeArch" }
 Write-Output "PYINSTALLER_BEGIN"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 & $Py build_backend.py --with-browsers > $Log 2>&1
 $BuildExit = $LASTEXITCODE
-Get-Content -LiteralPath $Log
+$ErrorActionPreference = $prevEap
+Get-Content -LiteralPath $Log -Encoding UTF8
 if ($BuildExit -ne 0) { Die "build_backend.py --with-browsers 退出码是 $BuildExit。日志：$Log" }
 
 $Browsers = Join-Path $BackendOut "playwright_browsers"
@@ -123,7 +126,7 @@ $Chrome = @(Get-ChildItem -LiteralPath $Browsers -Recurse -Filter "chrome.exe")
 if ($Chrome.Count -lt 1) { Die "没有把 chrome.exe 打进后端目录。" }
 
 $StampPath = Join-Path $BackendOut "build_stamp.json"
-$Stamp = Get-Content -LiteralPath $StampPath -Raw
+$Stamp = [System.IO.File]::ReadAllText($StampPath, $Utf8)
 Write-Output ("STAMP=" + $Stamp.Trim())
 if ($Stamp -notmatch [regex]::Escape($BuildId)) { Die "build_stamp.json 的 build_id 不是 $BuildId" }
 
@@ -135,12 +138,17 @@ if ($LASTEXITCODE -ne 0 -or ($SelfTest -join "`n") -notmatch "(?m)^ok ") {
 }
 
 Set-Location (Join-Path $Root "frontend")
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 Write-Output "PNPM_INSTALL_BEGIN"
 pnpm install --frozen-lockfile
-if ($LASTEXITCODE -ne 0) { Die "pnpm install --frozen-lockfile 失败" }
+$PnpmInstallExit = $LASTEXITCODE
+if ($PnpmInstallExit -ne 0) { $ErrorActionPreference = $prevEap; Die "pnpm install --frozen-lockfile 失败" }
 Write-Output "PNPM_BUILD_BEGIN"
 pnpm build:win
-if ($LASTEXITCODE -ne 0) { Die "pnpm build:win 失败" }
+$PnpmBuildExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($PnpmBuildExit -ne 0) { Die "pnpm build:win 失败" }
 
 $VersionInPackage = (& node -p "require('./package.json').version").Trim()
 if ($VersionInPackage -ne $Version) { Die "package.json 版本是 $VersionInPackage，不是 $Version" }

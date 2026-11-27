@@ -117,7 +117,8 @@ def plan_task_target_dates(
     return [today + timedelta(days=offset) for offset in offsets]
 
 
-_CATCHUP_MAX_DAYS = 62
+_CATCHUP_MAX_DAYS = 366
+_CATCHUP_MAX_MONTHS = 60
 _CATCHUP_MAX_INDICATORS = 30
 
 
@@ -310,8 +311,8 @@ def build_catchup_config(
                 raise ValueError(f"请为「{name}」选择日期或月份")
             if any(len(value) > _CATCHUP_MAX_DAYS for value in [own_dates, *output_days]):
                 raise ValueError(f"「{name}」一次最多补 {_CATCHUP_MAX_DAYS} 天")
-            if len(own_months) > 24:
-                raise ValueError(f"「{name}」一次最多补 24 个月")
+            if len(own_months) > _CATCHUP_MAX_MONTHS:
+                raise ValueError(f"「{name}」一次最多补 {_CATCHUP_MAX_MONTHS} 个月")
         if named_dates or named_outputs:
             config["indicator_dates"] = {
                 key: [item.isoformat() for item in value] for key, value in named_dates.items()
@@ -329,8 +330,8 @@ def build_catchup_config(
         raise ValueError("请选择日期或月份")
     if len(dates) > _CATCHUP_MAX_DAYS:
         raise ValueError(f"一次最多补 {_CATCHUP_MAX_DAYS} 天")
-    if len(months) > 24:
-        raise ValueError("一次最多补 24 个月")
+    if len(months) > _CATCHUP_MAX_MONTHS:
+        raise ValueError(f"一次最多补 {_CATCHUP_MAX_MONTHS} 个月")
     if dates:
         config["target_dates"] = [item.isoformat() for item in dates]
     if months:

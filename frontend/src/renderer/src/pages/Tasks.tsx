@@ -44,6 +44,7 @@ import { workflowPath } from '../components/workflowTree'
 import ProgressModal, { type CatchupRun } from '../components/ProgressModal'
 import TaskUploadFields from '../components/TaskUploadFields'
 import CatchupModal from '../components/CatchupModal'
+import { formatPeriodSummary, type PeriodKind } from '../components/catchupDates'
 import { TASK_EDITOR_STEPS } from '../components/taskEditorSteps'
 import { OutputName, OutputPanel } from '../components/OutputPanel'
 import DateWindowSlider, {
@@ -1175,13 +1176,22 @@ export default function Tasks(): JSX.Element {
         onCancel={() => setCatchupOpen(false)}
         tasks={tasks}
         onRun={(selection) => {
-          const groups = [
-            ...Object.values(selection.indicatorDates),
-            ...Object.values(selection.indicatorMonths)
-          ].filter((item) => item.length > 0)
-          const same = groups.length > 0 && groups.every((item) => item.join() === groups[0].join())
+          const periodEntries: { kind: PeriodKind; values: string[] }[] = [
+            ...Object.entries(selection.indicatorDates).map(([name, values]) => {
+              const wf = workflows.find((item) => item.name === name)
+              const kind: PeriodKind = wf?.date_kind === 'week' ? 'week' : 'day'
+              return { kind, values }
+            }),
+            ...Object.values(selection.indicatorMonths).map((values) => ({
+              kind: 'month' as PeriodKind,
+              values
+            }))
+          ].filter((entry) => entry.values.length > 0)
+          const same = periodEntries.length > 0 && periodEntries.every(
+            (entry) => entry.kind === periodEntries[0].kind && entry.values.join() === periodEntries[0].values.join()
+          )
           const title = same
-            ? (groups[0].length <= 4 ? groups[0].join('、') : `${groups[0][0]} … ${groups[0][groups[0].length - 1]}`)
+            ? formatPeriodSummary(periodEntries[0].values, periodEntries[0].kind, 2)
             : `${selection.indicators.length} 个指标分别补数`
           setCatchupTitle(`补数据：${title}`)
           setCatchupRun({
