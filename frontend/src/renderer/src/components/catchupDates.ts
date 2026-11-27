@@ -17,11 +17,6 @@ export interface SelectionIssue {
   message: string
 }
 
-export interface RangePreset {
-  label: string
-  value: [Dayjs, Dayjs]
-}
-
 export interface MultiplePreset {
   label: string
   count: number
@@ -391,52 +386,6 @@ export function recentPeriods(
 ): Dayjs[] {
   const end = normalizeAnchor(reference, kind).subtract(endOffset, kind)
   return Array.from({ length: count }, (_, index) => end.subtract(count - index - 1, kind))
-}
-
-export function buildRangePresets(kind: PeriodKind, reference: Dayjs): RangePreset[] {
-  const today = reference.startOf('day')
-  if (kind === 'month') {
-    const curMonth = today.startOf('month')
-    const prevMonth = curMonth.subtract(1, 'month')
-    const prevYear = today.subtract(1, 'year')
-    return [
-      { label: '上个月', value: [prevMonth, prevMonth] },
-      { label: '近 3 个月', value: [curMonth.subtract(3, 'month'), prevMonth] },
-      { label: '近 6 个月', value: [curMonth.subtract(6, 'month'), prevMonth] },
-      { label: '近 1 年', value: [curMonth.subtract(12, 'month'), prevMonth] },
-      { label: '今年至今', value: [today.startOf('year'), curMonth] },
-      { label: '去年全年', value: [prevYear.startOf('year'), prevYear.endOf('year').startOf('month')] }
-    ]
-  }
-  if (kind === 'week') {
-    const thisWeek = weekMonday(today)
-    const prevYear = today.subtract(1, 'year')
-    return [
-      { label: '本周', value: [thisWeek, thisWeek] },
-      { label: '近 4 周', value: [thisWeek.subtract(3, 'week'), thisWeek] },
-      { label: '近 12 周', value: [thisWeek.subtract(11, 'week'), thisWeek] },
-      { label: '近 26 周', value: [thisWeek.subtract(25, 'week'), thisWeek] },
-      { label: '今年至今', value: [weekMonday(today.startOf('year')), thisWeek] },
-      { label: '去年全年', value: [weekMonday(prevYear.startOf('year')), weekMonday(prevYear.endOf('year'))] }
-    ]
-  }
-  const prevMonth = today.subtract(1, 'month')
-  const prevYear = today.subtract(1, 'year')
-  return [
-    { label: '近 7 天', value: [today.subtract(6, 'day'), today] },
-    { label: '近 30 天', value: [today.subtract(29, 'day'), today] },
-    {
-      label: '上月整月',
-      value: [prevMonth.startOf('month'), prevMonth.endOf('month').startOf('day')]
-    },
-    { label: '近 90 天', value: [today.subtract(89, 'day'), today] },
-    { label: '近半年', value: [today.subtract(6, 'month').add(1, 'day'), today] },
-    { label: '今年至今', value: [today.startOf('year'), today] },
-    {
-      label: '去年全年',
-      value: [prevYear.startOf('year'), prevYear.endOf('year').startOf('day')]
-    }
-  ]
 }
 
 export const MULTIPLE_PRESETS: Record<PeriodKind, MultiplePreset[]> = {

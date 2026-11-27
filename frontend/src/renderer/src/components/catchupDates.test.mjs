@@ -33,7 +33,7 @@ function loadCatchupDates() {
 const {
   CATCHUP_LIMITS,
   CATCHUP_SOFT_WARN_DAYS,
-  buildRangePresets,
+  MULTIPLE_PRESETS,
   emptyPeriodSelection,
   expandPeriodRange,
   formatPeriodSummary,
@@ -42,6 +42,7 @@ const {
   groupPreviewRows,
   hasAnySelectionInput,
   rangePeriodCount,
+  recentPeriods,
   resolveCustomIso,
   selectionCount,
   selectionExceedsLimit,
@@ -228,18 +229,13 @@ test('soft warning triggers only for day selections between 63 and 366 days', ()
   assert.equal(selectionSoftWarn(emptyPeriodSelection('range'), 'day'), false)
 })
 
-test('all built-in range presets stay within limits even on leap years', () => {
-  for (const ref of [dayjs('2025-03-15'), dayjs('2026-11-27'), dayjs('2024-12-31')]) {
-    for (const kind of ['day', 'week', 'month']) {
-      const presets = buildRangePresets(kind, ref)
-      assert.ok(presets.length >= 5)
-      for (const preset of presets) {
-        const count = rangePeriodCount(preset.value, kind)
-        assert.ok(
-          count > 0 && count <= CATCHUP_LIMITS[kind],
-          `${kind} preset ${preset.label} on ${ref.format('YYYY-MM-DD')} had invalid count ${count}`
-        )
-      }
+test('all multiple-mode presets stay within limits', () => {
+  const ref = dayjs('2026-11-27')
+  for (const kind of ['day', 'week', 'month']) {
+    for (const preset of MULTIPLE_PRESETS[kind]) {
+      const list = recentPeriods(preset.count, preset.endOffset, kind, ref)
+      assert.equal(list.length, preset.count)
+      assert.ok(list.length > 0 && list.length <= CATCHUP_LIMITS[kind])
     }
   }
 })

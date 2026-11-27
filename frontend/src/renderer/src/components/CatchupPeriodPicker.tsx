@@ -1,10 +1,8 @@
-import { useMemo, useState } from 'react'
 import { Button, DatePicker, Segmented } from 'antd'
 import type { Dayjs } from 'dayjs'
 import {
   CATCHUP_LIMITS,
   MULTIPLE_PRESETS,
-  buildRangePresets,
   normalizeAnchor,
   periodNoun,
   periodUnitLabel,
@@ -62,15 +60,11 @@ export default function CatchupPeriodPicker({
   multiplePlaceholder,
   showCountBadge = true
 }: Props): JSX.Element {
-  const [startOpen, setStartOpen] = useState(false)
-  const [endOpen, setEndOpen] = useState(false)
-
   const picker = kind === 'month' ? 'month' : kind === 'week' ? 'week' : 'date'
   const count = selectionCount(value, kind)
   const issue = selectionIssue(value, kind)
   const overLimit = issue?.kind === 'over_limit'
   const softWarn = selectionSoftWarn(value, kind)
-  const rangePresets = useMemo(() => buildRangePresets(kind, referenceDate), [kind, referenceDate])
   const multiplePresets = MULTIPLE_PRESETS[kind]
   const unit = periodUnitLabel(kind)
   const placeholders = rangePlaceholder || defaultRangePlaceholder(kind)
@@ -95,25 +89,6 @@ export default function CatchupPeriodPicker({
         : undefined)
   const multipleStatus = status ?? (issue ? 'error' : softWarn ? 'warning' : undefined)
 
-  const renderRangePresetsFooter = (close: () => void): JSX.Element => (
-    <div className="catchup-date-presets">
-      <span>快捷填充</span>
-      {rangePresets.map((preset) => (
-        <Button
-          key={preset.label}
-          type="link"
-          size="small"
-          onClick={() => {
-            onChange({ mode: 'range', range: [preset.value[0], preset.value[1]], dates: [] })
-            close()
-          }}
-        >
-          {preset.label}
-        </Button>
-      ))}
-    </div>
-  )
-
   return (
     <div className={`catchup-picker-bar${size === 'small' ? ' is-small' : ''}`}>
       <Segmented
@@ -122,8 +97,6 @@ export default function CatchupPeriodPicker({
         value={value.mode}
         options={MODE_OPTIONS}
         onChange={(next) => {
-          setStartOpen(false)
-          setEndOpen(false)
           onChange(switchSelectionMode(value, next as CatchupPickMode, kind))
         }}
       />
@@ -136,11 +109,8 @@ export default function CatchupPeriodPicker({
             className="catchup-range-input"
             value={startVal}
             defaultPickerValue={startVal ?? endVal ?? undefined}
-            open={startOpen}
-            onOpenChange={setStartOpen}
             status={startStatus}
             placeholder={placeholders[0]}
-            renderExtraFooter={() => renderRangePresetsFooter(() => setStartOpen(false))}
             onChange={(next) => {
               const anchored = next ? normalizeAnchor(next as Dayjs, kind) : null
               onChange({ mode: 'range', range: packRange(anchored, endVal), dates: [] })
@@ -154,11 +124,8 @@ export default function CatchupPeriodPicker({
             className="catchup-range-input"
             value={endVal}
             defaultPickerValue={endVal ?? startVal ?? undefined}
-            open={endOpen}
-            onOpenChange={setEndOpen}
             status={endStatus}
             placeholder={placeholders[1]}
-            renderExtraFooter={() => renderRangePresetsFooter(() => setEndOpen(false))}
             onChange={(next) => {
               const anchored = next ? normalizeAnchor(next as Dayjs, kind) : null
               onChange({ mode: 'range', range: packRange(startVal, anchored), dates: [] })

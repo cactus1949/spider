@@ -568,6 +568,7 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: 2px 4px;
+  max-width: 268px;
   padding: 4px 0;
 }
 
