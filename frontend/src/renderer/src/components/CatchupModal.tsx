@@ -24,18 +24,20 @@ import {
   groupConsecutivePeriods,
   groupOutputPreviews,
   groupPreviewRows,
+  hasAnySelectionInput,
   periodKindLabel,
   periodUnitLabel,
   resolveCustomIso,
   selectionCount,
-  selectionExceedsLimit,
+  selectionIssue,
   toIsoList,
   weekMonday,
   type OutputPreviewEntry,
   type PeriodKind,
   type PeriodSegment,
   type PeriodSelection,
-  type PreviewItemInput
+  type PreviewItemInput,
+  type SelectionIssue
 } from './catchupDates'
 
 const { Text } = Typography
@@ -170,7 +172,8 @@ function describeDefault(item: WorkflowInfo, values: string[]): string {
   return `${offset}（${dates}，共 ${values.length} ${periodUnitLabel(kind)}）`
 }
 
-function describeOverflow(sel: PeriodSelection, kind: PeriodKind): string {
+function describeIssue(sel: PeriodSelection, kind: PeriodKind, issue: SelectionIssue): string {
+  if (issue.kind !== 'over_limit') return issue.message
   const count = selectionCount(sel, kind)
   const limit = CATCHUP_LIMITS[kind]
   const unit = periodUnitLabel(kind)
@@ -285,8 +288,8 @@ export default function CatchupModal({
     for (const item of dayAndWeekIndicators) {
       const kind = periodKindOf(item)
       const sel = selectionsByIndicator[item.name]
-      const custom = selectionCount(sel, kind) > 0
-      next[item.name] = custom
+      const hasInput = hasAnySelectionInput(sel)
+      next[item.name] = hasInput
         ? resolveCustomIso(sel, kind)
         : toIsoList(defaults[item.name], kind)
     }
@@ -297,8 +300,8 @@ export default function CatchupModal({
     const next: Record<string, string[]> = {}
     for (const item of monthIndicators) {
       const sel = selectionsByIndicator[item.name]
-      const custom = selectionCount(sel, 'month') > 0
-      next[item.name] = custom
+      const hasInput = hasAnySelectionInput(sel)
+      next[item.name] = hasInput
         ? resolveCustomIso(sel, 'month')
         : toIsoList(defaults[item.name], 'month')
     }
@@ -318,26 +321,28 @@ export default function CatchupModal({
     return next
   }, [byKind.day, outputModes, outputSelections])
 
-  const hasOverLimit = useMemo(() => {
+  const firstIssue = useMemo<SelectionIssue | null>(() => {
     for (const item of selected) {
       const kind = periodKindOf(item)
-      if (selectionExceedsLimit(selectionsByIndicator[item.name], kind)) return true
+      const issue = selectionIssue(selectionsByIndicator[item.name], kind)
+      if (issue) return issue
     }
     for (const item of byKind.day) {
       for (const output of ownableOutputs(item)) {
         const key = `${item.name}::${output.key}`
-        if (outputModes[key] === 'own' && selectionExceedsLimit(outputSelections[key], 'day')) {
-          return true
+        if (outputModes[key] === 'own') {
+          const issue = selectionIssue(outputSelections[key], 'day')
+          if (issue) return issue
         }
       }
     }
-    return false
+    return null
   }, [selected, byKind.day, selectionsByIndicator, outputModes, outputSelections])
 
   const indicatorsReady = selected.every((item) => {
     const kind = periodKindOf(item)
     const sel = selectionsByIndicator[item.name]
-    if (selectionExceedsLimit(sel, kind)) return false
+    if (selectionIssue(sel, kind)) return false
     const values = kind === 'month' ? indicatorMonths[item.name] : indicatorDates[item.name]
     return values.length > 0 && values.length <= CATCHUP_LIMITS[kind]
   })
@@ -347,7 +352,9 @@ export default function CatchupModal({
       for (const output of ownableOutputs(item)) {
         const key = `${item.name}::${output.key}`
         if (outputModes[key] !== 'own') continue
-        const count = selectionCount(outputSelections[key], 'day')
+        const sel = outputSelections[key]
+        if (selectionIssue(sel, 'day')) return false
+        const count = selectionCount(sel, 'day')
         if (count === 0 || count > CATCHUP_LIMITS.day) return false
       }
     }
@@ -360,8 +367,8 @@ export default function CatchupModal({
     let totalDayRuns = 0
     for (const item of byKind.day) {
       const sel = selectionsByIndicator[item.name]
-      const indOver = selectionExceedsLimit(sel, 'day')
-      const indDates = indOver ? [] : (indicatorDates[item.name] || [])
+      const indInvalid = Boolean(selectionIssue(sel, 'day'))
+      const indDates = indInvalid ? [] : (indicatorDates[item.name] || [])
       const outputs = ownableOutputs(item)
       let effectiveDays = indDates.length
       if (outputs.length > 0) {
@@ -371,7 +378,7 @@ export default function CatchupModal({
           const mode = outputModes[key] || 'follow'
           if (mode === 'skip') continue
           if (mode === 'own') {
-            if (!selectionExceedsLimit(outputSelections[key], 'day')) {
+            if (!selectionIssue(outputSelections[key], 'day')) {
               const outList = outputDates[key] || []
               for (const day of outList) union.add(day)
               if (outList.length > CATCHUP_SOFT_WARN_DAYS) {
@@ -398,18 +405,20 @@ export default function CatchupModal({
     interface RichPreviewItem extends PreviewItemInput {
       item: WorkflowInfo
       selection: PeriodSelection
+      issue: SelectionIssue | null
       segments: PeriodSegment[]
       ownTexts: string[]
     }
     return selected.map((item): RichPreviewItem => {
       const kind = periodKindOf(item)
       const sel = selectionsByIndicator[item.name] || EMPTY_SELECTION
-      const isDefault = selectionCount(sel, kind) === 0
-      const overLimit = selectionExceedsLimit(sel, kind)
-      const values = overLimit
+      const isDefault = !hasAnySelectionInput(sel)
+      const issue = selectionIssue(sel, kind)
+      const overLimit = Boolean(issue)
+      const values = issue
         ? []
         : (kind === 'month' ? indicatorMonths[item.name] : indicatorDates[item.name]) || []
-      const segments = overLimit ? [] : groupConsecutivePeriods(values, kind)
+      const segments = issue ? [] : groupConsecutivePeriods(values, kind)
       const ownEntries: OutputPreviewEntry[] = kind !== 'day'
         ? []
         : ownableOutputs(item)
@@ -421,16 +430,17 @@ export default function CatchupModal({
               return { label: output.label, summary: '不补', signature: 'skip' }
             }
             const outSel = outputSelections[key] || EMPTY_SELECTION
+            const outIssue = selectionIssue(outSel, 'day')
+            if (outIssue) {
+              return {
+                label: output.label,
+                summary: outIssue.message,
+                signature: `issue:${outIssue.kind}:${outIssue.message}`
+              }
+            }
             const outCount = selectionCount(outSel, 'day')
             if (outCount === 0) {
               return { label: output.label, summary: '未选日期', signature: 'empty' }
-            }
-            if (outCount > CATCHUP_LIMITS.day) {
-              return {
-                label: output.label,
-                summary: `超出上限（${outCount}/${CATCHUP_LIMITS.day} 天）`,
-                signature: `over:${outCount}`
-              }
             }
             const outDates = outputDates[key] || []
             return {
@@ -452,6 +462,7 @@ export default function CatchupModal({
         ownSignature,
         item,
         selection: sel,
+        issue,
         segments,
         ownTexts
       }
@@ -475,7 +486,7 @@ export default function CatchupModal({
     return parts.join(' · ')
   }, [selected.length, longSpanStats.totalDayRuns, byKind.week, byKind.month, indicatorDates, indicatorMonths])
 
-  const datesReady = indicators.length > 0 && !hasOverLimit && indicatorsReady && outputsReady
+  const datesReady = indicators.length > 0 && !firstIssue && indicatorsReady && outputsReady
   const canRun = datesReady && !structureBlocked
   const loginOptions = workflows
     .filter((item) => item.type === 'login')
@@ -496,7 +507,7 @@ export default function CatchupModal({
   const applyBatch = (kind: PeriodKind): void => {
     const draft = batchDrafts[kind]
     const peers = byKind[kind]
-    if (!peers.length || selectionCount(draft, kind) === 0 || selectionExceedsLimit(draft, kind)) return
+    if (!peers.length || selectionCount(draft, kind) === 0 || selectionIssue(draft, kind)) return
     setSelectionsByIndicator((prev) => {
       const next = { ...prev }
       for (const item of peers) next[item.name] = clonePeriodSelection(draft)
@@ -547,7 +558,10 @@ export default function CatchupModal({
   }
 
   const dateValidationMessage = (): string => {
-    if (hasOverLimit) return '部分指标或导出超过了单次补数上限，请缩小时间范围'
+    if (firstIssue) {
+      if (firstIssue.kind === 'over_limit') return '部分指标或导出超过了单次补数上限，请缩小时间范围'
+      return firstIssue.message
+    }
     if (!outputsReady) return '请为单独选择的导出补上日期，或改成跟随 / 不补'
     return '请检查每个指标的补数日期'
   }
@@ -616,8 +630,9 @@ export default function CatchupModal({
           const key = keys[index]
           const mode = outputModes[key] || 'follow'
           const sel = outputSelections[key] || EMPTY_SELECTION
-          const count = selectionCount(sel, 'day')
-          const overLimit = count > CATCHUP_LIMITS.day
+          const hasInput = hasAnySelectionInput(sel)
+          const issue = selectionIssue(sel, 'day')
+          const outputErr = !hasInput ? '请选择日期' : issue?.message || null
           return (
             <div key={key} className={`task-output-item${mode === 'skip' ? ' is-muted' : ''}`}>
               <OutputName output={output} duplicateHint="同一工作流里有重名导出，去工作流给这一步补上 name 才能稳定区分" />
@@ -634,12 +649,11 @@ export default function CatchupModal({
                     size="small"
                     value={sel}
                     referenceDate={referenceDate}
-                    status={count === 0 || overLimit ? 'error' : undefined}
+                    status={!hasInput ? 'error' : undefined}
                     multiplePlaceholder="选择这个导出要补的日期"
                     onChange={(next) => setOutputSelections((prev) => ({ ...prev, [key]: next }))}
                   />
-                  {count === 0 && <span className="task-output-error">请选择日期</span>}
-                  {overLimit && <span className="task-output-error">{`最多 ${CATCHUP_LIMITS.day} 天`}</span>}
+                  {outputErr && <span className="task-output-error">{outputErr}</span>}
                 </div>
               ) : (
                 <span className="task-output-follow">
@@ -658,9 +672,9 @@ export default function CatchupModal({
     const peers = byKind[activeBatchKind]
     const draft = batchDrafts[activeBatchKind]
     const draftCount = selectionCount(draft, activeBatchKind)
-    const draftOver = selectionExceedsLimit(draft, activeBatchKind)
-    const anyCustom = peers.some((item) => selectionCount(selectionsByIndicator[item.name], activeBatchKind) > 0)
-    const unit = periodUnitLabel(activeBatchKind)
+    const draftIssue = selectionIssue(draft, activeBatchKind)
+    const draftHasInput = hasAnySelectionInput(draft)
+    const anyCustom = peers.some((item) => hasAnySelectionInput(selectionsByIndicator[item.name]))
     return (
       <div className="catchup-batch-bar">
         <div className="catchup-batch-head">
@@ -694,7 +708,7 @@ export default function CatchupModal({
             <Button
               type="primary"
               ghost
-              disabled={draftCount === 0 || draftOver}
+              disabled={draftCount === 0 || Boolean(draftIssue)}
               onClick={() => applyBatch(activeBatchKind)}
             >
               应用到全部
@@ -702,16 +716,16 @@ export default function CatchupModal({
             <Button
               type="link"
               size="small"
-              disabled={!anyCustom && draftCount === 0}
+              disabled={!anyCustom && !draftHasInput}
               onClick={() => clearBatch(activeBatchKind)}
             >
               清空已选
             </Button>
           </Space>
         </div>
-        {draftOver && (
+        {draftIssue && (
           <Text type="danger" style={{ fontSize: 12 }}>
-            {`已选 ${draftCount} ${unit}，一次最多补 ${CATCHUP_LIMITS[activeBatchKind]} ${unit}。`}
+            {`${draftIssue.message}。`}
           </Text>
         )}
       </div>
@@ -818,10 +832,10 @@ export default function CatchupModal({
                   const kind = periodKindOf(item)
                   const peers = byKind[kind]
                   const sel = selectionsByIndicator[item.name] || EMPTY_SELECTION
+                  const hasInput = hasAnySelectionInput(sel)
                   const count = selectionCount(sel, kind)
-                  const overLimit = selectionExceedsLimit(sel, kind)
-                  const canCopy = peers.length > 1 && count > 0 && !overLimit
-                  const unit = periodUnitLabel(kind)
+                  const issue = selectionIssue(sel, kind)
+                  const canCopy = peers.length > 1 && count > 0 && !issue
                   return (
                     <div key={item.name} className="task-window-block">
                       <div className="catchup-time-row">
@@ -840,14 +854,14 @@ export default function CatchupModal({
                               setSelectionsByIndicator((prev) => ({ ...prev, [item.name]: next }))
                             }}
                           />
-                          {count === 0 && (
+                          {!hasInput && (
                             <div className="catchup-default-hint">
                               默认：{describeDefault(item, toIsoList(defaults[item.name], kind))}
                             </div>
                           )}
-                          {overLimit && (
+                          {issue && (
                             <Text type="danger" style={{ fontSize: 12 }}>
-                              {`已选 ${count} ${unit}，一次最多补 ${CATCHUP_LIMITS[kind]} ${unit}。`}
+                              {`${issue.message}。`}
                             </Text>
                           )}
                         </div>
@@ -914,8 +928,8 @@ export default function CatchupModal({
                       </span>
                       <span className="catchup-summary-value">
                         {first.isDefault && <span className="catchup-summary-default">默认</span>}
-                        {first.overLimit ? (
-                          <Text type="danger">{describeOverflow(first.selection, first.kind)}</Text>
+                        {first.issue ? (
+                          <Text type="danger">{describeIssue(first.selection, first.kind, first.issue)}</Text>
                         ) : (
                           <>
                             <span className="catchup-summary-segments">

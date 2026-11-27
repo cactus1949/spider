@@ -40,10 +40,12 @@ const {
   groupConsecutivePeriods,
   groupOutputPreviews,
   groupPreviewRows,
+  hasAnySelectionInput,
   rangePeriodCount,
   resolveCustomIso,
   selectionCount,
   selectionExceedsLimit,
+  selectionIssue,
   selectionSoftWarn,
   switchSelectionMode,
   weekMonday
@@ -53,8 +55,20 @@ test('day range count and expansion support a full leap year and guard overflow 
   const start = dayjs('2024-01-01')
   const end = dayjs('2024-12-31')
   assert.equal(rangePeriodCount([start, end], 'day'), 366)
-  // 倒序也能自动纠偏
-  assert.equal(rangePeriodCount([end, start], 'day'), 366)
+  // 倒挂区间不展开并报告 reversed 问题
+  assert.equal(rangePeriodCount([end, start], 'day'), 0)
+  assert.deepEqual(expandPeriodRange([end, start], 'day'), [])
+  assert.equal(selectionIssue({ mode: 'range', range: [end, start], dates: [] }, 'day')?.kind, 'reversed')
+
+  // 半填区间识别为 incomplete，不会误当成空默认
+  const onlyStart = { mode: 'range', range: [start, null], dates: [] }
+  assert.equal(hasAnySelectionInput(onlyStart), true)
+  assert.equal(selectionIssue(onlyStart, 'day')?.kind, 'incomplete_end')
+  assert.equal(rangePeriodCount([start, null], 'day'), 0)
+
+  const onlyEnd = { mode: 'range', range: [null, end], dates: [] }
+  assert.equal(hasAnySelectionInput(onlyEnd), true)
+  assert.equal(selectionIssue(onlyEnd, 'month')?.kind, 'incomplete_start')
 
   const expanded = expandPeriodRange([start, end], 'day')
   assert.equal(expanded.length, 366)
@@ -67,6 +81,7 @@ test('day range count and expansion support a full leap year and guard overflow 
   assert.deepEqual(expandPeriodRange(huge, 'day'), [])
   const overSel = { mode: 'range', range: huge, dates: [] }
   assert.equal(selectionExceedsLimit(overSel, 'day'), true)
+  assert.equal(selectionIssue(overSel, 'day')?.kind, 'over_limit')
   assert.deepEqual(resolveCustomIso(overSel, 'day'), [])
 })
 

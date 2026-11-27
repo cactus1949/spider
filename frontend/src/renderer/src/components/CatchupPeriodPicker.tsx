@@ -1,23 +1,23 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Button, DatePicker, Segmented } from 'antd'
 import type { Dayjs } from 'dayjs'
 import {
   CATCHUP_LIMITS,
   MULTIPLE_PRESETS,
   buildRangePresets,
-  normalizeRange,
+  normalizeAnchor,
+  periodNoun,
   periodUnitLabel,
   recentPeriods,
   selectionCount,
-  selectionExceedsLimit,
+  selectionIssue,
   selectionSoftWarn,
   switchSelectionMode,
   type CatchupPickMode,
   type PeriodKind,
+  type PeriodRange,
   type PeriodSelection
 } from './catchupDates'
-
-const { RangePicker } = DatePicker
 
 const MODE_OPTIONS: { label: string; value: CatchupPickMode }[] = [
   { label: '时间段', value: 'range' },
@@ -37,15 +37,18 @@ interface Props {
 }
 
 function defaultRangePlaceholder(kind: PeriodKind): [string, string] {
-  if (kind === 'month') return ['开始月份', '结束月份']
-  if (kind === 'week') return ['开始周', '结束周']
-  return ['开始日期', '结束日期']
+  const noun = periodNoun(kind)
+  return [`开始${noun}`, `结束${noun}`]
 }
 
 function defaultMultiplePlaceholder(kind: PeriodKind): string {
   if (kind === 'month') return '留空使用默认月份'
   if (kind === 'week') return '留空使用默认周'
   return '留空使用默认日期'
+}
+
+function packRange(start: Dayjs | null, end: Dayjs | null): PeriodRange {
+  return start || end ? [start, end] : null
 }
 
 export default function CatchupPeriodPicker({
@@ -59,15 +62,57 @@ export default function CatchupPeriodPicker({
   multiplePlaceholder,
   showCountBadge = true
 }: Props): JSX.Element {
+  const [startOpen, setStartOpen] = useState(false)
+  const [endOpen, setEndOpen] = useState(false)
+
   const picker = kind === 'month' ? 'month' : kind === 'week' ? 'week' : 'date'
   const count = selectionCount(value, kind)
-  const overLimit = selectionExceedsLimit(value, kind)
+  const issue = selectionIssue(value, kind)
+  const overLimit = issue?.kind === 'over_limit'
   const softWarn = selectionSoftWarn(value, kind)
-  const resolvedStatus = status ?? (overLimit ? 'error' : softWarn ? 'warning' : undefined)
   const rangePresets = useMemo(() => buildRangePresets(kind, referenceDate), [kind, referenceDate])
   const multiplePresets = MULTIPLE_PRESETS[kind]
   const unit = periodUnitLabel(kind)
+  const placeholders = rangePlaceholder || defaultRangePlaceholder(kind)
   const maxTagCount = value.dates.length > 8 ? 2 : 'responsive'
+
+  const startVal = value.range?.[0] ?? null
+  const endVal = value.range?.[1] ?? null
+
+  const startStatus =
+    status ??
+    (issue && (issue.kind === 'incomplete_start' || issue.kind === 'reversed' || issue.kind === 'over_limit')
+      ? 'error'
+      : softWarn
+        ? 'warning'
+        : undefined)
+  const endStatus =
+    status ??
+    (issue && (issue.kind === 'incomplete_end' || issue.kind === 'reversed' || issue.kind === 'over_limit')
+      ? 'error'
+      : softWarn
+        ? 'warning'
+        : undefined)
+  const multipleStatus = status ?? (issue ? 'error' : softWarn ? 'warning' : undefined)
+
+  const renderRangePresetsFooter = (close: () => void): JSX.Element => (
+    <div className="catchup-date-presets">
+      <span>快捷填充</span>
+      {rangePresets.map((preset) => (
+        <Button
+          key={preset.label}
+          type="link"
+          size="small"
+          onClick={() => {
+            onChange({ mode: 'range', range: [preset.value[0], preset.value[1]], dates: [] })
+            close()
+          }}
+        >
+          {preset.label}
+        </Button>
+      ))}
+    </div>
+  )
 
   return (
     <div className={`catchup-picker-bar${size === 'small' ? ' is-small' : ''}`}>
@@ -77,24 +122,49 @@ export default function CatchupPeriodPicker({
         value={value.mode}
         options={MODE_OPTIONS}
         onChange={(next) => {
+          setStartOpen(false)
+          setEndOpen(false)
           onChange(switchSelectionMode(value, next as CatchupPickMode, kind))
         }}
       />
       {value.mode === 'range' ? (
-        <RangePicker
-          size={size}
-          picker={picker}
-          allowClear
-          className="catchup-picker-input"
-          value={value.range}
-          status={resolvedStatus}
-          placeholder={rangePlaceholder || defaultRangePlaceholder(kind)}
-          presets={rangePresets}
-          onChange={(next) => {
-            const pair = next && next[0] && next[1] ? normalizeRange([next[0], next[1]], kind) : null
-            onChange({ mode: 'range', range: pair, dates: [] })
-          }}
-        />
+        <div className="catchup-range-pair">
+          <DatePicker
+            size={size}
+            picker={picker}
+            allowClear
+            className="catchup-range-input"
+            value={startVal}
+            defaultPickerValue={startVal ?? endVal ?? undefined}
+            open={startOpen}
+            onOpenChange={setStartOpen}
+            status={startStatus}
+            placeholder={placeholders[0]}
+            renderExtraFooter={() => renderRangePresetsFooter(() => setStartOpen(false))}
+            onChange={(next) => {
+              const anchored = next ? normalizeAnchor(next as Dayjs, kind) : null
+              onChange({ mode: 'range', range: packRange(anchored, endVal), dates: [] })
+            }}
+          />
+          <span className="catchup-range-sep">至</span>
+          <DatePicker
+            size={size}
+            picker={picker}
+            allowClear
+            className="catchup-range-input"
+            value={endVal}
+            defaultPickerValue={endVal ?? startVal ?? undefined}
+            open={endOpen}
+            onOpenChange={setEndOpen}
+            status={endStatus}
+            placeholder={placeholders[1]}
+            renderExtraFooter={() => renderRangePresetsFooter(() => setEndOpen(false))}
+            onChange={(next) => {
+              const anchored = next ? normalizeAnchor(next as Dayjs, kind) : null
+              onChange({ mode: 'range', range: packRange(startVal, anchored), dates: [] })
+            }}
+          />
+        </div>
       ) : (
         <DatePicker
           multiple
@@ -102,7 +172,7 @@ export default function CatchupPeriodPicker({
           picker={picker}
           className="catchup-picker-input"
           value={value.dates}
-          status={resolvedStatus}
+          status={multipleStatus}
           placeholder={multiplePlaceholder || defaultMultiplePlaceholder(kind)}
           maxTagCount={maxTagCount}
           renderExtraFooter={() => (

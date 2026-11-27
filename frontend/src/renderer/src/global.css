@@ -491,8 +491,35 @@ body {
   min-width: 210px;
 }
 
+.catchup-range-pair {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 270px;
+}
+
+.catchup-range-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.catchup-range-sep {
+  flex-shrink: 0;
+  color: #8a9099;
+  font-size: 12px;
+}
+
 .catchup-picker-bar.is-small .catchup-picker-input {
   min-width: 190px;
+}
+
+.catchup-picker-bar.is-small .catchup-range-pair {
+  min-width: 240px;
+}
+
+.catchup-picker-bar.is-small .catchup-range-input {
+  min-width: 110px;
 }
 
 .catchup-count-pill {

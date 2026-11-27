@@ -2,12 +2,19 @@ import dayjs, { type Dayjs } from 'dayjs'
 
 export type PeriodKind = 'day' | 'week' | 'month'
 export type CatchupPickMode = 'range' | 'multiple'
-export type PeriodRange = [Dayjs, Dayjs] | null
+export type PeriodRange = [Dayjs | null, Dayjs | null] | null
 
 export interface PeriodSelection {
   mode: CatchupPickMode
   range: PeriodRange
   dates: Dayjs[]
+}
+
+export type SelectionIssueKind = 'incomplete_start' | 'incomplete_end' | 'reversed' | 'over_limit'
+
+export interface SelectionIssue {
+  kind: SelectionIssueKind
+  message: string
 }
 
 export interface RangePreset {
@@ -116,18 +123,36 @@ function parseIsoMonthIndex(iso: string): number {
   return y * 12 + (m - 1)
 }
 
-export function normalizeRange(range: PeriodRange, kind: PeriodKind): PeriodRange {
+export function periodNoun(kind: PeriodKind): string {
+  if (kind === 'month') return '月份'
+  if (kind === 'week') return '周'
+  return '日期'
+}
+
+export function normalizeRange(range: PeriodRange, kind: PeriodKind): [Dayjs, Dayjs] | null {
   if (!range || !range[0] || !range[1]) return null
   const a = normalizeAnchor(range[0], kind)
   const b = normalizeAnchor(range[1], kind)
   return b.isBefore(a) ? [b, a] : [a, b]
 }
 
-/** O(1) 计算起止区间包含的周期数，避免超长误选时直接展开成超大数组。 */
+export function isRangeReversed(range: PeriodRange, kind: PeriodKind): boolean {
+  if (!range || !range[0] || !range[1]) return false
+  return normalizeAnchor(range[1], kind).isBefore(normalizeAnchor(range[0], kind))
+}
+
+export function hasAnySelectionInput(sel: PeriodSelection | undefined): boolean {
+  if (!sel) return false
+  if (sel.mode === 'range') return Boolean(sel.range && (sel.range[0] || sel.range[1]))
+  return sel.dates.length > 0
+}
+
+/** O(1) 计算起止区间包含的周期数；半填或起止倒挂时返回 0。 */
 export function rangePeriodCount(range: PeriodRange, kind: PeriodKind): number {
-  const normalized = normalizeRange(range, kind)
-  if (!normalized) return 0
-  const [start, end] = normalized
+  if (!range || !range[0] || !range[1]) return 0
+  const start = normalizeAnchor(range[0], kind)
+  const end = normalizeAnchor(range[1], kind)
+  if (end.isBefore(start)) return 0
   if (kind === 'month') {
     return (end.year() - start.year()) * 12 + (end.month() - start.month()) + 1
   }
@@ -138,17 +163,16 @@ export function rangePeriodCount(range: PeriodRange, kind: PeriodKind): number {
   return days + 1
 }
 
-/** 将起止区间展开为有序的 Dayjs 列表；超过上限时返回空数组以防大数组卡顿。 */
+/** 将合法起止区间展开为有序的 Dayjs 列表；半填、倒挂或超上限时返回空数组。 */
 export function expandPeriodRange(
   range: PeriodRange,
   kind: PeriodKind,
   maxItems: number = CATCHUP_LIMITS[kind]
 ): Dayjs[] {
-  const normalized = normalizeRange(range, kind)
-  if (!normalized) return []
-  const count = rangePeriodCount(normalized, kind)
+  if (!range || !range[0] || !range[1] || isRangeReversed(range, kind)) return []
+  const count = rangePeriodCount(range, kind)
   if (count <= 0 || count > maxItems) return []
-  const [start] = normalized
+  const start = normalizeAnchor(range[0], kind)
   const unit = kind === 'month' ? 'month' : kind === 'week' ? 'week' : 'day'
   return Array.from({ length: count }, (_, index) => start.add(index, unit))
 }
@@ -182,8 +206,31 @@ export function selectionExceedsLimit(sel: PeriodSelection | undefined, kind: Pe
   return selectionCount(sel, kind) > CATCHUP_LIMITS[kind]
 }
 
+export function selectionIssue(sel: PeriodSelection | undefined, kind: PeriodKind): SelectionIssue | null {
+  if (!sel) return null
+  const noun = periodNoun(kind)
+  const unit = periodUnitLabel(kind)
+  if (sel.mode === 'range' && sel.range) {
+    const [start, end] = sel.range
+    if (start && !end) return { kind: 'incomplete_end', message: `请选择结束${noun}` }
+    if (!start && end) return { kind: 'incomplete_start', message: `请选择开始${noun}` }
+    if (start && end && isRangeReversed(sel.range, kind)) {
+      return { kind: 'reversed', message: `结束${noun}不能早于开始${noun}` }
+    }
+  }
+  const count = selectionCount(sel, kind)
+  if (count > CATCHUP_LIMITS[kind]) {
+    return {
+      kind: 'over_limit',
+      message: `已选 ${count} ${unit}，一次最多补 ${CATCHUP_LIMITS[kind]} ${unit}`
+    }
+  }
+  return null
+}
+
 export function selectionSoftWarn(sel: PeriodSelection | undefined, kind: PeriodKind): boolean {
   if (kind !== 'day') return false
+  if (selectionIssue(sel, kind)) return false
   const count = selectionCount(sel, kind)
   return count > CATCHUP_SOFT_WARN_DAYS && count <= CATCHUP_LIMITS.day
 }
