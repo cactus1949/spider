@@ -259,6 +259,7 @@ class TaskStateStore:
             ("auto_upload", "INTEGER NOT NULL DEFAULT 0"),
             ("indicator_retry", "INTEGER NOT NULL DEFAULT 3"),
             ("ukey_station_ids", "TEXT NOT NULL DEFAULT '[]'"),
+            ("station_mode", "TEXT NOT NULL DEFAULT 'all'"),
         ]:
             if col not in existing:
                 try:
@@ -343,7 +344,7 @@ class TaskStateStore:
                         output_windows=?, path_template=?, path_folders=?, path_structure=?,
                         custom_filenames=?,
                         upload_profile_id=?, auto_upload=?, indicator_retry=?,
-                        ukey_station_ids=?, updated_at=?
+                        ukey_station_ids=?, station_mode=?, updated_at=?
                     WHERE id=?""",
                     (
                         cfg["name"], cfg.get("login", ""),
@@ -360,6 +361,7 @@ class TaskStateStore:
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
                         _ukey_station_ids_json(cfg.get("ukey_station_ids")),
+                        _station_mode_value(cfg.get("station_mode")),
                         now, cfg["id"],
                     ),
                 )
@@ -373,10 +375,10 @@ class TaskStateStore:
                          backfill_days, cover_days, enabled, remark, download_dir, download_dir_custom,
                          indicator_windows, output_windows, path_template, path_folders, path_structure,
                          custom_filenames,
-                         upload_profile_id, auto_upload, indicator_retry, ukey_station_ids,
+                         upload_profile_id, auto_upload, indicator_retry, ukey_station_ids, station_mode,
                          created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, """
-                    "?, ?, ?, ?, ?, ?, ?)""",
+                    "?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         cfg["id"], cfg["name"], cfg.get("login", ""),
                         json.dumps(cfg.get("indicators", [])),
@@ -392,6 +394,7 @@ class TaskStateStore:
                         int(bool(cfg.get("auto_upload", False))),
                         _indicator_retry_value(cfg.get("indicator_retry", 3)),
                         _ukey_station_ids_json(cfg.get("ukey_station_ids")),
+                        _station_mode_value(cfg.get("station_mode")),
                         now, now,
                     ),
                 )
@@ -1615,8 +1618,17 @@ def _task_config_row(row: sqlite3.Row) -> dict:
         "auto_upload": bool(_col("auto_upload", 0)),
         "indicator_retry": _indicator_retry_value(_col("indicator_retry", 3)),
         "ukey_station_ids": _parse_ukey_station_ids(_col("ukey_station_ids", "[]")),
+        "station_mode": _station_mode_value(_col("station_mode", "all")),
         "created_at": _col("created_at", 0), "updated_at": _col("updated_at", 0),
     }
+
+
+def _station_mode_value(raw: object) -> str:
+    """规范化场站执行策略：``all``（全站轮询）或 ``any_one``（公有数据任一成功即止）。"""
+    text = str(raw or "").strip().lower()
+    if text in {"any_one", "any", "public", "first_ok"}:
+        return "any_one"
+    return "all"
 
 
 def _custom_filenames_json(raw: object) -> str:

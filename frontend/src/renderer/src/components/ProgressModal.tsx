@@ -38,6 +38,9 @@ export interface CatchupRun {
   pathFolders?: { name: string; indicators: string[] }[]
   pathStructure?: string
   customFilenames?: Record<string, { enabled: boolean; template: string }>
+  ukeyStationIds?: string[]
+  stationMode?: string
+  waitForHardware?: boolean
 }
 
 interface IndicatorRow {
@@ -63,6 +66,12 @@ interface Props {
   indicatorLabels?: Record<string, string>
   /** 从某次执行继续。空则按原入口新跑。 */
   resumeExecId?: string
+  /** 结束后不弹出额外的执行结果汇总弹窗 */
+  suppressResultModal?: boolean
+  /** 执行结束后自动关闭进度弹窗（无论成功还是失败，均不残留） */
+  autoCloseOnFinish?: boolean
+  /** 自然执行结束时的回调（用于多批次重采连续推进；不传时回退到 onClose） */
+  onAutoFinish?: () => void
   onClose: () => void
 }
 
@@ -74,7 +83,21 @@ const INDICATOR_STATUS_TEXT: Record<IndicatorRow['status'], string> = {
   skipped: '跳过'
 }
 
-export default function ProgressModal({ open, workflowName, headless, minimized = false, isTask, catchup = null, title, indicatorLabels = {}, resumeExecId = '', onClose }: Props): JSX.Element {
+export default function ProgressModal({
+  open,
+  workflowName,
+  headless,
+  minimized = false,
+  isTask,
+  catchup = null,
+  title,
+  indicatorLabels = {},
+  resumeExecId = '',
+  suppressResultModal = false,
+  autoCloseOnFinish = false,
+  onAutoFinish,
+  onClose
+}: Props): JSX.Element {
   const [steps, setSteps] = useState<StepProgress[]>([])
   const [running, setRunning] = useState(false)
   const [needInput, setNeedInput] = useState(false)
@@ -87,6 +110,14 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   const notifiedRef = useRef(false)
   const ledgerRef = useRef(createDownloadLedger())
   const terminalRef = useRef(false)
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  const onAutoFinishRef = useRef(onAutoFinish)
+  onAutoFinishRef.current = onAutoFinish
+  const suppressResultModalRef = useRef(suppressResultModal)
+  suppressResultModalRef.current = suppressResultModal
+  const autoCloseOnFinishRef = useRef(autoCloseOnFinish)
+  autoCloseOnFinishRef.current = autoCloseOnFinish
   const taskStatsRef = useRef<{
     done: number
     failed: number
@@ -106,6 +137,7 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
   indicatorsRef.current = indicators
 
   const notifyOnce = (result: { title: string; status: 'success' | 'warning' | 'error'; name: string; message?: string }): void => {
+    if (suppressResultModalRef.current) return
     if (notifiedRef.current) return
     notifiedRef.current = true
     showExecutionResult({ ...result, files: ledgerRef.current.finish(), upload: uploadOfferRef.current })
@@ -182,6 +214,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
               path_folders: catchup.pathFolders || [],
               path_structure: catchup.pathStructure || '',
               custom_filenames: catchup.customFilenames || {},
+              ...(catchup.ukeyStationIds ? { ukey_station_ids: catchup.ukeyStationIds } : {}),
+              ...(catchup.stationMode ? { station_mode: catchup.stationMode } : {}),
+              wait_for_hardware: Boolean(catchup.waitForHardware),
               // 对话框里看到的路径就是这次要用的，空结构也不再回退到任务
               storage_overridden: true
             }
@@ -197,6 +232,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
           } catch { /* 非 JSON 错误页 */ }
           setError(detail || `请求失败: HTTP ${res.status}`)
           setRunning(false)
+          if (autoCloseOnFinishRef.current && !abortedRef.current) {
+            ;(onAutoFinishRef.current || onCloseRef.current)()
+          }
           return
         }
 
@@ -230,6 +268,9 @@ export default function ProgressModal({ open, workflowName, headless, minimized 
         setRunning(false)
         if (pendingResultRef.current && (!abortedRef.current || terminalRef.current)) {
           notifyOnce(pendingResultRef.current)
+        }
+        if (autoCloseOnFinishRef.current && !abortedRef.current) {
+          ;(onAutoFinishRef.current || onCloseRef.current)()
         }
       }
     }

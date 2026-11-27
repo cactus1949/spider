@@ -21,6 +21,7 @@ SECRET_KEYS = frozenset({
     "deliveryDesktopWechatTarget",
     "webhook",
     "alertWecomBackupWebhook",
+    "workbenchToken",
 })
 
 

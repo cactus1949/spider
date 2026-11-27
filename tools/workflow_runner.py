@@ -3590,7 +3590,7 @@ class WorkflowRunner:
             True
         """
         current = self.page
-        for page in self._iter_known_pages():
+        for page in list(self.pages):
             if page is current or not self._page_is_open(page):
                 continue
             bound = self._page_url(current)
@@ -7116,8 +7116,7 @@ class WorkflowRunner:
             return
         self._note_file("empty", reason="没有交易事件")
 
-    @staticmethod
-    def _save_grid_as_xlsx(rows: list[list[str]], save_path):
+    def _save_grid_as_xlsx(self, rows: list[list[str]], save_path):
         """将二维数组保存为 Excel。"""
         from openpyxl import Workbook
         wb = Workbook()
@@ -7464,8 +7463,7 @@ class WorkflowRunner:
             self._note_file("saved", save_path)
             logger.success("  API 数据保存 → {}", save_path)
 
-    @staticmethod
-    def _save_echarts_as_xlsx(raw: list, save_path):
+    def _save_echarts_as_xlsx(self, raw: list, save_path):
         """将 ECharts option 数据转为 Excel 保存。"""
         from openpyxl import Workbook
 

@@ -1,0 +1,1516 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>电力采集 · 全自动产品原型</title>
+<style>
+  :root {
+    --sider: #0E1116;
+    --primary: #1F5FFF;
+    --primary-hover: #174DE0;
+    --primary-soft: #EEF4FF;
+    --bg: #F5F6F4;
+    --card: #FFFFFF;
+    --line: #E7E8E3;
+    --line-2: #D8DAD3;
+    --ink: #1A1D21;
+    --ink-2: #59606B;
+    --ink-3: #8C929A;
+
+    /* 专门调制的低饱和护眼科研色板（不刺眼、久看舒适） */
+    --hm-ok: #6FB38E;        /* 完整到位：柔和鼠尾草绿 */
+    --hm-ok-hover: #5CA27C;
+    --hm-part-a: #6FB38E;    /* 部分有数：左半鼠尾草绿 */
+    --hm-part-b: #E9C77B;    /* 部分缺数：右半柔和暖杏 */
+    --hm-empty: #E8BE6E;     /* 纯空表头/全0：暖杏琥珀 */
+    --hm-miss: #DD7B78;      /* 缺失未到：柔和陶土红 */
+    --hm-future: #ECEEE9;    /* 未到水位期：极浅暖灰 */
+    --hm-upd: #2558D4;       /* 今日哈希覆盖更新角标：深靛蓝 */
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  button, input, select { font-family: inherit; font-size: 13px; }
+  button { cursor: pointer; }
+
+  .app { display: flex; height: 100vh; overflow: hidden; }
+
+  /* 0.2.8 深色侧栏 */
+  .sider {
+    width: 196px; flex-shrink: 0;
+    background: var(--sider); color: rgba(255,255,255,0.72);
+    display: flex; flex-direction: column; user-select: none;
+  }
+  .sider-logo {
+    height: 52px; padding: 0 18px;
+    display: flex; align-items: center; gap: 10px;
+    color: #fff; font-weight: 600; font-size: 15px;
+  }
+  .sider-logo svg { width: 19px; height: 19px; fill: var(--primary); }
+
+  .sider-nav { flex: 1; padding: 8px 10px; display: flex; flex-direction: column; gap: 3px; }
+  .nav-item {
+    height: 38px; padding: 0 13px; border-radius: 9px; border: 0;
+    background: transparent; color: rgba(255,255,255,0.68);
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; text-align: left; font-size: 13.5px; font-weight: 500;
+    transition: background 0.12s, color 0.12s;
+  }
+  .nav-item:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  .nav-item.active { background: var(--primary); color: #fff; font-weight: 600; }
+  .nav-item-l { display: flex; align-items: center; gap: 9px; }
+  .nav-item svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+  .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hm-miss); }
+
+  .sider-bottom {
+    padding: 8px 10px 10px; border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .dev-group { display: none; flex-direction: column; gap: 1px; padding: 3px 0 5px 14px; }
+  .dev-group.open { display: flex; }
+  .dev-link {
+    height: 30px; padding: 0 10px; border-radius: 7px; border: 0;
+    background: transparent; color: rgba(255,255,255,0.52);
+    text-align: left; font-size: 12.5px;
+  }
+  .dev-link:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  .sider-btn {
+    height: 34px; padding: 0 10px; border-radius: 8px; border: 0;
+    background: transparent; color: rgba(255,255,255,0.62);
+    display: flex; align-items: center; justify-content: space-between; width: 100%; font-size: 13px;
+  }
+  .sider-btn:hover { color: #fff; background: rgba(255,255,255,0.06); }
+  .sider-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+
+  /* 右侧主体 */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* 精简顶栏 */
+  .header {
+    height: 50px; flex-shrink: 0; background: #fff;
+    border-bottom: 1px solid var(--line); padding: 0 20px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .header-l { display: flex; align-items: center; gap: 12px; }
+  .header-title { font-size: 15px; font-weight: 600; }
+  .status-pill {
+    font-size: 12px; color: var(--ink-2); background: var(--bg);
+    padding: 3px 10px; border-radius: 99px; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .dot-ok { background: #3CA374; }
+  .dot-err { background: var(--hm-miss); }
+  .dot-warn { background: var(--hm-empty); }
+  .dot-m { background: #C4C8CE; }
+
+  .header-r { display: flex; align-items: center; gap: 8px; }
+  .hw-btn {
+    height: 30px; padding: 0 11px; border-radius: 7px;
+    border: 1px solid var(--line-2); background: #fff; color: var(--ink);
+    display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 500;
+  }
+  .hw-btn:hover { border-color: var(--primary); }
+  .hw-btn.err { border-color: #F0C4C2; background: #FDF6F6; color: #9E3330; }
+  .slot-bars { display: inline-flex; gap: 2.5px; }
+  .slot-bars i { width: 5px; height: 11px; border-radius: 1.5px; background: var(--hm-ok); display: block; }
+  .slot-bars i.sleep { background: #CBD2D9; }
+  .slot-bars i.err { background: var(--hm-miss); }
+
+  .btn {
+    height: 30px; padding: 0 12px; border-radius: 7px;
+    border: 1px solid var(--line-2); background: #fff; color: var(--ink);
+    display: inline-flex; align-items: center; gap: 5px; font-weight: 500;
+    font-size: 12.5px; transition: all 0.12s; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--primary); color: var(--primary); }
+  .btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); color: #fff; }
+  .btn-sm { height: 27px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
+  .btn-text { border-color: transparent; background: transparent; color: var(--ink-2); padding: 0 7px; }
+  .btn-text:hover { background: rgba(0,0,0,0.04); color: var(--primary); border-color: transparent; }
+
+  .content { flex: 1; overflow-y: auto; padding: 16px 20px 80px; }
+  .view { display: none; }
+  .view.active { display: block; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+
+  /* ==================== 1. 数据全景：高密度 Python 风格方格热力图 ==================== */
+  .hm-toolbar {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 14px; margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+  .scope-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .scope-btn {
+    height: 29px; padding: 0 11px; border-radius: 7px;
+    border: 1px solid transparent; background: transparent; color: var(--ink-2);
+    font-size: 12.5px; font-weight: 500; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .scope-btn:hover { background: var(--bg); color: var(--ink); }
+  .scope-btn.active { background: var(--primary-soft); border-color: #C7D9FF; color: var(--primary); font-weight: 600; }
+  .scope-sep { width: 1px; height: 16px; background: var(--line); margin: 0 4px; }
+
+  .seg {
+    display: inline-flex; background: var(--bg); padding: 2px; border-radius: 7px; gap: 2px;
+  }
+  .seg button {
+    height: 25px; padding: 0 9px; border-radius: 5px; border: 0;
+    background: transparent; color: var(--ink-2); font-size: 12px; font-weight: 500;
+  }
+  .seg button.active { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+  /* 图例条 */
+  .hm-legend-bar {
+    padding: 9px 14px; border-bottom: 1px solid var(--line); background: #FAFBF9;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    font-size: 12px; color: var(--ink-2);
+  }
+  .legend-group { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .lg-item { display: inline-flex; align-items: center; gap: 5px; }
+  .lg-box { width: 13px; height: 13px; border-radius: 3px; display: inline-block; position: relative; }
+  .lg-ok { background: var(--hm-ok); }
+  .lg-part { background: linear-gradient(135deg, var(--hm-part-a) 0 48%, var(--hm-part-b) 52% 100%); }
+  .lg-empty { background: var(--hm-empty); }
+  .lg-miss { background: var(--hm-miss); }
+  .lg-future { background: var(--hm-future); border: 1px solid #DCDFD8; }
+  .lg-upd {
+    background: var(--hm-ok);
+  }
+  .lg-upd::after {
+    content: ""; position: absolute; top: 0; right: 0;
+    border-top: 6px solid var(--hm-upd); border-left: 6px solid transparent;
+    border-top-right-radius: 3px;
+  }
+
+  /* 密集热力矩阵主体（固定 1:1 正方形方格 + 两级月/日表头 + 月间自然分隔） */
+  .hm-scroll { overflow-x: auto; user-select: none; }
+  .hm-table {
+    width: auto; border-collapse: separate; border-spacing: 3px;
+    padding: 8px 14px 14px;
+  }
+  .hm-table.span-60 { border-spacing: 2px; }
+  .hm-table th {
+    font-size: 10.5px; font-weight: 500; color: var(--ink-3);
+    text-align: center; padding: 0; white-space: nowrap;
+  }
+  .hm-table th.col-month {
+    text-align: left; font-size: 11px; font-weight: 600; color: var(--ink-2);
+    padding: 0 0 4px 2px; border-bottom: 1px solid var(--line);
+  }
+  .hm-table th.col-day {
+    width: var(--cell-sz, 24px); max-width: var(--cell-sz, 24px);
+    padding: 4px 0 4px; overflow: visible;
+  }
+  .hm-table th.col-ind {
+    text-align: left; padding-left: 4px; padding-right: 12px;
+    width: 220px; min-width: 210px; color: var(--ink-2); font-size: 12px;
+    vertical-align: bottom; padding-bottom: 4px;
+  }
+  .hm-table th.col-stat {
+    text-align: right; padding-left: 12px; padding-right: 4px;
+    color: var(--ink-3); font-size: 11px; white-space: nowrap;
+    vertical-align: bottom; padding-bottom: 4px;
+  }
+  /* 月份之间的清晰分隔列 */
+  .hm-table th.month-gap,
+  .hm-table td.month-gap {
+    width: 10px; min-width: 10px; padding: 0; background: transparent;
+  }
+  .hm-table.span-60 th.month-gap,
+  .hm-table.span-60 td.month-gap {
+    width: 8px; min-width: 8px;
+  }
+  .hm-table th.today-col { color: var(--primary); font-weight: 700; }
+  .hm-table td { padding: 0; vertical-align: middle; }
+  .hm-table td.ind-cell {
+    padding: 0 12px 0 4px; white-space: nowrap; vertical-align: middle;
+  }
+  .hm-table td.stat-cell {
+    padding: 0 4px 0 12px; text-align: right; white-space: nowrap;
+    font-size: 11.5px; color: var(--ink-3);
+  }
+  .ind-row-wrap {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  }
+  .ind-title { font-size: 12.5px; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; max-width: 158px; }
+  .ind-lag {
+    font-size: 10.5px; color: var(--ink-3); background: var(--bg);
+    padding: 0 5px; border-radius: 4px; flex-shrink: 0;
+  }
+  .ind-row-btn {
+    border: 0; background: transparent; color: var(--ink-3); font-size: 11px; padding: 2px 4px; border-radius: 4px;
+    opacity: 0; transition: opacity 0.12s;
+  }
+  .hm-table tr:hover .ind-row-btn { opacity: 1; }
+  .ind-row-btn:hover { background: var(--primary-soft); color: var(--primary); }
+
+  /* 正方形热力方格（随 14/30/60 天自适应边长，始终保持 1:1） */
+  .hm-cell {
+    width: var(--cell-sz, 24px);
+    height: var(--cell-sz, 24px);
+    border-radius: 4px;
+    cursor: pointer; position: relative; transition: transform 0.08s, filter 0.08s;
+  }
+  .hm-table.span-14 { --cell-sz: 30px; }
+  .hm-table.span-30 { --cell-sz: 24px; }
+  .hm-table.span-60 { --cell-sz: 15px; }
+  .hm-table.span-60 .hm-cell { border-radius: 3px; }
+  .hm-cell:hover { filter: brightness(0.92); transform: scale(1.12); z-index: 3; }
+  .hm-cell.ok { background: var(--hm-ok); }
+  /* 在 1:1 正方形上，135deg 斜切精确对角 45° 切分，干净利落 */
+  .hm-cell.partial { background: linear-gradient(135deg, var(--hm-part-a) 0 49%, var(--hm-part-b) 51% 100%); }
+  .hm-cell.empty { background: var(--hm-empty); }
+  .hm-cell.miss { background: var(--hm-miss); }
+  .hm-cell.future { background: var(--hm-future); cursor: default; }
+  .hm-cell.future:hover { transform: none; filter: none; }
+
+  /* 今日覆盖更新右上角小角标 */
+  .hm-cell.updated::after {
+    content: ""; position: absolute; top: 0; right: 0;
+    border-top: 6px solid var(--hm-upd); border-left: 6px solid transparent;
+    border-top-right-radius: 4px;
+  }
+  .hm-table.span-60 .hm-cell.updated::after {
+    border-top-width: 4px; border-left-width: 4px;
+  }
+  /* 拖选/框选导出高亮框 */
+  .hm-cell.selected {
+    outline: 2px solid var(--primary);
+    outline-offset: -1px;
+    box-shadow: 0 0 0 2px rgba(31, 95, 255, 0.25);
+    z-index: 2;
+  }
+  /* 选中时的极小白色勾选点 */
+  .hm-cell.selected::before {
+    content: ""; position: absolute; left: 3px; bottom: 3px;
+    width: 4px; height: 4px; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 2px rgba(0,0,0,0.45);
+  }
+
+  /* 私有全展开时的场站分组头 */
+  .st-group-row td {
+    padding: 10px 4px 4px; font-size: 12px; font-weight: 700; color: var(--ink);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* 底部悬浮导出条（拖选方格后自动出现，1 秒打包下载！） */
+  .float-bar {
+    position: fixed; left: 216px; right: 20px; bottom: 16px;
+    background: #141920; color: #fff; border-radius: 12px;
+    padding: 10px 16px; box-shadow: 0 12px 32px rgba(14,17,22,0.28);
+    display: none; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    z-index: 35;
+  }
+  .float-bar.show { display: flex; }
+  .float-bar .btn { height: 30px; }
+  .float-bar .btn-ghost-dark {
+    background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.18); color: #fff;
+  }
+  .float-bar .btn-ghost-dark:hover { background: rgba(255,255,255,0.18); color: #fff; }
+  .multi-st-check {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: rgba(255,255,255,0.85);
+    padding: 4px 10px; border-radius: 6px; background: rgba(255,255,255,0.08);
+    cursor: pointer;
+  }
+
+  /* 跟随鼠标的轻量 Tooltip */
+  .hm-tip {
+    position: fixed; z-index: 90; pointer-events: none;
+    background: rgba(20, 25, 32, 0.94); color: #fff;
+    padding: 8px 11px; border-radius: 8px; font-size: 12px; line-height: 1.55;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.22); max-width: 280px;
+    display: none;
+  }
+  .hm-tip .tip-sub { color: #A6B0BD; font-size: 11.5px; }
+
+  /* ==================== 2. 采集任务（回归 0.2.8 纯粹一致的卡片！） ==================== */
+  .toolbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .search-box {
+    height: 33px; width: 300px; max-width: 100%; padding: 0 12px;
+    border-radius: 8px; border: 1px solid var(--line-2); background: #fff; outline: none;
+  }
+  .search-box:focus { border-color: var(--primary); }
+
+  .task-cards {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  }
+  .t-card {
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 20px 14px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .t-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .t-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .tag {
+    display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
+    border-radius: 6px; font-size: 11.5px; font-weight: 500;
+    background: #F3F4F2; color: var(--ink-2);
+  }
+  .tag-blue { background: var(--primary-soft); color: var(--primary); }
+  .tag-ok { background: #ECF7F1; color: #26734D; }
+  .tag-err { background: #FDF2F2; color: #A63634; }
+
+  .info-lines { display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
+  .info-line { display: flex; gap: 12px; }
+  .info-k { width: 72px; flex-shrink: 0; color: var(--ink-3); }
+  .info-v { flex: 1; color: var(--ink); min-width: 0; }
+  .t-foot {
+    padding-top: 12px; border-top: 1px solid #F0F1ED;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .switch {
+    width: 34px; height: 19px; border-radius: 99px; background: #CBD5E1;
+    border: 0; padding: 0; position: relative; transition: background 0.14s;
+  }
+  .switch.on { background: var(--primary); }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 15px; height: 15px; border-radius: 50%; background: #fff;
+    transition: transform 0.14s;
+  }
+  .switch.on::after { transform: translateX(15px); }
+
+  /* ==================== 3. 文件中心 & 4. 执行日志 ==================== */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; }
+  .data-table th {
+    text-align: left; padding: 10px 16px; font-weight: 600; color: var(--ink-2);
+    border-bottom: 1px solid var(--line); background: #FAFBF9; font-size: 12.5px;
+  }
+  .data-table td { padding: 10px 16px; border-bottom: 1px solid #F1F2EE; vertical-align: middle; }
+  .data-table tbody tr:hover td { background: #FAFBF9; }
+
+  /* 抽屉 & 弹窗 */
+  .mask { position: fixed; inset: 0; background: rgba(14,17,22,0.4); z-index: 45; display: none; }
+  .mask.open { display: block; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 470px; max-width: 94vw;
+    background: #fff; z-index: 55; box-shadow: -8px 0 32px rgba(0,0,0,0.14);
+    transform: translateX(100%); transition: transform 0.18s ease-out;
+    display: flex; flex-direction: column;
+  }
+  .drawer.wide { width: 650px; }
+  .drawer.open { transform: translateX(0); }
+  .m-head {
+    padding: 15px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .m-title { font-size: 15.5px; font-weight: 600; }
+  .m-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .m-foot {
+    padding: 12px 20px; border-top: 1px solid var(--line);
+    display: flex; justify-content: flex-end; gap: 8px;
+  }
+  .modal {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 740px; max-width: 94vw; max-height: 85vh;
+    background: #fff; border-radius: 12px; z-index: 60;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  .modal.open { display: flex; }
+
+  /* WifiRack 6槽阵列 */
+  .rack-6 { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
+  .rack-card {
+    border-radius: 11px; padding: 10px 6px; text-align: center;
+    border: 1.5px solid var(--line); background: #fff;
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+  }
+  .rack-card.online { background: #F2FAF5; border-color: #9ED3B4; }
+  .rack-card.err { background: #FDF4F4; border-color: #EAB6B4; }
+  .rack-uk { width: 100%; padding: 3px 0; border-radius: 5px; font-size: 11px; font-weight: 600; background: #E3F3EA; color: #26734D; }
+  .rack-uk.miss { background: #FBE4E3; color: #A63634; }
+
+  /* 体检明细表（展示多 sheet / 单 sheet 多指标哪列有值、哪列空） */
+  .inspect-box {
+    border: 1px solid var(--line); border-radius: 9px; overflow: hidden; margin-bottom: 14px;
+  }
+  .inspect-head {
+    padding: 8px 12px; background: #FAFBF9; border-bottom: 1px solid var(--line);
+    font-size: 12px; font-weight: 600; color: var(--ink-2);
+    display: flex; justify-content: space-between;
+  }
+  .inspect-row {
+    padding: 8px 12px; border-bottom: 1px solid #F3F4F1; font-size: 12.5px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .inspect-row:last-child { border-bottom: none; }
+
+  .form-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; font-weight: 500; color: var(--ink-2); margin-bottom: 5px; }
+  .input, .select {
+    width: 100%; height: 33px; padding: 0 10px; border-radius: 7px;
+    border: 1px solid var(--line-2); background: #fff; color: var(--ink); outline: none;
+  }
+  .input:focus, .select:focus { border-color: var(--primary); }
+
+  .toast {
+    position: fixed; top: 14px; left: 50%; transform: translate(-50%, -14px);
+    background: #1A1D21; color: #fff; padding: 8px 15px; border-radius: 8px;
+    font-size: 12.5px; box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    z-index: 100; opacity: 0; pointer-events: none; transition: all 0.16s;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  @media (max-width: 1080px) {
+    .task-cards { grid-template-columns: 1fr; }
+    .rack-6 { grid-template-columns: repeat(3, 1fr); }
+    .float-bar { left: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- 左侧栏（0.2.8 风格，日常 4 项 + 底部折叠维护） -->
+  <aside class="sider">
+    <div class="sider-logo">
+      <svg viewBox="0 0 24 24"><path d="M13 2L3 14h8l-1 8 11-12h-8l1-8z"/></svg>
+      <span>电力采集</span>
+    </div>
+
+    <div class="sider-nav">
+      <button class="nav-item active" data-view="matrix" onclick="switchView('matrix')">
+        <span class="nav-item-l">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          数据总览
+        </span>
+        <span class="nav-dot" id="sider-dot"></span>
+      </button>
+      <button class="nav-item" data-view="tasks" onclick="switchView('tasks')">
+        <span class="nav-item-l">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 2v4M16 2v4M3 10h18"/></svg>
+          采集任务
+        </span>
+      </button>
+      <button class="nav-item" data-view="files" onclick="switchView('files')">
+        <span class="nav-item-l">
+          <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          文件中心
+        </span>
+      </button>
+      <button class="nav-item" data-view="logs" onclick="switchView('logs')">
+        <span class="nav-item-l">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
+          执行日志
+        </span>
+      </button>
+    </div>
+
+    <div class="sider-bottom">
+      <button class="sider-btn" onclick="toggleDev()">
+        <span style="display:inline-flex;align-items:center;gap:8px;">
+          <svg viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
+          开发与维护
+        </span>
+        <span id="dev-sign">+</span>
+      </button>
+      <div class="dev-group" id="dev-group">
+        <button class="dev-link" onclick="showToast('指标配置（YAML 工作流）')">指标配置</button>
+        <button class="dev-link" onclick="showToast('录制工坊（HAR 录制）')">录制工坊</button>
+        <button class="dev-link" onclick="showToast('已拉起专用 Chromium 浏览器')">打开专用浏览器</button>
+        <button class="dev-link" onclick="showToast('已导出诊断包 diagnostics_20261126.zip')">下载诊断包</button>
+      </div>
+      <button class="sider-btn" onclick="openModal('settings-modal')">
+        <span style="display:inline-flex;align-items:center;gap:8px;">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          设置
+        </span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- 右侧主体 -->
+  <div class="main">
+    <header class="header">
+      <div class="header-l">
+        <span class="header-title" id="header-title">数据总览</span>
+        <span class="status-pill num">
+          <i class="dot dot-ok"></i>
+          自动值守中 · 08:30–23:30 自动补数（夜间闭站静默）
+        </span>
+      </div>
+      <div class="header-r">
+        <button class="hw-btn err" id="hw-btn" onclick="openHwDrawer()">
+          <span class="slot-bars" id="hdr-bars"></span>
+          <span class="num" id="hdr-hw-text">WifiRack v5 · 5/6 就绪</span>
+        </button>
+        <button class="btn btn-sm" onclick="openModal('catchup-modal')">手动补数据</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- ==================== 1. 数据总览（高密度热力方格 + 直接拖选下载） ==================== -->
+      <section class="view active" id="view-matrix">
+        <div class="hm-toolbar">
+          <div class="scope-tabs" id="scope-tabs"></div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div class="seg">
+              <button id="span-14" onclick="setSpan(14)">14 天</button>
+              <button class="active" id="span-30" onclick="setSpan(30)">30 天</button>
+              <button id="span-60" onclick="setSpan(60)">60 天</button>
+            </div>
+            <button class="btn btn-sm" id="select-mode-btn" onclick="toggleSelectMode()">框选下载</button>
+            <button class="btn btn-sm btn-primary" onclick="autoBackfillNow()">自动补齐缺口</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hm-legend-bar">
+            <div class="legend-group">
+              <span class="lg-item"><i class="lg-box lg-ok"></i> 完整到位</span>
+              <span class="lg-item"><i class="lg-box lg-part"></i> 部分有数（缺 sheet 或缺列）</span>
+              <span class="lg-item"><i class="lg-box lg-empty"></i> 空表头 / 全 0</span>
+              <span class="lg-item"><i class="lg-box lg-miss"></i> 缺失未到</span>
+              <span class="lg-item"><i class="lg-box lg-future"></i> 未到水位期</span>
+              <span class="lg-item"><i class="lg-box lg-upd"></i> 今日覆盖更新</span>
+            </div>
+            <div id="mode-hint" style="font-size:12px;color:var(--ink-3);">
+              单击看文件与空列体检 · 按住拖动框选方格可直接打包下载
+            </div>
+          </div>
+
+          <div class="hm-scroll">
+            <table class="hm-table" id="hm-table"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== 2. 采集任务（回归 0.2.8 统一干净的任务卡） ==================== -->
+      <section class="view" id="view-tasks">
+        <div class="toolbar">
+          <input class="search-box" placeholder="搜索任务名称、指标或备注" />
+          <div style="display:flex;gap:8px;">
+            <button class="btn" onclick="openModal('catchup-modal')">补数据</button>
+            <button class="btn btn-primary" onclick="openTaskModal('new')">+ 新增任务</button>
+          </div>
+        </div>
+
+        <div class="task-cards">
+          <!-- 卡片 1：公有 -->
+          <article class="t-card">
+            <div class="t-head">
+              <div class="t-title">
+                公有
+                <span class="tag tag-blue">任一可用站即止</span>
+                <span class="tag tag-ok">外网自动上传</span>
+              </div>
+              <div style="display:flex;gap:4px;">
+                <button class="btn btn-sm btn-text" onclick="openTaskModal('public')">编辑</button>
+              </div>
+            </div>
+            <div class="info-lines">
+              <div class="info-line"><span class="info-k">定时调度</span><span class="info-v num">每天 08:15 首采 · 11:30 / 15:00 自动回刷覆盖</span></div>
+              <div class="info-line"><span class="info-k">包含指标</span><span class="info-v">10 项平台公有指标（按各自水位线自动追踪补缺）</span></div>
+              <div class="info-line"><span class="info-k">本地存储</span><span class="info-v">公有数据 / {指标} / {YYYY-MM}（上传成功后留 30 天）</span></div>
+              <div class="info-line"><span class="info-k">今日状态</span><span class="info-v num" style="color:#26734D;">08:15 已完成 · 11:32 覆盖更新 2 份 · 2 份待下午回刷</span></div>
+            </div>
+            <div class="t-foot">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <button class="switch on" onclick="this.classList.toggle('on'); showToast('已切换公有任务开关')"></button>
+                <span style="color:#26734D;font-size:12.5px;font-weight:500;">已启用</span>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-sm" onclick="switchView('matrix'); setScope('public')">查看到位图</button>
+                <button class="btn btn-sm btn-primary" onclick="showToast('已启动「公有」采集（自动选用槽 01 阳江明阳）')">立即执行</button>
+              </div>
+            </div>
+          </article>
+
+          <!-- 卡片 2：私有 6 场站（与公有卡片结构 100% 统一！） -->
+          <article class="t-card">
+            <div class="t-head">
+              <div class="t-title">
+                私有 · 现货组
+                <span class="tag">6 站轮询 + 预唤醒</span>
+                <span class="tag">本地留 60 天</span>
+              </div>
+              <div style="display:flex;gap:4px;">
+                <button class="btn btn-sm btn-text" onclick="openTaskModal('private')">编辑</button>
+              </div>
+            </div>
+            <div class="info-lines">
+              <div class="info-line"><span class="info-k">定时调度</span><span class="info-v num">每天 08:30 首采 · 15:00 自动回刷覆盖</span></div>
+              <div class="info-line"><span class="info-k">包含指标</span><span class="info-v">5 项场站私有指标 × 6 个场站（阳江、阳西、韶关、蕴阳、惠州、湛江）</span></div>
+              <div class="info-line"><span class="info-k">本地存储</span><span class="info-v">私有数据 / {场站} / {指标} / {YYYY-MM}（本地滚动 60 天）</span></div>
+              <div class="info-line"><span class="info-k">今日状态</span><span class="info-v num" id="pri-card-status" style="color:#A63634;">5/6 站完成 · 湛江徐闻未插 UKey 已跳过</span></div>
+            </div>
+            <div class="t-foot">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <button class="switch on" onclick="this.classList.toggle('on'); showToast('已切换私有任务开关')"></button>
+                <span style="color:#26734D;font-size:12.5px;font-weight:500;">已启用</span>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-sm" onclick="switchView('matrix'); setScope('st1')">查看到位图</button>
+                <button class="btn btn-sm btn-primary" onclick="showToast('已启动「私有 · 现货组」6 站轮询采集')">立即执行</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ==================== 3. 文件中心 ==================== -->
+      <section class="view" id="view-files">
+        <div class="toolbar">
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-sm" onclick="showToast('已在资源管理器打开 D:\\SpiderData\\')">打开本地目录</button>
+            <button class="btn btn-sm btn-primary" onclick="switchView('matrix'); toggleSelectMode(true)">在总览图框选打包</button>
+          </div>
+          <button class="btn btn-sm btn-text num" onclick="openModal('settings-modal')">本地占用 2.34 GB（公留 30 天 / 私留 60 天）</button>
+        </div>
+        <div class="card">
+          <table class="data-table">
+            <thead><tr><th>目录 / 文件（均为最新覆盖版）</th><th>保留策略</th><th>修改时间</th><th>大小</th><th style="text-align:right;">操作</th></tr></thead>
+            <tbody>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 公有数据')">公有数据</td><td><span class="tag tag-blue">外网上传后留 30 天</span></td><td class="num">今天 11:34</td><td class="num">520 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/阳江明阳')">私有数据 / 阳江明阳</td><td><span class="tag">本地滚动 60 天</span></td><td class="num">今天 11:38</td><td class="num">312 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/蕴阳海风场')">私有数据 / 蕴阳海风场</td><td><span class="tag">本地滚动 60 天</span></td><td class="num">今天 11:41</td><td class="num">298 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/阳西')">私有数据 / 阳西</td><td><span class="tag">本地滚动 60 天</span></td><td class="num">今天 08:38</td><td class="num">290 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/韶关浈江')">私有数据 / 韶关浈江</td><td><span class="tag">本地滚动 60 天</span></td><td class="num">今天 08:42</td><td class="num">288 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/惠州平海')">私有数据 / 惠州平海</td><td><span class="tag">本地滚动 60 天</span></td><td class="num">今天 08:50</td><td class="num">294 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+              <tr><td style="font-weight:500;color:var(--primary);cursor:pointer;" onclick="showToast('打开 私有数据/湛江徐闻')">私有数据 / 湛江徐闻</td><td><span class="tag tag-err">今日缺口（缺 UKey）</span></td><td class="num">昨天 15:02</td><td class="num">286 MB</td><td style="text-align:right;"><button class="btn btn-sm btn-text" onclick="showToast('已在资源管理器打开')">打开目录</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ==================== 4. 执行日志 ==================== -->
+      <section class="view" id="view-logs">
+        <div class="card">
+          <table class="data-table">
+            <thead><tr><th>名称</th><th>类型</th><th>状态</th><th>结果说明</th><th>时间</th></tr></thead>
+            <tbody>
+              <tr><td style="font-weight:500;">公有 · 自动回刷</td><td><span class="tag tag-blue">自动回刷</span></td><td><span class="tag tag-ok">成功</span></td><td>2 份文件哈希变化已覆盖最新（实时列已补齐）并自动重传外网</td><td class="num" style="color:var(--ink-3);">2026-11-26 11:34</td></tr>
+              <tr><td style="font-weight:500;">私有 · 现货组</td><td><span class="tag">定时自动</span></td><td><span class="tag tag-err">部分异常</span></td><td style="color:#A63634;">5/6 站完成；湛江徐闻未检测到 UKey，已跳过并停报重试</td><td class="num" style="color:var(--ink-3);">2026-11-26 08:52</td></tr>
+              <tr><td style="font-weight:500;">公有 · 外网上传</td><td><span class="tag">外网上传</span></td><td><span class="tag tag-ok">成功</span></td><td>10 项最新公有文件已上传至外网接口（本地留存 30 天）</td><td class="num" style="color:var(--ink-3);">2026-11-26 08:28</td></tr>
+              <tr><td style="font-weight:500;">WifiRack v5</td><td><span class="tag">硬件联动</span></td><td><span class="tag tag-ok">成功</span></td><td>COM5 提前唤醒完成，5/6 槽位就绪</td><td class="num" style="color:var(--ink-3);">2026-11-26 08:12</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- 底部悬浮下载条：在热力图上框选任意指标的任意日期后自动浮出，一键打包给甲方！ -->
+<div class="float-bar" id="float-bar">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+    <span class="num" id="sel-summary" style="font-weight:600;font-size:13px;">已选 0 份</span>
+    <label class="multi-st-check" id="apply-all-st-wrap" style="display:none;">
+      <input type="checkbox" id="apply-all-st" onchange="updateFloatBar()" />
+      <span>同步打包全部 6 个场站的相同区间</span>
+    </label>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <button class="btn btn-sm btn-ghost-dark" onclick="clearSelection()">清空</button>
+    <button class="btn btn-sm btn-ghost-dark" id="btn-refetch-sel" style="display:none;" onclick="refetchSelected()">先补齐缺口再打包</button>
+    <button class="btn btn-sm btn-ghost-dark" onclick="downloadSelected('folder')">导出到文件夹</button>
+    <button class="btn btn-sm btn-primary" onclick="downloadSelected('zip')">一键打包下载 ZIP</button>
+  </div>
+</div>
+
+<div class="hm-tip" id="hm-tip"></div>
+<div class="mask" id="mask" onclick="closeAll()"></div>
+
+<!-- 抽屉 1：单格文件详情 + 多 sheet / 多列数据体检 -->
+<div class="drawer" id="cell-drawer">
+  <div class="m-head">
+    <div>
+      <div class="m-title" id="cd-title">文件详情</div>
+      <div style="font-size:12px;color:var(--ink-2);margin-top:2px;" id="cd-sub"></div>
+    </div>
+    <button class="btn btn-sm btn-text" onclick="closeAll()">关闭</button>
+  </div>
+  <div class="m-body" id="cd-body"></div>
+  <div class="m-foot" id="cd-foot"></div>
+</div>
+
+<!-- 抽屉 2：WifiRack v5 × UKey 6 槽 -->
+<div class="drawer wide" id="hw-drawer">
+  <div class="m-head">
+    <div>
+      <div class="m-title">WifiRack v5 工作台与 UKey 状态</div>
+      <div style="font-size:12px;color:var(--ink-2);margin-top:2px;">USB 一线通 COM5 · 专网网卡 WLAN 2 · 有线公网正常 · 固件 v5.0 · 5.14V</div>
+    </div>
+    <button class="btn btn-sm btn-text" onclick="closeAll()">关闭</button>
+  </div>
+  <div class="m-body">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="font-weight:600;">6 槽物理阵列（Wi-Fi 槽位 + 本机 UKey）</span>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-sm" onclick="showToast('已同步 6 站档案与 08:12 离线唤醒到工作台')">同步工作台</button>
+        <button class="btn btn-sm btn-primary" onclick="wakeAll()">一键全唤</button>
+      </div>
+    </div>
+    <div class="rack-6" id="rack-6"></div>
+    <div style="font-size:12.5px;color:var(--ink-2);background:#FAFBF9;border:1px solid var(--line);border-radius:9px;padding:11px 13px;line-height:1.7;">
+      <div><strong>执行前自动唤醒：</strong>定时前 3 分钟离线预热；多站轮询时跑第 N 站自动异步预唤醒第 N+1 站。</div>
+      <div><strong>手机端 H5：</strong><span class="mono">http://wifirack.local</span>（共享同一套场站档案）</div>
+    </div>
+  </div>
+  <div class="m-foot">
+    <button class="btn btn-sm" onclick="toggleSimUkey()">演示：插拔 06 槽 UKey</button>
+    <button class="btn btn-primary" onclick="closeAll()">完成</button>
+  </div>
+</div>
+
+<!-- 弹窗：手动补数据 -->
+<div class="modal" id="catchup-modal" style="width:620px;">
+  <div class="m-head">
+    <span class="m-title">手动补数据（保底）</span>
+    <button class="btn btn-sm btn-text" onclick="closeAll()">关闭</button>
+  </div>
+  <div class="m-body">
+    <div class="form-2">
+      <div class="field"><label>数据范围</label><select class="select"><option>公有数据</option><option>私有 · 全部就绪场站</option><option>私有 · 阳江明阳</option><option>私有 · 蕴阳海风场</option><option>私有 · 湛江徐闻</option></select></div>
+      <div class="field"><label>指标</label><select class="select"><option>信息披露实际信息</option><option>现货分日出清量价</option><option>现货分时分类型出清电量</option><option>场站-日前交易结果</option></select></div>
+      <div class="field"><label>开始日期</label><input class="input num" type="date" value="2026-11-20" /></div>
+      <div class="field"><label>结束日期</label><input class="input num" type="date" value="2026-11-25" /></div>
+    </div>
+    <div style="font-size:12px;color:var(--ink-2);">补下的文件直接对比 SHA256 覆盖最新文件（旧版归档 _versions），热力图对应方格实时更新。</div>
+  </div>
+  <div class="m-foot">
+    <button class="btn" onclick="closeAll()">取消</button>
+    <button class="btn btn-primary" onclick="closeAll(); showToast('已启动手动补数据，工作台自动唤醒对应 Wi-Fi')">开始补数</button>
+  </div>
+</div>
+
+<!-- 弹窗：编辑任务 -->
+<div class="modal" id="task-modal" style="width:660px;">
+  <div class="m-head">
+    <span class="m-title" id="tm-title">编辑采集任务</span>
+    <button class="btn btn-sm btn-text" onclick="closeAll()">关闭</button>
+  </div>
+  <div class="m-body">
+    <div class="form-2">
+      <div class="field"><label>任务名称</label><input class="input" id="tm-name" value="公有" /></div>
+      <div class="field"><label>多场站策略</label><select class="select" id="tm-mode"><option value="public">公有（任一可用站即止 + 外网上传）</option><option value="private">私有（选中场站轮询 + 预唤醒）</option></select></div>
+      <div class="field"><label>每天首采时间</label><input class="input num" type="time" value="08:15" /></div>
+      <div class="field"><label>自动回刷时间（哈希变即覆盖）</label><input class="input num" value="11:30, 15:00" /></div>
+      <div class="field"><label>存储目录结构</label><input class="input mono" value="{公有|私有}/{场站}/{指标}/{YYYY-MM}/" /></div>
+      <div class="field"><label>覆盖更新策略</label><select class="select"><option>哈希变更覆盖最新（旧版存 _versions）</option><option>直接覆盖不留旧版</option></select></div>
+    </div>
+  </div>
+  <div class="m-foot">
+    <button class="btn" onclick="closeAll()">取消</button>
+    <button class="btn btn-primary" onclick="closeAll(); showToast('任务已保存并同步唤醒计划到工作台')">保存</button>
+  </div>
+</div>
+
+<!-- 弹窗：设置 -->
+<div class="modal" id="settings-modal" style="width:660px;">
+  <div class="m-head">
+    <span class="m-title">设置</span>
+    <button class="btn btn-sm btn-text" onclick="closeAll()">关闭</button>
+  </div>
+  <div class="m-body">
+    <div class="form-2">
+      <div class="field" style="grid-column:1 / -1;"><label>本地数据根目录</label><input class="input mono" value="D:\SpiderData\" /></div>
+      <div class="field"><label>公有数据本地保留（已上传才清）</label><input class="input num" value="30 天" /></div>
+      <div class="field"><label>私有数据本地滚动保留</label><input class="input num" value="60 天" /></div>
+      <div class="field"><label>夜间闭站时段（静默不访问）</label><input class="input num" value="00:00 – 08:00" /></div>
+      <div class="field"><label>自动补数窗口</label><input class="input num" value="08:30 – 23:30" /></div>
+      <div class="field"><label>工作台连接</label><input class="input" value="自动（优先 USB COM5，回退 HTTP）" /></div>
+      <div class="field"><label>专网无线网卡（内置）</label><input class="input" value="WLAN 2（自动识别）" /></div>
+    </div>
+  </div>
+  <div class="m-foot">
+    <button class="btn" onclick="closeAll()">取消</button>
+    <button class="btn btn-primary" onclick="closeAll(); showToast('设置已保存')">保存</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ==================== 构造 60 天真实业务日期（基准日 2026-11-26，对齐私有 60 天滚动仓） ====================
+const ALL_DATES = [];
+for (let i = 59; i >= 0; i--) {
+  const d = new Date('2026-11-26T00:00:00');
+  d.setDate(d.getDate() - i);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  ALL_DATES.push(`${mm}-${dd}`);
+}
+const TODAY_IDX = ALL_DATES.length - 1; // 11-26
+
+const STATIONS = [
+  { id: 'st1', slot: 1, name: '阳江明阳', ssid: 'HUAWEI-YJ01', online: true,  batt: 88, chg: false, ukey: true },
+  { id: 'st2', slot: 2, name: '阳西',     ssid: 'HUAWEI-YX02', online: true,  batt: 76, chg: true,  ukey: true },
+  { id: 'st3', slot: 3, name: '韶关浈江', ssid: 'HUAWEI-SG03', online: false, batt: 64, chg: false, ukey: true },
+  { id: 'st4', slot: 4, name: '蕴阳海风场', ssid: 'HUAWEI-YY04', online: true,  batt: 92, chg: false, ukey: true },
+  { id: 'st5', slot: 5, name: '惠州平海', ssid: 'HUAWEI-HZ05', online: false, batt: 53, chg: true,  ukey: true },
+  { id: 'st6', slot: 6, name: '湛江徐闻', ssid: 'HUAWEI-ZJ06', online: true,  batt: 81, chg: false, ukey: false },
+];
+
+const PUB_DEFS = [
+  { id: 'pub_da_node',   name: '日前节点电价查询',         lag: -1, size: '1.06 MB', file: '日前节点电价查询(2026-{d}).xlsx' },
+  { id: 'pub_rt_node',   name: '实时节点电价查询',         lag: -2, size: '1.14 MB', file: '实时节点电价查询(2026-{d}).xlsx' },
+  { id: 'pub_spot_day',  name: '现货分日出清量价',         lag: -1, size: '20.8 KB', file: '现货分日出清量价-按日(2026-{d}).xlsx' },
+  { id: 'pub_type_da',   name: '现货分时分类型 · 日前',    lag: -1, size: '11.5 KB', file: '现货分时分类型出清电量_日前(2026-{d}).xlsx' },
+  { id: 'pub_type_rt',   name: '现货分时分类型 · 实时',    lag: -2, size: '10.3 KB', file: '现货分时分类型出清电量_实时(2026-{d}).xlsx' },
+  { id: 'pub_mkt_load',  name: '市场用电信息',             lag: -1, size: '5.4 KB',  file: '市场用电信息(2026-{d}).xlsx' },
+  { id: 'pub_disc_pred', name: '信息披露查询预测信息',     lag: -1, size: '193 KB',  file: '信息披露查询预测信息(2026-{d}).xlsx' },
+  { id: 'pub_disc_act',  name: '信息披露查询实际信息',     lag: -5, size: '148 KB',  file: '信息披露查询实际信息(2026-{d}).xlsx' },
+  { id: 'pub_daily_stl', name: '日清算概况 / 统一结算价',  lag: -2, size: '8.9 KB',  file: '日清算概况_2026-{d}.xlsx' },
+  { id: 'pub_report',    name: '运行日报 (PDF)',           lag: -1, size: '2.9 MB',  file: '广东电力现货市场运行日报(2026-{d}).pdf' },
+];
+
+const PRI_DEFS = [
+  { id: 'pri_da',     name: '场站-日前交易结果发电侧', lag: 0,  size: '4.6 KB', file: '日前交易结果查询(2026-{d}).xlsx' },
+  { id: 'pri_actual', name: '场站-实际运行结果发电侧', lag: -1, size: '5.8 KB', file: '实际运行结果(2026-{d}).xlsx' },
+  { id: 'pri_disc',   name: '场站-信息披露实际数据',   lag: -5, size: '150 KB', file: '信息披露查询实际信息(2026-{d}).xlsx' },
+  { id: 'pri_dset',   name: '结算管理-日清结果结算单', lag: -2, size: '28 KB',  file: '电能量日清算查询(2026-{d}).xlsx' },
+  { id: 'pri_mset',   name: '结算管理-月结算单 (10月)', lag: -1, size: '129 KB', file: '现货可再生机组结算单_2026-10.zip' },
+];
+
+// 生成矩阵数据（含真实的「多 sheet 缺部分」「单 sheet 双指标缺一半」「空表头」「今日覆盖更新」案例）
+const DATA = { public: {} };
+PUB_DEFS.forEach(def => {
+  DATA.public[def.id] = {};
+  const cutoff = TODAY_IDX + def.lag;
+  ALL_DATES.forEach((d, idx) => {
+    if (idx > cutoff) { DATA.public[def.id][d] = { s: 'future' }; return; }
+    let cell = {
+      s: 'ok', size: def.size, hash: 'a91f' + idx + def.id.slice(-3), time: '08:18', uploaded: true,
+      inspect: [{ sheet: 'Sheet1 · 全部字段', status: 'ok', detail: '全部数值列非空' }]
+    };
+    // 典型场景 1：单 sheet 中两个指标，一个有值一个没值（现货分日出清量价 11-25：日前有值，实时两列空）
+    if (def.id === 'pub_spot_day' && d === '11-25') {
+      cell = {
+        s: 'partial', size: '19.1 KB', hash: 'b201c88e', time: '08:21', uploaded: true,
+        summary: '单 Sheet 4 数值列中 2 列为空',
+        inspect: [
+          { sheet: '现货分日出清量价 · 日前申报/出清均价、电量', status: 'ok', detail: '填充率 100%（有有效值）' },
+          { sheet: '现货分日出清量价 · 实时出清均价、实时电量', status: 'empty', detail: '填充率 0%（空单元格 / 字符 0）' },
+        ]
+      };
+    }
+    // 典型场景 2：多 sheet 中部分 sheet 只有表头（信息披露预测 11-25）
+    if (def.id === 'pub_disc_pred' && d === '11-25') {
+      cell = {
+        s: 'partial', size: '176 KB', hash: '32afe8ca', time: '08:22', uploaded: true,
+        summary: '17 个 Sheet 中 4 个仅含表头',
+        inspect: [
+          { sheet: '负荷预测 / 新能源 / 水电 / 检修等 13 个 Sheet', status: 'ok', detail: '有效数据行正常' },
+          { sheet: '日前出清-机组详情 / 节点详情 / 阻塞断面等 4 Sheet', status: 'empty', detail: '仅表头 0 数据行' },
+        ]
+      };
+    }
+    // 典型场景 3：整份文件存在但 8 个 sheet 全空（实时分类型 11-24）
+    if (def.id === 'pub_type_rt' && d === '11-24') {
+      cell = {
+        s: 'empty', size: '10.3 KB', hash: '5c285f3e', time: '11:30', uploaded: false,
+        summary: '8 个 Sheet 仅有 24 时刻骨架，电量为 0/空',
+        inspect: [
+          { sheet: '全部 / 燃煤 / 燃气 / 风电 / 太阳能 / 核电 / 储能 / 抽蓄', status: 'empty', detail: '24 时刻行存在，电量与开机台数列全空' },
+        ]
+      };
+    }
+    // 典型场景 4：D-5 指标 11-21 早上仅表头，等待下午 15:00 回刷覆盖
+    if (def.id === 'pub_disc_act' && d === '11-21') {
+      cell = {
+        s: 'empty', size: '9.2 KB', hash: 'd9c78d52', time: '11:34', uploaded: false,
+        summary: '5 个 Sheet 全部仅含表头（0 数据行）',
+        inspect: [
+          { sheet: '实际机组出力计划 / 偏差考核等 5 个 Sheet', status: 'empty', detail: '仅表头 0 数据行，15:00 自动回刷覆盖' },
+        ]
+      };
+    }
+    // 典型场景 5：今日回刷发生哈希变更并已覆盖变绿（日清算概况 11-24、市场用电 11-24）
+    if ((def.id === 'pub_daily_stl' && d === '11-24') || (def.id === 'pub_mkt_load' && d === '11-24')) {
+      cell.updated = true;
+      cell.time = '11:32';
+      cell.prevHash = '3ab9b842';
+      cell.inspect = [{ sheet: '全部指标列', status: 'ok', detail: '08:23 全 0 占位 → 11:32 哈希变更已覆盖最新' }];
+    }
+    // 典型场景 6：缺失（运行日报 11-25 暂未下载到）
+    if (def.id === 'pub_report' && d === '11-25') {
+      cell = {
+        s: 'miss', size: '—', hash: '', time: '11:34', uploaded: false,
+        summary: '已过水位截止，本地无该日文件',
+        inspect: [{ sheet: 'PDF 文件缺失', status: 'miss', detail: '平台暂未生成或网络中断，15:00 自动重试' }]
+      };
+    }
+    DATA.public[def.id][d] = cell;
+  });
+});
+
+STATIONS.forEach(st => {
+  DATA[st.id] = {};
+  PRI_DEFS.forEach(def => {
+    DATA[st.id][def.id] = {};
+    const cutoff = TODAY_IDX + def.lag;
+    ALL_DATES.forEach((d, idx) => {
+      if (idx > cutoff) { DATA[st.id][def.id][d] = { s: 'future' }; return; }
+      let cell = {
+        s: 'ok', size: def.size, hash: `${st.id}${idx}f1`, time: '08:38',
+        inspect: [{ sheet: 'Sheet1 · 全部指标列', status: 'ok', detail: '有效数据行正常' }]
+      };
+      // 阳江 11-21 (D-5) 披露实际空表
+      if (st.id === 'st1' && def.id === 'pri_disc' && d === '11-21') {
+        cell = {
+          s: 'empty', size: '9.1 KB', hash: 'yj_empty_21', time: '11:38',
+          summary: '仅含表头 0 数据行，15:00 自动回刷覆盖',
+          inspect: [{ sheet: '信息披露实际 5 个 Sheet', status: 'empty', detail: '0 数据行（基线大小 150 KB）' }]
+        };
+      }
+      // 蕴阳 11-21 今日已覆盖更新
+      if (st.id === 'st4' && def.id === 'pri_disc' && d === '11-21') {
+        cell.updated = true; cell.time = '11:41'; cell.prevHash = 'yy_old_21';
+      }
+      // 湛江徐闻（缺 UKey）今天应到的 3 天缺口
+      if (st.id === 'st6' && !st.ukey && idx === cutoff && def.id !== 'pri_mset') {
+        cell = {
+          s: 'miss', size: '—', hash: '', time: '08:52',
+          summary: '硬件阻断：06 槽未检测到 UKey',
+          inspect: [{ sheet: '未采集', status: 'miss', detail: '请插入湛江徐闻 UKey 后自动补齐' }]
+        };
+      }
+      DATA[st.id][def.id][d] = cell;
+    });
+  });
+});
+
+// ==================== 状态变量 ====================
+let currentScope = 'public'; // 'public' | 'st1'..'st6' | 'all_private'
+let spanDays = 30;
+let selectMode = false;
+let isDragging = false;
+let dragAnchor = null;
+let dragAdd = true;
+const selectedKeys = new Set(); // `${scope}|${indId}|${date}`
+let activeDrawerCtx = null;
+
+function switchView(v) {
+  document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
+  document.getElementById('view-' + v).classList.add('active');
+  document.querySelectorAll('.nav-item[data-view]').forEach(el => el.classList.toggle('active', el.dataset.view === v));
+  const titles = { matrix: '数据总览', tasks: '采集任务', files: '文件中心', logs: '执行日志' };
+  document.getElementById('header-title').textContent = titles[v];
+  if (v !== 'matrix') document.getElementById('float-bar').classList.remove('show');
+  else updateFloatBar();
+}
+
+function toggleDev() {
+  const open = document.getElementById('dev-group').classList.toggle('open');
+  document.getElementById('dev-sign').textContent = open ? '−' : '+';
+}
+
+function renderHeaderHw() {
+  const okN = STATIONS.filter(s => s.ukey).length;
+  const err = okN < STATIONS.length;
+  document.getElementById('hw-btn').classList.toggle('err', err);
+  document.getElementById('hdr-hw-text').textContent = `WifiRack v5 · ${okN}/6 就绪`;
+  document.getElementById('sider-dot').style.display = err ? 'inline-block' : 'none';
+  document.getElementById('hdr-bars').innerHTML = STATIONS.map(s => `<i class="${!s.ukey ? 'err' : (s.online ? '' : 'sleep')}"></i>`).join('');
+  document.getElementById('pri-card-status').textContent = err ? `${okN}/6 站完成 · 湛江徐闻未插 UKey 已跳过` : '6/6 站全部完成';
+  document.getElementById('pri-card-status').style.color = err ? '#A63634' : '#26734D';
+}
+
+function countIssues(scope) {
+  const defs = scope === 'public' ? PUB_DEFS : PRI_DEFS;
+  let miss = 0, part = 0;
+  defs.forEach(def => {
+    const c = DATA[scope][def.id][ALL_DATES[TODAY_IDX + def.lag]];
+    if (!c) return;
+    if (c.s === 'miss') miss++;
+    if (c.s === 'empty' || c.s === 'partial') part++;
+  });
+  return { miss, part };
+}
+
+function renderScopeTabs() {
+  const pubI = countIssues('public');
+  const html = [
+    `<button class="scope-btn ${currentScope==='public'?'active':''}" onclick="setScope('public')">
+      公有数据 ${pubI.miss ? '<i class="dot dot-err"></i>' : (pubI.part ? '<i class="dot dot-warn"></i>' : '')}
+    </button>`,
+    `<span class="scope-sep"></span>`,
+    ...STATIONS.map(s => {
+      const it = countIssues(s.id);
+      const dot = (!s.ukey || it.miss) ? '<i class="dot dot-err"></i>' : (it.part ? '<i class="dot dot-warn"></i>' : '<i class="dot dot-ok"></i>');
+      return `<button class="scope-btn ${currentScope===s.id?'active':''}" onclick="setScope('${s.id}')">${dot}${s.name}</button>`;
+    }),
+    `<span class="scope-sep"></span>`,
+    `<button class="scope-btn ${currentScope==='all_private'?'active':''}" onclick="setScope('all_private')">全部 6 站总览</button>`
+  ].join('');
+  document.getElementById('scope-tabs').innerHTML = html;
+}
+
+function setScope(sc) {
+  currentScope = sc;
+  renderScopeTabs();
+  renderHeatmap();
+  updateFloatBar();
+}
+
+function setSpan(days) {
+  spanDays = days;
+  [14, 30, 60].forEach(d => document.getElementById('span-' + d).classList.toggle('active', d === days));
+  renderHeatmap();
+}
+
+function toggleSelectMode(force) {
+  selectMode = typeof force === 'boolean' ? force : !selectMode;
+  const btn = document.getElementById('select-mode-btn');
+  btn.classList.toggle('btn-primary', selectMode);
+  btn.textContent = selectMode ? '退出框选' : '框选下载';
+  document.getElementById('mode-hint').textContent = selectMode
+    ? '框选模式：单击或按住拖动选择任意指标的任意日期，下方一键打包下载 ZIP'
+    : '单击看文件与空列体检 · 按住拖动框选方格可直接打包下载';
+  if (selectMode && selectedKeys.size === 0) {
+    showToast('在方格上按住鼠标拖动，即可圈选任意指标的不同时间段打包下载');
+  }
+}
+
+// ==================== 渲染高密度正方形热力矩阵（两级合并月表头 + 月间自然分隔） ====================
+function renderHeatmap() {
+  const dates = ALL_DATES.slice(-spanDays);
+  const tbl = document.getElementById('hm-table');
+  tbl.className = `hm-table span-${spanDays}`;
+
+  // 按月份分组，自动生成合并表头和月间分隔列
+  const groups = [];
+  dates.forEach((d) => {
+    const m = d.slice(0, 2);
+    if (!groups.length || groups[groups.length - 1].month !== m) {
+      groups.push({ month: m, days: [d] });
+    } else {
+      groups[groups.length - 1].days.push(d);
+    }
+  });
+
+  // 第一行表头：月份合并格 + 月间分隔列
+  const monthRowCells = groups.map((g, gi) => {
+    const label = g.days.length >= 3 ? `2026年${parseInt(g.month, 10)}月` : `${parseInt(g.month, 10)}月`;
+    const gap = gi > 0 ? '<th class="month-gap"></th>' : '';
+    return `${gap}<th class="col-month num" colspan="${g.days.length}">${label}</th>`;
+  }).join('');
+
+  // 第二行表头：仅显示两位日号（保证所有列等宽，绝不撑出意外空隙）
+  const dayRowCells = groups.map((g, gi) => {
+    const gap = gi > 0 ? '<th class="month-gap"></th>' : '';
+    const daysHtml = g.days.map((d) => {
+      const dayNum = parseInt(d.slice(3), 10);
+      const isToday = d === '11-26';
+      let label = d.slice(3);
+      if (spanDays === 60) {
+        label = (isToday || dayNum === 1 || dayNum % 5 === 0) ? d.slice(3) : '';
+      }
+      return `<th class="col-day num ${isToday ? 'today-col' : ''}" title="2026-${d}">${label}</th>`;
+    }).join('');
+    return gap + daysHtml;
+  }).join('');
+
+  const totalCols = dates.length + (groups.length - 1) + 2;
+
+  const buildRows = (scope, defs) => defs.map(def => {
+    const lagLabel = def.lag === 0 ? 'D' : `D${def.lag}`;
+    let okCnt = 0, expCnt = 0;
+    const cells = groups.map((g, gi) => {
+      const gap = gi > 0 ? '<td class="month-gap"></td>' : '';
+      const groupCells = g.days.map(d => {
+        const c = DATA[scope][def.id][d];
+        if (c.s !== 'future') {
+          expCnt++;
+          if (c.s === 'ok') okCnt++;
+        }
+        const key = `${scope}|${def.id}|${d}`;
+        const sel = selectedKeys.has(key);
+        const cls = `hm-cell ${c.s}${c.updated ? ' updated' : ''}${sel ? ' selected' : ''}`;
+        return `
+          <td>
+            <div class="${cls}"
+              data-scope="${scope}" data-ind="${def.id}" data-date="${d}"
+              onmouseenter="showTip(event, '${scope}', '${def.id}', '${d}')"
+              onmousemove="moveTip(event)"
+              onmouseleave="hideTip()"
+              onmousedown="cellMouseDown(event, '${scope}', '${def.id}', '${d}')"
+              onmouseover="cellMouseOver('${scope}', '${def.id}', '${d}')">
+            </div>
+          </td>
+        `;
+      }).join('');
+      return gap + groupCells;
+    }).join('');
+    const statColor = okCnt === expCnt ? '#3C8C62' : '#A63634';
+    return `
+      <tr>
+        <td class="ind-cell">
+          <div class="ind-row-wrap">
+            <span class="ind-title" title="${def.name}">${def.name}</span>
+            <div style="display:flex;align-items:center;gap:4px;">
+              <button class="ind-row-btn" onclick="selectWholeRow('${scope}', '${def.id}')" title="选中该指标已到位的近7天">选7天</button>
+              <span class="ind-lag num">${lagLabel}</span>
+            </div>
+          </div>
+        </td>
+        ${cells}
+        <td class="stat-cell num" style="color:${statColor};font-weight:600;">${okCnt}/${expCnt}</td>
+      </tr>
+    `;
+  }).join('');
+
+  let bodyHtml = '';
+  if (currentScope === 'all_private') {
+    STATIONS.forEach(st => {
+      bodyHtml += `
+        <tr class="st-group-row">
+          <td colspan="${totalCols}">
+            <span style="display:inline-flex;align-items:center;gap:6px;">
+              <i class="dot ${st.ukey ? 'dot-ok' : 'dot-err'}"></i>
+              0${st.slot} ${st.name}
+              <span style="font-weight:400;color:var(--ink-3);font-size:11.5px;">${st.ukey ? 'Wi-Fi / UKey 正常' : '未插 UKey'}</span>
+            </span>
+          </td>
+        </tr>
+      `;
+      bodyHtml += buildRows(st.id, PRI_DEFS);
+    });
+  } else {
+    const defs = currentScope === 'public' ? PUB_DEFS : PRI_DEFS;
+    bodyHtml = buildRows(currentScope, defs);
+  }
+
+  tbl.innerHTML = `
+    <thead>
+      <tr>
+        <th class="col-ind" rowspan="2">${currentScope==='public' ? '公有指标（外网上传 · 留 30 天）' : (currentScope==='all_private' ? '全部 6 场站指标（留 60 天）' : STATIONS.find(s=>s.id===currentScope).name + ' · 私有指标（留 60 天）')}</th>
+        ${monthRowCells}
+        <th class="col-stat" rowspan="2">完整</th>
+      </tr>
+      <tr>
+        ${dayRowCells}
+      </tr>
+    </thead>
+    <tbody>${bodyHtml}</tbody>
+  `;
+}
+
+// ==================== 丝滑拖选 & 单击详情 ====================
+let dragMoved = false;
+function cellMouseDown(e, scope, indId, d) {
+  const c = DATA[scope][indId][d];
+  if (c.s === 'future') return;
+  if (e.button !== 0) return;
+  isDragging = true;
+  dragMoved = false;
+  dragAnchor = { scope, indId, d };
+  const key = `${scope}|${indId}|${d}`;
+  dragAdd = !selectedKeys.has(key);
+  if (selectMode) {
+    applySelectKey(key, dragAdd);
+    renderSelectionVisuals();
+  }
+}
+
+function cellMouseOver(scope, indId, d) {
+  if (!isDragging || !dragAnchor) return;
+  const c = DATA[scope][indId][d];
+  if (c.s === 'future') return;
+  if (dragAnchor.scope !== scope || dragAnchor.indId !== indId) return;
+  if (dragAnchor.d !== d) dragMoved = true;
+
+  // 同一指标行连续区间选中！
+  const dates = ALL_DATES.slice(-spanDays);
+  const i1 = dates.indexOf(dragAnchor.d);
+  const i2 = dates.indexOf(d);
+  const [lo, hi] = i1 <= i2 ? [i1, i2] : [i2, i1];
+  for (let i = lo; i <= hi; i++) {
+    const dd = dates[i];
+    if (DATA[scope][indId][dd].s !== 'future') {
+      applySelectKey(`${scope}|${indId}|${dd}`, dragAdd);
+    }
+  }
+  renderSelectionVisuals();
+}
+
+window.addEventListener('mouseup', () => {
+  if (!isDragging) return;
+  const wasDrag = dragMoved;
+  const anchor = dragAnchor;
+  isDragging = false;
+  dragAnchor = null;
+  if (!wasDrag && !selectMode && anchor) {
+    openCellDrawer(anchor.scope, anchor.indId, anchor.d);
+  }
+});
+
+function applySelectKey(key, add) {
+  if (add) selectedKeys.add(key);
+  else selectedKeys.delete(key);
+}
+
+function selectWholeRow(scope, indId) {
+  const defs = scope === 'public' ? PUB_DEFS : PRI_DEFS;
+  const def = defs.find(x => x.id === indId);
+  const end = TODAY_IDX + def.lag;
+  for (let i = Math.max(0, end - 6); i <= end; i++) {
+    selectedKeys.add(`${scope}|${indId}|${ALL_DATES[i]}`);
+  }
+  renderSelectionVisuals();
+  showToast(`已选中「${def.name}」近 7 天，可继续拖选其他指标一起打包`);
+}
+
+function renderSelectionVisuals() {
+  document.querySelectorAll('.hm-cell').forEach(el => {
+    const key = `${el.dataset.scope}|${el.dataset.ind}|${el.dataset.date}`;
+    el.classList.toggle('selected', selectedKeys.has(key));
+  });
+  updateFloatBar();
+}
+
+function updateFloatBar() {
+  const bar = document.getElementById('float-bar');
+  const count = selectedKeys.size;
+  if (count === 0) { bar.classList.remove('show'); return; }
+  let ok = 0, part = 0, miss = 0, hasPrivate = false;
+  selectedKeys.forEach(k => {
+    const [sc, ind, d] = k.split('|');
+    if (sc !== 'public') hasPrivate = true;
+    const c = DATA[sc][ind][d];
+    if (c.s === 'ok') ok++;
+    else if (c.s === 'miss') miss++;
+    else part++;
+  });
+  const mult = (hasPrivate && document.getElementById('apply-all-st').checked) ? 6 : 1;
+  document.getElementById('apply-all-st-wrap').style.display = hasPrivate ? 'inline-flex' : 'none';
+  document.getElementById('sel-summary').textContent =
+    `已选 ${count * mult} 份文件（完整 ${ok * mult}${part ? ` · 残缺/空表 ${part * mult}` : ''}${miss ? ` · 缺失 ${miss * mult}` : ''}）`;
+  document.getElementById('btn-refetch-sel').style.display = (part + miss) > 0 ? 'inline-flex' : 'none';
+  bar.classList.add('show');
+}
+
+function clearSelection() {
+  selectedKeys.clear();
+  document.getElementById('apply-all-st').checked = false;
+  renderSelectionVisuals();
+}
+
+function downloadSelected(mode) {
+  const n = selectedKeys.size * (document.getElementById('apply-all-st').checked ? 6 : 1);
+  showToast(mode === 'zip'
+    ? `已打包 ${n} 份最新覆盖版文件：数据取数包_20261126.zip（已定位到资源管理器）`
+    : `已导出 ${n} 份最新文件到 D:\\SpiderData\\_导出包\\20261126\\`);
+  clearSelection();
+}
+
+function refetchSelected() {
+  selectedKeys.forEach(k => {
+    const [sc, ind, d] = k.split('|');
+    const c = DATA[sc][ind][d];
+    if (c.s !== 'ok') {
+      DATA[sc][ind][d] = {
+        s: 'ok', size: '149 KB', hash: 'new99a12', time: '刚刚', uploaded: sc==='public', updated: true,
+        inspect: [{ sheet: '全部 Sheet 与数值列', status: 'ok', detail: '重采后全部有值，已覆盖本地最新文件' }]
+      };
+    }
+  });
+  renderScopeTabs(); renderHeatmap(); renderSelectionVisuals();
+  showToast('已定向重采补齐残缺/缺失项并覆盖最新文件，现可一键打包 ZIP！');
+}
+
+// ==================== 轻量悬浮 Tooltip ====================
+const tipEl = document.getElementById('hm-tip');
+function showTip(e, scope, indId, d) {
+  const defs = scope === 'public' ? PUB_DEFS : PRI_DEFS;
+  const def = defs.find(x => x.id === indId);
+  const c = DATA[scope][indId][d];
+  const owner = scope === 'public' ? '公有' : STATIONS.find(s => s.id === scope).name;
+  const labels = { ok: '完整到位', partial: '部分有数（缺 sheet 或缺列）', empty: '纯空表头 / 全 0', miss: '缺失未到', future: '未到平台公布水位' };
+  tipEl.innerHTML = `
+    <div style="font-weight:600;">${owner} · ${def.name}</div>
+    <div class="tip-sub num">2026-${d} · ${labels[c.s]}${c.updated ? ' · 今日已覆盖' : ''}</div>
+    ${c.summary ? `<div style="margin-top:4px;color:#F8D488;">${c.summary}</div>` : ''}
+    ${c.s === 'ok' ? `<div class="tip-sub num" style="margin-top:2px;">${c.size} · 更新于 ${c.time}${c.uploaded ? ' · 外网已传' : ''}</div>` : ''}
+  `;
+  tipEl.style.display = 'block';
+  moveTip(e);
+}
+function moveTip(e) {
+  const x = Math.min(window.innerWidth - 295, e.clientX + 14);
+  const y = Math.min(window.innerHeight - 110, e.clientY + 14);
+  tipEl.style.left = x + 'px';
+  tipEl.style.top = y + 'px';
+}
+function hideTip() { tipEl.style.display = 'none'; }
+
+// ==================== 单格抽屉（含多 sheet / 单 sheet 多列体检明细） ====================
+function openCellDrawer(scope, indId, d) {
+  hideTip();
+  activeDrawerCtx = { scope, indId, d };
+  const defs = scope === 'public' ? PUB_DEFS : PRI_DEFS;
+  const def = defs.find(x => x.id === indId);
+  const c = DATA[scope][indId][d];
+  const owner = scope === 'public' ? '公有数据' : STATIONS.find(s => s.id === scope).name;
+  const fileName = def.file.replace('{d}', d);
+
+  document.getElementById('cd-title').textContent = def.name;
+  document.getElementById('cd-sub').textContent = `${owner} · 业务日期 2026-${d} · 应更新水位 ${def.lag===0?'D':'D'+def.lag}`;
+
+  const inspectHtml = (c.inspect || []).map(row => `
+    <div class="inspect-row">
+      <div>
+        <div style="font-weight:500;">${row.sheet}</div>
+        <div style="font-size:11.5px;color:var(--ink-3);">${row.detail}</div>
+      </div>
+      <span class="tag ${row.status==='ok'?'tag-ok':(row.status==='miss'?'tag-err':'')}" style="${row.status==='empty'?'background:#FDF5E6;color:#9A6B16;':''}">
+        ${row.status==='ok' ? '有数据' : (row.status==='miss' ? '缺失' : '空值')}
+      </span>
+    </div>
+  `).join('');
+
+  document.getElementById('cd-body').innerHTML = `
+    <div class="inspect-box">
+      <div class="inspect-head"><span>内容完整度体检（自动按 Sheet 与数值列扫描）</span><span class="num">${c.size || '—'}</span></div>
+      ${inspectHtml}
+    </div>
+    <div style="display:grid;grid-template-columns:86px 1fr;row-gap:9px;font-size:12.5px;margin-bottom:14px;">
+      <div style="color:var(--ink-3);">最新文件</div><div class="mono">${fileName}</div>
+      <div style="color:var(--ink-3);">SHA256</div><div class="mono">${c.hash || '—'}${c.prevHash ? `（覆盖自 ${c.prevHash}）` : ''}</div>
+      <div style="color:var(--ink-3);">最近同步</div><div class="num">${c.time || '—'}</div>
+      ${scope==='public' ? `<div style="color:var(--ink-3);">外网上传</div><div>${c.uploaded ? '已上传最新覆盖版（本地留 30 天）' : '待补齐后自动上传'}</div>` : `<div style="color:var(--ink-3);">本地维护</div><div>滚动保留 60 天（覆盖旧版存 _versions）</div>`}
+    </div>
+  `;
+
+  document.getElementById('cd-foot').innerHTML = `
+    ${(c.s === 'partial' || c.s === 'empty') ? `<button class="btn btn-sm" onclick="markAsOk()">空列属正常（设为完整）</button>` : ''}
+    ${c.s !== 'miss' ? `<button class="btn btn-sm" onclick="showToast('已直接打开/下载：${fileName}')">打开 / 下载</button>` : ''}
+    <button class="btn btn-sm btn-primary" onclick="refetchOneCell()">重采并对比覆盖</button>
+  `;
+  openDrawer('cell-drawer');
+}
+
+function refetchOneCell() {
+  if (!activeDrawerCtx) return;
+  const { scope, indId, d } = activeDrawerCtx;
+  if (scope !== 'public' && !STATIONS.find(s => s.id === scope).ukey) {
+    showToast('该场站未插 UKey，请先检查顶栏工作台状态');
+    return;
+  }
+  DATA[scope][indId][d] = {
+    s: 'ok', size: '149 KB', hash: 'f91a20cc', prevHash: DATA[scope][indId][d].hash || '', time: '刚刚',
+    uploaded: scope === 'public', updated: true,
+    inspect: [{ sheet: '全部 Sheet 与数值列', status: 'ok', detail: '重采检出完整数据，哈希变更已覆盖最新文件' }]
+  };
+  closeAll();
+  renderScopeTabs(); renderHeatmap();
+  showToast('已重采覆盖最新文件，方格已转为完整（带今日覆盖角标）');
+}
+
+function markAsOk() {
+  if (!activeDrawerCtx) return;
+  const { scope, indId, d } = activeDrawerCtx;
+  DATA[scope][indId][d].s = 'ok';
+  DATA[scope][indId][d].summary = '';
+  DATA[scope][indId][d].inspect = [{ sheet: '已确认正常', status: 'ok', detail: '该空列已加入白名单，不再触发回刷与告警' }];
+  closeAll();
+  renderScopeTabs(); renderHeatmap();
+  showToast('已标记为正常，后续不再误报');
+}
+
+function autoBackfillNow() {
+  DATA.public.pub_disc_act['11-21'] = {
+    s: 'ok', size: '151 KB', hash: 'c102ff9a', prevHash: 'd9c78d52', time: '刚刚', uploaded: true, updated: true,
+    inspect: [{ sheet: '全部 5 个 Sheet', status: 'ok', detail: '15:00 回刷检出完整数据，已覆盖并上传外网' }]
+  };
+  DATA.public.pub_spot_day['11-25'] = {
+    s: 'ok', size: '21.4 KB', hash: '8a44ee10', prevHash: 'b201c88e', time: '刚刚', uploaded: true, updated: true,
+    inspect: [{ sheet: '现货分日出清量价 · 日前 + 实时 4 列', status: 'ok', detail: '实时均价与电量已补齐，已覆盖并重传外网' }]
+  };
+  renderScopeTabs(); renderHeatmap();
+  showToast('自动巡检完成：2 份残缺/空表已检出新数据，哈希变更覆盖并翻绿');
+}
+
+// ==================== WifiRack 硬件抽屉 ====================
+function openHwDrawer() {
+  document.getElementById('rack-6').innerHTML = STATIONS.map(s => `
+    <div class="rack-card ${!s.ukey ? 'err' : (s.online ? 'online' : '')}">
+      <div class="num" style="font-size:11px;font-weight:700;color:var(--ink-3);">槽 0${s.slot}${s.chg ? ' · 充' : ''}</div>
+      <div style="font-size:12px;font-weight:700;">${s.name}</div>
+      <div class="num" style="font-size:11px;color:var(--ink-2);">${s.online ? '可搜到' : '休眠'} · ${s.batt}%</div>
+      <div class="rack-uk ${s.ukey ? '' : 'miss'}">${s.ukey ? 'UKey 正常' : '未插 UKey'}</div>
+      <button class="btn btn-sm" style="width:100%;justify-content:center;height:24px;font-size:11px;" onclick="wakeOne(${s.slot})">${s.online ? '已在线' : '唤醒'}</button>
+    </div>
+  `).join('');
+  openDrawer('hw-drawer');
+}
+function wakeOne(slot) {
+  const s = STATIONS.find(x => x.slot === slot);
+  s.online = true;
+  renderHeaderHw(); openHwDrawer();
+  showToast(`已唤醒槽 0${slot}（${s.name}）`);
+}
+function wakeAll() {
+  STATIONS.forEach(s => s.online = true);
+  renderHeaderHw(); openHwDrawer();
+  showToast('已下发全槽唤醒');
+}
+function toggleSimUkey() {
+  const s = STATIONS[5];
+  s.ukey = !s.ukey;
+  PRI_DEFS.forEach(def => {
+    if (def.id === 'pri_mset') return;
+    const d = ALL_DATES[TODAY_IDX + def.lag];
+    DATA.st6[def.id][d] = s.ukey
+      ? { s: 'ok', size: def.size, hash: 'zj_ok_now', time: '刚刚', updated: true, inspect: [{ sheet: '全部字段', status: 'ok', detail: 'UKey 接入后自动补齐' }] }
+      : { s: 'miss', size: '—', hash: '', time: '08:52', summary: '硬件阻断：06 槽未检测到 UKey', inspect: [{ sheet: '未采集', status: 'miss', detail: '请插入 UKey' }] };
+  });
+  renderHeaderHw(); renderScopeTabs(); renderHeatmap(); openHwDrawer();
+  showToast(s.ukey ? '06 槽 湛江徐闻 UKey 已接入，缺口已自动补齐' : '06 槽 湛江徐闻 UKey 已拔出');
+}
+
+// ==================== 通用弹窗 ====================
+function openTaskModal(mode) {
+  document.getElementById('tm-title').textContent = mode === 'new' ? '新建采集任务' : (mode === 'private' ? '编辑：私有 · 现货组' : '编辑：公有');
+  document.getElementById('tm-name').value = mode === 'new' ? '' : (mode === 'private' ? '私有 · 现货组' : '公有');
+  document.getElementById('tm-mode').value = mode === 'private' ? 'private' : 'public';
+  openModal('task-modal');
+}
+function openDrawer(id) {
+  closeAll();
+  document.getElementById('mask').classList.add('open');
+  document.getElementById(id).classList.add('open');
+}
+function openModal(id) {
+  closeAll();
+  document.getElementById('mask').classList.add('open');
+  document.getElementById(id).classList.add('open');
+}
+function closeAll() {
+  document.getElementById('mask').classList.remove('open');
+  document.querySelectorAll('.drawer, .modal').forEach(e => e.classList.remove('open'));
+}
+
+let tt;
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(tt);
+  tt = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+renderHeaderHw();
+renderScopeTabs();
+renderHeatmap();
+</script>
+</body>
+</html>

@@ -236,6 +236,7 @@ def plan_task_execution(
     opener: DialogOpener | None = None,
     timeout_sec: float = 180,
     certs_checked: bool = True,
+    station_mode: str = "all",
 ) -> TaskUKeyPlan:
     """按任务是否已选场站、以及手动还是定时，排出本次要跑的场站。
 
@@ -292,7 +293,7 @@ def plan_task_execution(
             ))
             for station in stations
         ])
-    if mode == "scheduled":
+    if mode == "scheduled" or normalize_station_mode(station_mode) == "any_one":
         return TaskUKeyPlan(
             started=True,
             runnable=[station_run_plan(item, fallback_cert_password) for item in ready],
@@ -423,6 +424,42 @@ def configured_ukey_ids(cfg: dict | None) -> list[str]:
     return found
 
 
+def normalize_station_mode(raw: object) -> str:
+    """规范化场站执行策略：``all``（逐站轮询）或 ``any_one``（公有数据，任一成功即止）。"""
+    text = str(raw or "").strip().lower()
+    if text in {"any_one", "any", "public", "first_ok"}:
+        return "any_one"
+    return "all"
+
+
+def configured_station_mode(cfg: dict | None) -> str:
+    """读出任务配置的场站执行策略，默认 ``all``。"""
+    if not isinstance(cfg, dict):
+        return "all"
+    return normalize_station_mode(cfg.get("station_mode"))
+
+
+def prioritize_stations_for_any_one(
+    stations: Sequence[dict[str, str]],
+    *,
+    current_ssid: str = "",
+    online_ssids: Sequence[str] | set[str] = (),
+) -> list[dict[str, str]]:
+    """公有数据模式排序：当前本机已连的优先，其次工作台/周边已在线的，其余按原序兜底。"""
+    cur = current_ssid.strip()
+    online = {str(item).strip() for item in online_ssids if str(item).strip()}
+
+    def _rank(item: dict[str, str]) -> int:
+        ssid = str(item.get("wifi_ssid") or "").strip()
+        if cur and ssid == cur:
+            return 0
+        if ssid and ssid in online:
+            return 1
+        return 2
+
+    return sorted(stations, key=_rank)
+
+
 def should_reuse_login(*, station_count: int, auth_state: str) -> bool:
     """一次要跑多个场站时，不把当前页面当成已经登录。
 
@@ -506,6 +543,7 @@ def collect_runtime_plan(
     mode: str,
     fallback_cert_password: str = "",
     opener: DialogOpener | None = None,
+    station_mode: str = "all",
 ) -> TaskUKeyPlan:
     """读取当前钥匙和证书，再排本次要跑的场站。
 
@@ -560,4 +598,5 @@ def collect_runtime_plan(
         fallback_cert_password=fallback_cert_password,
         opener=opener,
         certs_checked=checked,
+        station_mode=station_mode,
     )

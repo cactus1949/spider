@@ -118,7 +118,7 @@ async def test_error_modal_pauses_until_login_rechecked(external_chrome, tmp_pat
     await page.goto("http://business.test/")
     await page.set_content('''<div id="logged-in">企业甲</div>
         <button id="submit" onclick="document.querySelector('.ant-modal-confirm').style.display='block'">登录</button>
-        <div class="ant-modal-confirm" style="display:none">
+        <div class="ant-modal-confirm" style="display:none;position:fixed;left:40px;top:40px;width:320px;height:140px">
           <div class="ant-modal-confirm-title">登录失败</div>
           <div class="ant-modal-confirm-content">数字证书连接失败</div>
           <div class="ant-modal-confirm-btns"><button>确定</button></div>
@@ -212,12 +212,16 @@ async def test_batch_reuses_login_and_downloads_without_closing_user_pages(exter
     configs = {
         "login": {"type": "login", "require_storage_keys": ["test-session"],
                   "steps": [{"action": "fill", "selector": "#must-not-login", "value": "secret"}]},
-        "metric": {"needs_login": True, "steps": [
+        "metric_a": {"needs_login": True, "steps": [
+            {"action": "click", "selector": "#increment"},
+            {"action": "export", "selector": "#export", "save_as": "report.csv"},
+        ]},
+        "metric_b": {"needs_login": True, "steps": [
             {"action": "click", "selector": "#increment"},
             {"action": "export", "selector": "#export", "save_as": "report.csv"},
         ]},
     }
-    runner = TaskRunner({"name": "批量复用", "login": "login", "indicators": ["metric", "metric"],
+    runner = TaskRunner({"name": "批量复用", "login": "login", "indicators": ["metric_a", "metric_b"],
                          "target_dates": ["2026-10-27"]}, download_dir=str(tmp_path / "downloads"),
                         workflow_loader=configs.get)
     events = []

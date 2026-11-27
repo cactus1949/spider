@@ -56,6 +56,12 @@ interface Settings {
   wifiConnectTimeoutSec: string
   wifiFailTaskOnError: boolean
   multiStationEnabled: boolean
+  workbenchEnabled: boolean
+  workbenchTransport: string
+  workbenchUrl: string
+  workbenchToken: string
+  workbenchSerialPort: string
+  workbenchWakeTimeoutSec: string
 }
 
 type DeliveryOutboxStatusFilter = 'pending' | 'sending' | 'failed' | 'sent' | ''
@@ -120,7 +126,13 @@ const DEFAULTS: Settings = {
   wifiPassword: '',
   wifiConnectTimeoutSec: '30',
   wifiFailTaskOnError: true,
-  multiStationEnabled: false
+  multiStationEnabled: false,
+  workbenchEnabled: false,
+  workbenchTransport: 'auto',
+  workbenchUrl: 'http://wifirack.local',
+  workbenchToken: '',
+  workbenchSerialPort: '',
+  workbenchWakeTimeoutSec: '45'
 }
 
 interface StationDraft {
@@ -219,6 +231,8 @@ export default function SettingsModal({
   const [ukeyChecking, setUkeyChecking] = useState(false)
   const [ukeyChecked, setUkeyChecked] = useState(false)
   const [ukeyDownloading, setUkeyDownloading] = useState(false)
+  const [workbenchBusy, setWorkbenchBusy] = useState(false)
+  const [workbenchWakingId, setWorkbenchWakingId] = useState('')
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const settingsLoadGeneration = useRef(0)
@@ -306,7 +320,13 @@ export default function SettingsModal({
           wifiPassword: '',
           wifiConnectTimeoutSec: merged.wifiConnectTimeoutSec,
           wifiFailTaskOnError: merged.wifiFailTaskOnError,
-          multiStationEnabled: merged.multiStationEnabled
+          multiStationEnabled: merged.multiStationEnabled,
+          workbenchEnabled: merged.workbenchEnabled,
+          workbenchTransport: merged.workbenchTransport || 'auto',
+          workbenchUrl: merged.workbenchUrl || 'http://wifirack.local',
+          workbenchToken: '',
+          workbenchSerialPort: merged.workbenchSerialPort || '',
+          workbenchWakeTimeoutSec: merged.workbenchWakeTimeoutSec || '45'
         }
         form.setFieldsValue(formValues)
         setDir(merged.downloadDir)
@@ -322,6 +342,7 @@ export default function SettingsModal({
         }
         snapshot.stationProfiles = savedStations
         snapshot.wifiPassword = ''
+        snapshot.workbenchToken = ''
         baselineRef.current = snapshot
         return snapshot
   }, [form])
@@ -390,7 +411,7 @@ export default function SettingsModal({
     const changed: Record<string, string> = {}
     for (const [key, value] of Object.entries(kv)) {
       if (baselineRef.current[key] === value) continue
-      if (key === 'wifiPassword' && !value.trim()) continue
+      if ((key === 'wifiPassword' || key === 'workbenchToken') && !value.trim()) continue
       changed[key] = value
     }
     if (Object.keys(changed).length === 0) {
@@ -798,14 +819,50 @@ export default function SettingsModal({
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                       <span style={{ color: '#667085' }}>场站 {index + 1}</span>
-                      <Button
-                        danger
-                        size="small"
-                        htmlType="button"
-                        onClick={() => editStations((rows) => rows.filter((row) => row.id !== station.id))}
-                      >
-                        删除
-                      </Button>
+                      <Space size={6}>
+                        {station.wifiSsid.trim() && (
+                          <Button
+                            size="small"
+                            htmlType="button"
+                            disabled={!settingsLoaded}
+                            loading={workbenchWakingId === station.id}
+                            onClick={async () => {
+                              if (!settingsLoaded) {
+                                message.error(settingsError || '设置还没加载成功')
+                                return
+                              }
+                              setWorkbenchWakingId(station.id)
+                              try {
+                                await persistSettings()
+                                const res = await api.wakeWorkbench({
+                                  ssid: station.wifiSsid.trim(),
+                                  name: station.name.trim(),
+                                  wait: true
+                                })
+                                if (res.ok) {
+                                  message.success(`${station.name || station.wifiSsid} 已在线${res.slot_id ? ` (槽${res.slot_id})` : ''}`)
+                                } else {
+                                  message.warning(res.message || `唤醒状态：${res.status}`)
+                                }
+                              } catch (err) {
+                                message.error(err instanceof Error ? err.message : '调用工作台唤醒失败')
+                              } finally {
+                                setWorkbenchWakingId('')
+                              }
+                            }}
+                          >
+                            唤醒 WiFi
+                          </Button>
+                        )}
+                        <Button
+                          danger
+                          size="small"
+                          htmlType="button"
+                          onClick={() => editStations((rows) => rows.filter((row) => row.id !== station.id))}
+                        >
+                          删除
+                        </Button>
+                      </Space>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                       <Input
@@ -932,6 +989,159 @@ export default function SettingsModal({
                     预览选择窗口
                   </Button>
                 </Space>
+
+                {/* WifiRack 移动工作台联动设置 */}
+                <div
+                  style={{
+                    border: '1px solid #e6eef2',
+                    background: '#f8fbfc',
+                    borderRadius: 8,
+                    padding: 12,
+                    marginTop: 8,
+                    marginBottom: 12
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontWeight: 600 }}>WifiRack 移动工作台联动（按 SSID 动态唤醒，免固定槽位）</span>
+                    <Form.Item name="workbenchEnabled" valuePropName="checked" style={{ marginBottom: 0 }}>
+                      <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+                    </Form.Item>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <Form.Item label="通信方式" name="workbenchTransport" style={{ marginBottom: 8 }}>
+                      <Select
+                        options={[
+                          { label: '自动（有串口优先串口，否则 HTTP）', value: 'auto' },
+                          { label: '局域网 HTTP', value: 'http' },
+                          { label: 'USB 串口直连（断网可用）', value: 'serial' }
+                        ]}
+                      />
+                    </Form.Item>
+                    <Form.Item label="专网无线网卡名称（双网卡留空为默认）" name="wifiInterfaceName" style={{ marginBottom: 8 }}>
+                      <Input placeholder="例如 WLAN 2（工作台内置网卡名）" />
+                    </Form.Item>
+                    <Form.Item label="工作台 HTTP 地址" name="workbenchUrl" style={{ marginBottom: 8 }}>
+                      <Input placeholder="http://wifirack.local 或 http://192.168.1.50" />
+                    </Form.Item>
+                    <Form.Item label="USB 串口号（选填，留空或 auto 自动探测）" name="workbenchSerialPort" style={{ marginBottom: 8 }}>
+                      <Input placeholder="例如 COM5 或 auto" />
+                    </Form.Item>
+                    <Form.Item label="工作台 API Token" name="workbenchToken" style={{ marginBottom: 8 }}>
+                      <Input.Password placeholder="默认 wifirack-1234，留空不修改" />
+                    </Form.Item>
+                    <Form.Item label="单次唤醒超时 (秒)" name="workbenchWakeTimeoutSec" style={{ marginBottom: 8 }}>
+                      <Input placeholder="45" />
+                    </Form.Item>
+                  </div>
+                  <Space wrap>
+                    <Button
+                      size="small"
+                      htmlType="button"
+                      disabled={!settingsLoaded}
+                      loading={workbenchBusy}
+                      onClick={async () => {
+                        if (!settingsLoaded) {
+                          message.error(settingsError || '设置还没加载成功')
+                          return
+                        }
+                        setWorkbenchBusy(true)
+                        try {
+                          await persistSettings()
+                          const res = await api.getWorkbenchStatus()
+                          if (res.ok && res.data) {
+                            const slots = res.data.slots || []
+                            const online = slots.filter((s) => s.present && s.wifiOnline).length
+                            const present = slots.filter((s) => s.present).length
+                            message.success(`工作台已连通 (${res.data.transport || 'http'})：在位 ${present} 槽，在线 ${online} 槽，母线 ${res.data.busVolts ?? '-'}V`)
+                          } else {
+                            message.error(res.error || '工作台连接失败')
+                          }
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : '连接工作台失败')
+                        } finally {
+                          setWorkbenchBusy(false)
+                        }
+                      }}
+                    >
+                      测试工作台连通
+                    </Button>
+                    <Button
+                      size="small"
+                      htmlType="button"
+                      disabled={!settingsLoaded}
+                      loading={workbenchBusy}
+                      onClick={async () => {
+                        if (!settingsLoaded) {
+                          message.error(settingsError || '设置还没加载成功')
+                          return
+                        }
+                        setWorkbenchBusy(true)
+                        try {
+                          await persistSettings()
+                          const res = await api.syncWorkbenchProfiles()
+                          if (res.ok) message.success(`已同步 ${res.count} 条场站档案到工作台`)
+                          else message.error(res.error || '同步失败')
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : '同步失败')
+                        } finally {
+                          setWorkbenchBusy(false)
+                        }
+                      }}
+                    >
+                      同步场站到工作台
+                    </Button>
+                    <Button
+                      size="small"
+                      htmlType="button"
+                      disabled={!settingsLoaded}
+                      loading={workbenchBusy}
+                      onClick={async () => {
+                        if (!settingsLoaded) {
+                          message.error(settingsError || '设置还没加载成功')
+                          return
+                        }
+                        setWorkbenchBusy(true)
+                        try {
+                          await persistSettings()
+                          const res = await api.discoverWorkbenchSlots(false)
+                          if (res.ok) message.success('已触发工作台全槽动态认槽，请稍候查看状态')
+                          else message.error(res.error || '触发动态认槽失败')
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : '触发动态认槽失败')
+                        } finally {
+                          setWorkbenchBusy(false)
+                        }
+                      }}
+                    >
+                      触发动态认槽
+                    </Button>
+                    <Button
+                      size="small"
+                      htmlType="button"
+                      disabled={!settingsLoaded}
+                      loading={workbenchBusy}
+                      onClick={async () => {
+                        if (!settingsLoaded) {
+                          message.error(settingsError || '设置还没加载成功')
+                          return
+                        }
+                        setWorkbenchBusy(true)
+                        try {
+                          await persistSettings()
+                          const res = await api.wakeAllWorkbench()
+                          if (res.ok) message.success('已下发全槽智能唤醒')
+                          else message.error(res.error || '唤醒失败')
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : '唤醒失败')
+                        } finally {
+                          setWorkbenchBusy(false)
+                        }
+                      }}
+                    >
+                      一键唤醒全部
+                    </Button>
+                  </Space>
+                </div>
                 </>
               )}
 

@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import ctypes
+import itertools
 import os
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from ctypes import wintypes
 from functools import partial
+from typing import Callable
 
 _WINDOWS = sys.platform == "win32"
 _MUTEX_NAME = "Global\\SpiderGD.SharedHardware"
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_SEQ = itertools.count()
+_QUEUE_WAITERS: list[tuple[int, int, str]] = []
 
 
 class HardwareBusyError(RuntimeError):
@@ -157,6 +163,53 @@ def hardware_operation(lease: HardwareLease | None = None):
     finally:
         if owner:
             lease.close()
+
+
+async def acquire_hardware_lease_async(
+    *,
+    priority: int = 1,
+    timeout_seconds: float = 1800.0,
+    poll_interval: float = 0.4,
+    on_wait: Callable[[int], None] | None = None,
+) -> HardwareLease | None:
+    """按优先级单轨排队获取共享硬件租约（0=手动优先，1=自动定时避让排队）。
+
+    硬件空闲时 0ms 直接返回；占用时循环等待并在释放后按优先级顺序接棒，
+    避免手动重采与全自动任务并发冲突或误报失败。
+    """
+    seq = next(_QUEUE_SEQ)
+    token = f"w-{seq}"
+    entry = (int(priority), seq, token)
+    with _QUEUE_LOCK:
+        _QUEUE_WAITERS.append(entry)
+        _QUEUE_WAITERS.sort()
+
+    notified = False
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    try:
+        while True:
+            with _QUEUE_LOCK:
+                _QUEUE_WAITERS.sort()
+                pos = next((idx for idx, item in enumerate(_QUEUE_WAITERS) if item[2] == token), 0)
+            if pos == 0:
+                lease = HardwareLease.try_acquire()
+                if lease is not None:
+                    return lease
+            if not notified and on_wait is not None:
+                notified = True
+                try:
+                    on_wait(pos + 1)
+                except Exception:
+                    pass
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(max(0.05, float(poll_interval)))
+    finally:
+        with _QUEUE_LOCK:
+            try:
+                _QUEUE_WAITERS.remove(entry)
+            except ValueError:
+                pass
 
 
 async def run_hardware_blocking(func, *args, **kwargs):

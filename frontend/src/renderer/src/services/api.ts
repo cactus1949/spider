@@ -207,6 +207,76 @@ export interface UploadProfileTestResult {
   details?: string[]
 }
 
+export interface OverviewInspectItem {
+  sheet: string
+  status: 'ok' | 'partial' | 'empty' | 'miss'
+  detail: string
+}
+
+export interface OverviewCell {
+  status: 'ok' | 'partial' | 'empty' | 'miss' | 'future'
+  size?: number
+  mtime?: string
+  hash?: string
+  prev_hash?: string
+  updated_today?: boolean
+  file_name?: string
+  file_path?: string
+  summary?: string
+  inspect?: OverviewInspectItem[]
+}
+
+export interface OverviewRow {
+  id: string
+  name: string
+  lag: number
+  date_kind?: string
+  cells: Record<string, OverviewCell>
+}
+
+export interface OverviewScope {
+  id: string
+  name: string
+  kind: 'public' | 'private'
+  ssid?: string
+  slot?: number
+  retention_days?: number
+}
+
+export interface OverviewMatrixResult {
+  today: string
+  start: string
+  end: string
+  dates: string[]
+  months?: string[]
+  has_real_config: boolean
+  download_dir: string
+  scopes: OverviewScope[]
+  data: Record<string, { rows: OverviewRow[] }>
+}
+
+export interface OverviewPreviewSheet {
+  name: string
+  status: 'ok' | 'partial' | 'empty'
+  rows: number
+  empty_cols: string[]
+}
+
+export interface OverviewPreviewResult {
+  ok: boolean
+  kind: 'table' | 'binary' | 'missing' | 'unsupported'
+  file_name?: string
+  active_sheet?: string
+  sheets: OverviewPreviewSheet[]
+  headers: string[]
+  rows: string[][]
+  empty_col_indices?: number[]
+  total_rows?: number
+  truncated?: boolean
+  note?: string
+  error?: string
+}
+
 export interface ExecutionLogItem {
   exec_id: string
   name: string
@@ -327,6 +397,43 @@ export interface StationPickResult {
   demo?: boolean
   message?: string
   station?: { id: string; name: string; wifiSsid: string }
+}
+
+export interface WorkbenchStatusResult {
+  ok: boolean
+  enabled: boolean
+  data: {
+    version?: string
+    time?: string
+    busVolts?: number
+    busy?: boolean
+    transport?: string
+    slots?: Array<{
+      id: number
+      name: string
+      ssid: string
+      ssidVerified?: boolean
+      present: boolean
+      wifiOnline: boolean
+      rssi?: number
+      batteryPct?: number
+      charging?: boolean
+      chargeMa?: number
+      lastEvent?: string
+    }>
+  } | null
+  error?: string
+}
+
+export interface WorkbenchWakeResult {
+  ok: boolean
+  status: string
+  ssid: string
+  slot_id: number
+  rssi: number
+  job_id: number
+  message: string
+  transport?: string
 }
 
 export interface DeliveryTestResult {
@@ -726,6 +833,57 @@ export const api = {
   applyRouteRules: () =>
     req<RouteApplyResult>('/api/network/route-rules/apply', { method: 'POST' }),
 
+  // ---- WifiRack 移动工作台联动 ----
+  getWorkbenchStatus: () => req<WorkbenchStatusResult>('/api/workbench/status'),
+  wakeWorkbench: (body: {
+    ssid?: string
+    station_id?: string
+    name?: string
+    slot?: number
+    allow_cold_boot?: boolean
+    wait?: boolean
+  }) =>
+    req<WorkbenchWakeResult>('/api/workbench/wake', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    }),
+  wakeAllWorkbench: () =>
+    req<{ ok: boolean; data: unknown; error?: string }>('/api/workbench/wake-all', { method: 'POST' }),
+  discoverWorkbenchSlots: (wait = false) =>
+    req<{ ok: boolean; data: unknown; error?: string }>(`/api/workbench/discover?wait=${wait ? 'true' : 'false'}`, {
+      method: 'POST'
+    }),
+  syncWorkbenchProfiles: () =>
+    req<{ ok: boolean; count: number; data: unknown; error?: string }>('/api/workbench/sync-profiles', {
+      method: 'POST'
+    }),
+
+  // ---- 数据总览热力矩阵与框选打包 ----
+  getOverviewMatrix: (start?: string, end?: string, monthStart?: string, monthEnd?: string) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    if (monthStart) params.set('month_start', monthStart)
+    if (monthEnd) params.set('month_end', monthEnd)
+    const qs = params.toString()
+    return req<OverviewMatrixResult>(`/api/overview/matrix${qs ? `?${qs}` : ''}`)
+  },
+  previewOverviewFile: (path: string, sheet?: string, limit = 80) => {
+    const params = new URLSearchParams({ path, limit: String(limit) })
+    if (sheet) params.set('sheet', sheet)
+    return req<OverviewPreviewResult>(`/api/overview/preview?${params.toString()}`)
+  },
+  packOverviewFiles: (body: {
+    items: Array<{ owner: string; indicator: string; date: string; file_path: string }>
+    target_path: string
+    mode?: 'zip' | 'folder'
+    layout?: 'station_indicator' | 'station_date' | 'flat'
+  }) =>
+    req<{ ok: boolean; count: number; missing: string[]; output: string; error?: string }>('/api/overview/pack', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    }),
+
   // ---- 数据管理 ----
   exportAllData: () => req<Record<string, unknown>>('/api/data/export'),
   importAllData: (data: Record<string, unknown>) =>
@@ -833,6 +991,7 @@ export const settingsStore = {
       if (!_settingsCache) _settingsCache = {}
       const cached = { ...settings }
       if (cached.wifiPassword) cached.wifiPassword = '******'
+      if (cached.workbenchToken) cached.workbenchToken = '******'
       if (cached.stationProfiles) cached.stationProfiles = maskStationProfiles(cached.stationProfiles)
       Object.assign(_settingsCache, cached)
     }

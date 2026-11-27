@@ -2224,7 +2224,8 @@ async def test_station_identity_rejects_retained_dom_after_cookie_clear(tmp_path
         page.business_identity = "单位乙"
         await session.decisions.put(True)
         await asyncio.wait_for(asyncio.shield(task), timeout=5)
-        assert sum(event["event"] == "step_done" for event in events) == 2
+        # 场站甲跑完 a（b 失败），切到场站乙确认单位身份后应独立执行 a 与 b（共 3 次 step_done）
+        assert sum(event["event"] == "step_done" for event in events) == 3
         assert page.reloads == 0
         assert page.gotos == []
     finally:

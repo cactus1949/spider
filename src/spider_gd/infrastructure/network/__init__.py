@@ -22,10 +22,16 @@ from spider_gd.infrastructure.network.supervisor import (
 from spider_gd.infrastructure.network.usb_monitor import UsbMonitor
 from spider_gd.infrastructure.network.wifi_connector import (
     WifiConnectOptions,
-    WifiConnectResult,
     WifiConnector,
+    WifiConnectResult,
     WifiNetwork,
     decode_ssid_name,
+)
+from spider_gd.infrastructure.network.workbench_client import (
+    WorkbenchClient,
+    WorkbenchConfig,
+    WorkbenchWakeResult,
+    workbench_config_from_store,
 )
 
 __all__ = [
@@ -44,6 +50,10 @@ __all__ = [
     "WifiConnectResult",
     "WifiConnector",
     "WifiNetwork",
+    "WorkbenchClient",
+    "WorkbenchConfig",
+    "WorkbenchWakeResult",
     "decode_ssid_name",
     "diagnose",
+    "workbench_config_from_store",
 ]

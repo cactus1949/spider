@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { App as AntApp, Button, Progress } from 'antd'
 import AppLayout from './layouts/AppLayout'
+import DataOverview from './pages/DataOverview'
 import Files from './pages/Files'
 import Tasks from './pages/Tasks'
 import Indicators from './pages/Indicators'
@@ -170,8 +171,8 @@ export default function App(): JSX.Element {
       )}
       <Routes>
         <Route element={<AppLayout />}>
-          <Route path="/" element={<Tasks />} />
-          <Route path="/tasks" element={<Navigate to="/" replace />} />
+          <Route path="/" element={<DataOverview />} />
+          <Route path="/tasks" element={<Tasks />} />
           <Route path="/files" element={<Files />} />
           <Route path="/indicators" element={<Indicators />} />
           <Route path="/execution-logs" element={<ExecutionLogs />} />

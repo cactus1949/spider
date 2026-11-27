@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import re
@@ -16,6 +17,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -292,6 +294,60 @@ def _float_setting(value: str, default: float) -> float:
         return default
 
 
+def build_workbench_client(ctx: AppContext, *, require_enabled: bool = True):
+    """按当前应用设置构造 WifiRack 工作台客户端。未启用时返回 None。"""
+    from spider_gd.infrastructure.network import WorkbenchClient, workbench_config_from_store
+
+    state_store = getattr(ctx, "state_store", None)
+    cfg = workbench_config_from_store(state_store)
+    if require_enabled and not cfg.enabled:
+        return None
+    return WorkbenchClient(cfg)
+
+
+def order_station_queue_for_mode(
+    station_queue: list[dict[str, str]],
+    station_mode: str,
+    *,
+    wifi_interface_name: str = "",
+    workbench_client: Any = None,
+) -> list[dict[str, str]]:
+    """公有数据模式下优先排当前已连/已在线的场站，减少切网与唤醒耗时。"""
+    from spider_gd.core.ukey_plan import normalize_station_mode, prioritize_stations_for_any_one
+
+    if normalize_station_mode(station_mode) != "any_one" or len(station_queue) <= 1:
+        return station_queue
+    current_ssid = ""
+    online_ssids: set[str] = set()
+    try:
+        from spider_gd.infrastructure.network import WifiConnector
+
+        connector = WifiConnector()
+        current_ssid = (
+            connector.current_ssid(wifi_interface_name)
+            if wifi_interface_name
+            else connector.current_ssid()
+        )
+        nets = (
+            connector.list_networks(wifi_interface_name)
+            if wifi_interface_name
+            else connector.list_networks()
+        )
+        for net in nets:
+            if net.ssid:
+                online_ssids.add(net.ssid)
+    except Exception:
+        pass
+    if workbench_client is not None and getattr(workbench_client, "enabled", True):
+        with contextlib.suppress(Exception):
+            online_ssids.update(workbench_client.list_online_ssids())
+    return prioritize_stations_for_any_one(
+        station_queue,
+        current_ssid=current_ssid,
+        online_ssids=online_ssids,
+    )
+
+
 def prepare_wifi_connection(ctx: AppContext) -> tuple[bool, str, list[str]]:
     enabled = _bool_setting(_read_state_setting(ctx, "wifiAutoConnectEnabled") or "", False)
     if not enabled:
@@ -311,7 +367,28 @@ def prepare_wifi_connection(ctx: AppContext) -> tuple[bool, str, list[str]]:
 
     from spider_gd.infrastructure.network import WifiConnectOptions, WifiConnector
 
-    result = WifiConnector().prepare(
+    connector = WifiConnector()
+    wake_details: list[str] = []
+    workbench = build_workbench_client(ctx)
+    if workbench is not None and ssid:
+        try:
+            cur = connector.current_ssid(interface_name) if interface_name else connector.current_ssid()
+            if cur != ssid:
+                nets = (
+                    connector.list_networks(interface_name)
+                    if interface_name
+                    else connector.list_networks()
+                )
+                visible = {item.ssid for item in nets}
+            else:
+                visible = {ssid}
+            if cur != ssid and ssid not in visible:
+                wake_res = workbench.wake_by_ssid(ssid, wifi_password=password)
+                wake_details.append(f"工作台按需唤醒 {ssid}: {wake_res.message or wake_res.status}")
+        except Exception as exc:
+            wake_details.append(f"工作台唤醒跳过: {exc}")
+
+    result = connector.prepare(
         WifiConnectOptions(
             ssid=ssid,
             password=password,
@@ -319,7 +396,7 @@ def prepare_wifi_connection(ctx: AppContext) -> tuple[bool, str, list[str]]:
             timeout_sec=timeout_sec,
         )
     )
-    details = list(result.details)
+    details = [*wake_details, *result.details]
     if result.current_ssid:
         details.append(f"当前 WiFi: {result.current_ssid}")
     if result.ok:
@@ -2594,16 +2671,35 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             )
         )
 
-        from spider_gd.infrastructure.hardware_lease import HardwareLease
+        from spider_gd.infrastructure.hardware_lease import acquire_hardware_lease_async
 
-        hardware_lease = HardwareLease.try_acquire()
+        def _on_auto_wait(pos: int) -> None:
+            logger.info("⏳ 定时任务 {} 检测到共享硬件占用，已自动进入单轨队列等待 (排位 #{})", task_name, pos)
+            ctx.state_store.update_execution_log(
+                exec_id,
+                status="running",
+                reason="当前有手动或其它采集任务正在执行，已自动排队等待...",
+                updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+
+        hardware_lease = await acquire_hardware_lease_async(
+            priority=1,
+            timeout_seconds=1800.0,
+            on_wait=_on_auto_wait,
+        )
         if hardware_lease is None:
             ctx.state_store.update_execution_log(
                 exec_id, status="failed",
-                reason="另一个安装或任务正在使用共享硬件（证书、浏览器或网络），请稍后重试",
+                reason="等待共享硬件租约超时（30 分钟），本次自动任务跳过",
                 updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
             return
+        ctx.state_store.update_execution_log(
+            exec_id,
+            status="running",
+            reason="",
+            updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
         try:
             await _owned_operation(cfg, exec_id, task_name, hardware_lease)
         finally:
@@ -2745,6 +2841,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             "path_structure": cfg.get("path_structure", ""),
             "custom_filenames": cfg.get("custom_filenames") or {},
             "ukey_station_ids": cfg.get("ukey_station_ids") or [],
+            "station_mode": cfg.get("station_mode", "all"),
         }
 
         # 使用任务配置的下载目录，否则用系统默认；任务可自定义日期分层模板
@@ -2871,6 +2968,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
         station_queue: list[dict[str, str]] = []
         from spider_gd.core.ukey_plan import (
             collect_runtime_plan,
+            configured_station_mode,
             configured_ukey_ids,
             format_station_report,
         )
@@ -2884,6 +2982,9 @@ def _task_runner_job(ctx: AppContext, task_id: str):
             saved_profiles = []
             logger.warning("场站设置无法读取，定时任务不按场站切换: {}", exc)
         selected_ids = configured_ukey_ids(task_cfg)
+        station_mode = configured_station_mode(task_cfg)
+        workbench_client = build_workbench_client(ctx)
+        wifi_iface = (_read_state_setting(ctx, "wifiInterfaceName") or "").strip()
         if saved_profiles or selected_ids:
             ukey_plan = await run_hardware_blocking(
                 collect_runtime_plan,
@@ -2891,6 +2992,7 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                 selected_ids=selected_ids,
                 mode="scheduled",
                 fallback_cert_password=cert_password,
+                station_mode=station_mode,
             )
             report = format_station_report(ukey_plan.skipped)
             if report:
@@ -2906,7 +3008,13 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                     updated_at=_time.strftime("%Y-%m-%d %H:%M:%S"),
                 )
                 return
-            station_queue = ukey_plan.runnable
+            station_queue = await run_hardware_blocking(
+                order_station_queue_for_mode,
+                ukey_plan.runnable,
+                station_mode,
+                wifi_interface_name=wifi_iface,
+                workbench_client=workbench_client,
+            )
             task_cfg["_skipped_stations"] = [
                 {"name": item.name, "status": item.status, "reason": item.reason}
                 for item in ukey_plan.skipped
@@ -2924,7 +3032,9 @@ def _task_runner_job(ctx: AppContext, task_id: str):
                            output_dirs=output_dirs,
                            station_queue=station_queue,
                            exec_id=exec_id,
-                           slot_store=ctx.state_store)
+                           slot_store=ctx.state_store,
+                           workbench_client=workbench_client,
+                           wifi_interface_name=wifi_iface)
 
         errors: list[str] = []
         pause_alerts: set[str] = set()

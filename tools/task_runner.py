@@ -729,7 +729,9 @@ class TaskRunner:
                  minimized: bool = False, indicator_dirs: dict[str, str] | None = None,
                  output_dirs: dict[str, dict[str, str]] | None = None,
                  station_queue: list[dict] | None = None,
-                 exec_id: str = "", slot_store=None):
+                 exec_id: str = "", slot_store=None,
+                 workbench_client=None,
+                 wifi_interface_name: str = ""):
         self.config = task_config
         self.name = task_config.get("name", "unnamed")
         self.login_name = task_config.get("login", "")
@@ -762,6 +764,15 @@ class TaskRunner:
         self._account = account
         self._account_password = account_password
         self._station_queue = [dict(item) for item in (station_queue or [])]
+        from spider_gd.core.ukey_plan import configured_station_mode
+
+        self._station_mode = configured_station_mode(task_config)
+        self._workbench_client = workbench_client
+        self._wifi_interface_name = (
+            wifi_interface_name or str(task_config.get("_wifi_interface_name") or "")
+        ).strip()
+        self._prewoken_ssids: set[str] = set()
+        self._prewake_tasks: list[asyncio.Task] = []
         self.backfill_days = _coerce_int(task_config.get("backfill_days", 1), 1, 0, 365)
         self.cover_days = _coerce_int(task_config.get("cover_days", 0), 0, 0, 365)
         self.reference_date = _coerce_date(task_config.get("reference_date"))
@@ -920,7 +931,7 @@ class TaskRunner:
                     self._terminal_sent = True
                     if payload.get("event") == "task_error":
                         self._task_error_emitted = True
-                if isinstance(payload, dict) and self._active_station_name:
+                if isinstance(payload, dict) and self._active_station_name and self._station_mode != "any_one":
                     if payload.get("event") in {"file_expected", "file_result", "repeat_no_data"}:
                         folders = list(payload.get("folders") or [])
                         if self._active_station_name not in folders:
@@ -982,6 +993,7 @@ class TaskRunner:
             multi = len(stations) > 1
             self._defer_terminal = multi
             self._rolled = {"success": 0, "failed": 0, "skipped": 0}
+            base_skip_slots = set(self._skip_slots)
             pending_runs = runs
             station, station_index = None, 0
             try:
@@ -998,6 +1010,9 @@ class TaskRunner:
                     self._mark_plan_skipped(runs, _emit, "没有可执行的场站")
                     raise WorkflowExecutionError("没有可执行的场站，不能复用其他单位的业务登录态")
                 for station_index, station in enumerate(stations):
+                    if multi and self._station_mode != "any_one":
+                        # 多场站轮询时每个场站都要独立下载同一批指标，不能被前一站的成功集合误跳过
+                        self._skip_slots = set(base_skip_slots)
                     user_cancelled = bool(self._stopped or session._cancel_requested)
                     if user_cancelled:
                         self._station_results.extend(
@@ -1033,6 +1048,9 @@ class TaskRunner:
                             ) == "stop":
                                 break
                             continue
+                        # 流水线预唤醒：连上第 N 台后，后台异步通知工作台预唤醒第 N+1 台，避免久等休眠
+                        if self._station_mode != "any_one" and station_index + 1 < len(stations):
+                            self._schedule_prewake_station(stations[station_index + 1], _emit)
                     if multi:
                         await self._drop_station_session()
                         self._login_done = False
@@ -1138,6 +1156,27 @@ class TaskRunner:
                             break
                     for key in self._rolled:
                         self._rolled[key] += self._summary[key]
+                    # 公有数据模式（any_one）：任一可用场站全部成功即收工，剩余场站无需再跑
+                    any_one_done = (
+                        self._station_mode == "any_one"
+                        and isinstance(station, dict)
+                        and not self._failed
+                        and not self._stopped
+                        and not session._cancel_requested
+                        and self._summary["failed"] == 0
+                    )
+                    if any_one_done:
+                        winner = str(station.get("name") or "")
+                        self._station_results.append({"name": winner, "status": "ran", "reason": ""})
+                        for rest in stations[station_index + 1:]:
+                            if isinstance(rest, dict):
+                                self._station_results.append({
+                                    "name": str(rest.get("name") or ""),
+                                    "status": "skipped",
+                                    "reason": f"公有数据已由 {winner or '前序场站'} 完成",
+                                })
+                        self._emit_terminal(_emit, station_failed=False)
+                        break
                     if self._close_station(
                         station, station_index, len(stations), _emit,
                         failed=bool(self._failed),
@@ -1359,7 +1398,7 @@ class TaskRunner:
         self._current_station = dict(station)
         if self._shared_session is not None:
             self._shared_session._station_org_name = str(station.get("org_name") or "").strip()
-        if name and total > 1:
+        if name and total > 1 and self._station_mode != "any_one":
             from spider_gd.core.output_paths import sanitize_segment, station_scoped_path
 
             target = validate_write_path(
@@ -1394,8 +1433,50 @@ class TaskRunner:
         outcome = await self._connect_station_wifi(name, ssid, str(station.get("wifi_password") or ""))
         return outcome
 
+    def _schedule_prewake_station(self, next_station: dict | None, _emit) -> None:
+        """异步预唤醒下一场站随身 WiFi（跑第 N 台时提前叫醒第 N+1 台，不阻塞当前下载）。"""
+        client = self._workbench_client
+        if client is None or not getattr(client, "enabled", True):
+            return
+        if not isinstance(next_station, dict):
+            return
+        next_ssid = str(next_station.get("wifi_ssid") or "").strip()
+        next_name = str(next_station.get("name") or "").strip()
+        next_pass = str(next_station.get("wifi_password") or "")
+        if not next_ssid or next_ssid in self._prewoken_ssids:
+            return
+        self._prewoken_ssids.add(next_ssid)
+
+        async def _run_prewake() -> None:
+            try:
+                res = await asyncio.to_thread(
+                    client.prewake_by_ssid,
+                    next_ssid,
+                    name=next_name,
+                    wifi_password=next_pass,
+                )
+                _emit(
+                    "station_wifi",
+                    name=next_name or next_ssid,
+                    ok=bool(res.ok),
+                    message=f"预唤醒下一站 {next_name or next_ssid}：{res.message or res.status}",
+                )
+            except Exception as exc:
+                _emit(
+                    "station_wifi",
+                    name=next_name or next_ssid,
+                    ok=False,
+                    message=f"预唤醒下一站失败（不影响当前站）：{exc}",
+                )
+
+        try:
+            task = asyncio.create_task(_run_prewake())
+            self._prewake_tasks.append(task)
+        except RuntimeError:
+            return
+
     async def _connect_station_wifi(self, name: str, ssid: str, password: str) -> str:
-        """连已保存的热点。无人值守超时就跳过；有人时可以重试、跳过或停止。"""
+        """连已保存的热点。若扫不到且启用了移动工作台，则先按 SSID 动态唤醒再连。"""
         import time
 
         from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
@@ -1403,36 +1484,98 @@ class TaskRunner:
         from spider_gd.infrastructure.network.wifi_wait import wait_for_saved_ssid, wifi_wait_budget
 
         connector = WifiConnector()
+        iface = self._wifi_interface_name
+        workbench = self._workbench_client
         pauses = 0
 
         def cancelled() -> bool:
             session = self._shared_session
             return bool(self._stopped or (session and getattr(session, "_cancel_requested", False)))
 
+        def scan_visible() -> list[str]:
+            try:
+                networks = connector.list_networks(iface) if iface else connector.list_networks()
+                return [item.ssid for item in networks]
+            except Exception:
+                return []
+
+        def read_current_ssid() -> str:
+            return connector.current_ssid(iface) if iface else connector.current_ssid()
+
         while pauses < 3:
+            try:
+                current = await run_hardware_blocking(read_current_ssid)
+            except Exception:
+                current = ""
+            if current and current == ssid:
+                self._on_event({
+                    "event": "station_wifi",
+                    "name": name,
+                    "ok": True,
+                    "message": f"已连接目标 WiFi: {ssid}",
+                })
+                return "ok"
+
             self._on_event({
                 "event": "station_wifi",
                 "name": name,
                 "ok": False,
                 "message": "扫描",
             })
+
+            wait_budget = wifi_wait_budget(self._unattended)
+            workbench_note = ""
+            if workbench is not None and getattr(workbench, "enabled", True):
+                initial_visible = await run_hardware_blocking(scan_visible)
+                if ssid not in {item.strip() for item in initial_visible if item}:
+                    self._on_event({
+                        "event": "station_wifi",
+                        "name": name,
+                        "ok": False,
+                        "message": f"未搜到 {ssid}，正在调用工作台动态唤醒...",
+                    })
+                    wake_res = await run_hardware_blocking(
+                        workbench.wake_by_ssid,
+                        ssid,
+                        name=name,
+                        wifi_password=password,
+                        cancelled=cancelled,
+                    )
+                    if wake_res.status == "cancelled":
+                        self._stopped = True
+                        return "stop"
+                    slot_hint = f" (槽{wake_res.slot_id})" if wake_res.slot_id else ""
+                    self._on_event({
+                        "event": "station_wifi",
+                        "name": name,
+                        "ok": False,
+                        "message": f"工作台返回{slot_hint}：{wake_res.message or wake_res.status}",
+                    })
+                    if wake_res.status in {"empty", "not_found"}:
+                        workbench_note = wake_res.message or f"工作台未找到热点 {ssid}"
+                        if self._unattended:
+                            wait_budget = min(wait_budget, 8.0)
+
             result = await run_hardware_blocking(
                 wait_for_saved_ssid,
                 ssid,
-                visible=lambda: [item.ssid for item in connector.list_networks()],
+                visible=scan_visible,
                 connect=lambda: connector.prepare(
-                    WifiConnectOptions(ssid=ssid, password=password)
+                    WifiConnectOptions(ssid=ssid, password=password, interface_name=iface)
                 ).ok,
-                timeout_sec=wifi_wait_budget(self._unattended),
+                timeout_sec=wait_budget,
                 clock=time.monotonic,
                 sleeper=time.sleep,
                 cancelled=cancelled,
             )
+            reason = result.reason or result.status
+            if not result.ok and workbench_note:
+                reason = f"{workbench_note}；{reason}"
             self._on_event({
                 "event": "station_wifi",
                 "name": name,
                 "ok": result.ok,
-                "message": result.reason or result.status,
+                "message": reason,
             })
             if result.status == "cancelled":
                 self._stopped = True
@@ -1441,12 +1584,12 @@ class TaskRunner:
                 return "ok"
             if self._unattended or self._wait_continue is None:
                 self._station_results.append({
-                    "name": name, "status": "skipped", "reason": result.reason,
+                    "name": name, "status": "skipped", "reason": reason,
                 })
                 return "skip"
             self._on_event({
                 "event": "error_pause",
-                "message": result.reason,
+                "message": reason,
                 "kind": "wifi",
             })
             continued = await self._wait_continue()
@@ -1454,7 +1597,7 @@ class TaskRunner:
             skipped = bool(session and getattr(session, "consume_station_skip", lambda: False)())
             if skipped:
                 self._station_results.append({
-                    "name": name, "status": "skipped", "reason": result.reason,
+                    "name": name, "status": "skipped", "reason": reason,
                 })
                 return "skip"
             if not continued:
@@ -1535,10 +1678,18 @@ class TaskRunner:
                 if self._page_open(page)
             ]
             portals = [page for page in remaining if "/portal" in self._url(page)]
+            bound_non_blank = [
+                page for page in self._shared_pages
+                if page in remaining
+                and self._url(page) not in ("", "about:blank")
+                and page_role(self._url(page)) != "business"
+            ]
             blanks = [page for page in remaining if self._url(page) in ("", "about:blank")]
             others = [page for page in remaining if page_role(self._url(page)) != "business"]
             if portals:
                 chosen = portals[0]
+            elif bound_non_blank:
+                chosen = bound_non_blank[0]
             elif blanks:
                 chosen = blanks[0]
             elif others:

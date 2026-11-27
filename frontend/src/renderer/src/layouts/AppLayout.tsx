@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { Layout, Menu, Button, Tooltip, Tag, Dropdown } from 'antd'
 import {
+  AppstoreOutlined,
   FolderOutlined,
   ScheduleOutlined,
   CodeOutlined,
@@ -29,7 +30,8 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { key: '/', icon: <ScheduleOutlined />, label: '任务配置' },
+  { key: '/', icon: <AppstoreOutlined />, label: '数据总览' },
+  { key: '/tasks', icon: <ScheduleOutlined />, label: '任务配置' },
   { key: '/files', icon: <FolderOutlined />, label: '文件中心' },
   { key: '/execution-logs', icon: <FileTextOutlined />, label: '执行日志' },
   { key: '/indicators', icon: <CodeOutlined />, label: '指标配置' },
@@ -149,6 +151,10 @@ export default function AppLayout(): JSX.Element {
           min-height: 0;
         }
         .app-content.execution-logs-content {
+          overflow: hidden;
+        }
+        .app-content.overview-content {
+          padding: 14px 18px 14px;
           overflow: hidden;
         }
         .execution-logs-table,
@@ -445,7 +451,9 @@ export default function AppLayout(): JSX.Element {
           </div>
         </Header>
         <BrowserSessionPanel />
-        <Content className={`app-content${location.pathname === '/execution-logs' ? ' execution-logs-content' : ''}`}>
+        <Content
+          className={`app-content${location.pathname === '/execution-logs' ? ' execution-logs-content' : ''}${location.pathname === '/' ? ' overview-content' : ''}`}
+        >
           <Outlet />
         </Content>
       </Layout>

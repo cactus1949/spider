@@ -85,6 +85,7 @@ interface AutoTask {
   autoUpload?: boolean
   indicatorRetry?: number
   ukeyStationIds?: string[]
+  stationMode?: 'all' | 'any_one'
   enabled: boolean
   remark?: string
   createdAt: number
@@ -163,6 +164,7 @@ interface FormValues {
   autoUpload?: boolean
   indicatorRetry?: number
   ukeyStationIds?: string[]
+  stationMode?: 'all' | 'any_one'
 }
 
 async function loadTasksFromApi(): Promise<AutoTask[]> {
@@ -189,6 +191,7 @@ async function loadTasksFromApi(): Promise<AutoTask[]> {
         autoUpload: Boolean(c.auto_upload),
         indicatorRetry: Number(c.indicator_retry ?? 3),
         ukeyStationIds: Array.isArray(c.ukey_station_ids) ? c.ukey_station_ids.map(String) : [],
+        stationMode: c.station_mode === 'any_one' ? 'any_one' : 'all',
         downloadDir: c.download_dir_custom ? (c.download_dir || '') : '',
         enabled: c.enabled ?? true,
         remark: c.remark || '',
@@ -224,6 +227,7 @@ async function saveTaskConfigs(tasks: AutoTask[]): Promise<void> {
         auto_upload: Boolean(t.autoUpload),
         indicator_retry: t.indicatorRetry ?? 3,
         ukey_station_ids: t.ukeyStationIds || [],
+        station_mode: t.stationMode || 'all',
         enabled: t.enabled,
         remark: t.remark || '',
         download_dir: t.downloadDir || '',
@@ -502,7 +506,8 @@ export default function Tasks(): JSX.Element {
       uploadProfileId: undefined,
       autoUpload: false,
       indicatorRetry: 3,
-      ukeyStationIds: []
+      ukeyStationIds: [],
+      stationMode: 'all'
     })
     setWindows({})
     setOutputWindows({})
@@ -530,7 +535,8 @@ export default function Tasks(): JSX.Element {
       uploadProfileId: task.uploadProfileId || undefined,
       autoUpload: Boolean(task.autoUpload),
       indicatorRetry: task.indicatorRetry ?? 3,
-      ukeyStationIds: task.ukeyStationIds || []
+      ukeyStationIds: task.ukeyStationIds || [],
+      stationMode: task.stationMode || 'all'
     })
     const saved = Object.fromEntries(
       Object.entries(task.indicatorWindows || {}).map(([name, window]) => [name, [window.start, window.end] as [number, number]])
@@ -612,6 +618,7 @@ export default function Tasks(): JSX.Element {
         autoUpload: Boolean(values.autoUpload),
         indicatorRetry: Number(values.indicatorRetry ?? 3),
         ukeyStationIds: values.ukeyStationIds || [],
+        stationMode: values.stationMode === 'any_one' ? 'any_one' : 'all',
         enabled: values.enabled,
         remark: values.remark?.trim() || undefined,
         createdAt: editing?.createdAt || Date.now()
@@ -973,6 +980,18 @@ export default function Tasks(): JSX.Element {
                 allowClear
                 placeholder="选择场站"
                 options={stationOptions}
+              />
+            </Form.Item>
+            <Form.Item
+              label="多场站策略"
+              name="stationMode"
+              tooltip="专有数据逐个场站轮询下载；公有数据只需任意一套可用 WiFi+UKey 成功下载即结束，优先选用已在线设备"
+            >
+              <Select
+                options={[
+                  { label: '专有数据（全部选中场站轮询）', value: 'all' },
+                  { label: '公有数据（任一可用场站成功即止）', value: 'any_one' }
+                ]}
               />
             </Form.Item>
             <Form.Item label="登录方式" name="login" tooltip="选择用于登录的工作流">

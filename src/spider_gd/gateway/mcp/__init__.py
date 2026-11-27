@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from spider_gd.gateway.mcp.server import create_mcp_server
+from spider_gd.gateway.mcp.server import create_mcp_server, create_workbench_mcp_server
 
-__all__ = ["create_mcp_server"]
+__all__ = ["create_mcp_server", "create_workbench_mcp_server"]

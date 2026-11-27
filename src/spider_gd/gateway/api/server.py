@@ -169,6 +169,8 @@ def _bool_text(value: object) -> bool:
 
 
 def _parse_profile_yaml(text: str) -> dict:
+    from fastapi import HTTPException
+
     try:
         cfg = yaml.safe_load(text) if text.strip() else {}
     except Exception as exc:
@@ -213,6 +215,20 @@ class CatchupRunRequest(BaseModel):
     upload_profile_id: str = ""
     auto_upload: bool = False
     ukey_station_ids: list[str] | None = None
+    station_mode: str | None = None
+    wait_for_hardware: bool = False
+
+
+class WorkbenchWakeRequest(BaseModel):
+    """手动/自动通过移动工作台按需唤醒设备请求。"""
+
+    ssid: str = ""
+    station_id: str = ""
+    name: str = ""
+    slot: int = 0
+    allow_cold_boot: bool = True
+    wait: bool = True
+    timeout_sec: float | None = None
 
 
 def _make_wf_loader(service):
@@ -1622,6 +1638,7 @@ def create_app(
                     "upload_profile_id": f.get("upload_profile_id", ""),
                     "auto_upload": bool(f.get("auto_upload", False)),
                     "ukey_station_ids": f.get("ukey_station_ids") or [],
+                    "station_mode": f.get("station_mode", "all"),
                 })
                 imported.append(cfg_id)
             except Exception as exc:
@@ -1799,14 +1816,112 @@ def create_app(
             logger.info("任务已删除: {}", path)
         return {"status": "ok"}
 
-    async def run_task_stream(name: str, cert_password: str = "", account: str = "", account_password: str = "", download_dir: str = "", headless: str = "false", minimized: str = "false", reference_date: str = "", prepared: dict | None = None):
-        from spider_gd.infrastructure.hardware_lease import HardwareLease
+    async def run_task_stream(
+        name: str,
+        cert_password: str = "",
+        account: str = "",
+        account_password: str = "",
+        download_dir: str = "",
+        headless: str = "false",
+        minimized: str = "false",
+        reference_date: str = "",
+        prepared: dict | None = None,
+        wait_for_hardware: bool = False,
+    ):
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareLease,
+            acquire_hardware_lease_async,
+        )
 
         hardware_lease = HardwareLease.try_acquire()
         if hardware_lease is None:
-            raise HTTPException(
-                status_code=409,
-                detail="另一个安装或任务正在使用共享硬件（证书、浏览器或网络），请稍后重试",
+            if not wait_for_hardware:
+                raise HTTPException(
+                    status_code=409,
+                    detail="另一个安装或任务正在使用共享硬件（证书、浏览器或网络），请稍后重试",
+                )
+
+            async def _queued_stream():
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "event": "task_step",
+                            "phase": "login",
+                            "name": "queue",
+                            "status": "running",
+                            "message": "当前有自动或其它采集任务正在执行，已进入单轨队列等待完成后自动开始…",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                queued_lease = await acquire_hardware_lease_async(priority=0, timeout_seconds=600.0)
+                if queued_lease is None:
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {"event": "task_error", "error": "等待共享硬件超时，请稍后重试"},
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    return
+
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "event": "task_step",
+                            "phase": "login",
+                            "name": "queue",
+                            "status": "done",
+                            "message": "前序任务已完成，开始执行本次重采",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                queued_producer = None
+                try:
+                    inner_resp, queued_producer = await _prepare_task_stream(
+                        name,
+                        cert_password,
+                        account,
+                        account_password,
+                        download_dir,
+                        headless,
+                        minimized,
+                        reference_date,
+                        prepared,
+                        hardware_lease=queued_lease,
+                    )
+                    async for chunk in inner_resp.body_iterator:
+                        yield chunk
+                except HTTPException as exc:
+                    yield (
+                        "data: "
+                        + json.dumps({"event": "task_error", "error": str(exc.detail)}, ensure_ascii=False)
+                        + "\n\n"
+                    )
+                except Exception as exc:
+                    yield (
+                        "data: "
+                        + json.dumps({"event": "task_error", "error": str(exc)}, ensure_ascii=False)
+                        + "\n\n"
+                    )
+                finally:
+                    if queued_producer is None:
+                        queued_lease.close()
+
+            return StreamingResponse(
+                _queued_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
             )
         producer = None
         try:
@@ -1878,9 +1993,14 @@ def create_app(
                     "auto_upload": bool(db_cfg.get("auto_upload", False)),
                     "indicator_retry": db_cfg.get("indicator_retry", cfg.get("indicator_retry", 3)),
                 })
-            from spider_gd.core.ukey_plan import configured_ukey_ids
+            from spider_gd.core.ukey_plan import configured_station_mode, configured_ukey_ids
 
             cfg["ukey_station_ids"] = configured_ukey_ids(db_cfg) or configured_ukey_ids(cfg)
+            cfg["station_mode"] = (
+                configured_station_mode(db_cfg)
+                if db_cfg and db_cfg.get("station_mode")
+                else configured_station_mode(cfg)
+            )
             if reference_date.strip():
                 cfg["reference_date"] = reference_date.strip()
 
@@ -2121,10 +2241,12 @@ def create_app(
 
         remember_run_plan(service._ctx.state_store, exec_id, cfg)
         station_queue: list[dict[str, str]] = []
+        from spider_gd.app import build_workbench_client, order_station_queue_for_mode
         from spider_gd.core.station_picker import pick_stations
         from spider_gd.core.station_profile import parse_station_profiles
         from spider_gd.core.ukey_plan import (
             collect_runtime_plan,
+            configured_station_mode,
             configured_ukey_ids,
             format_station_report,
         )
@@ -2136,6 +2258,9 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         selected_ids = configured_ukey_ids(cfg)
+        station_mode = configured_station_mode(cfg)
+        workbench_client = build_workbench_client(service._ctx)
+        wifi_iface = str(service._ctx.state_store.get_setting("wifiInterfaceName") or "").strip()
         if saved_profiles or selected_ids:
             def _open_once(rows, timeout):
                 picked = pick_stations(rows, timeout_sec=timeout)
@@ -2150,6 +2275,7 @@ def create_app(
                 mode="manual",
                 fallback_cert_password=cert_password,
                 opener=_open_once,
+                station_mode=station_mode,
             )
             report = format_station_report(ukey_plan.skipped)
             if report:
@@ -2159,7 +2285,13 @@ def create_app(
                 raise HTTPException(status_code=409, detail="已取消选择场站")
             if not ukey_plan.started:
                 raise HTTPException(status_code=409, detail=report or "没有可执行的场站")
-            station_queue = ukey_plan.runnable
+            station_queue = await run_hardware_blocking(
+                order_station_queue_for_mode,
+                ukey_plan.runnable,
+                station_mode,
+                wifi_interface_name=wifi_iface,
+                workbench_client=workbench_client,
+            )
             cfg["_skipped_stations"] = [
                 {"name": item.name, "status": item.status, "reason": item.reason}
                 for item in ukey_plan.skipped
@@ -2174,7 +2306,9 @@ def create_app(
                           output_dirs=output_dirs,
                           station_queue=station_queue,
                           exec_id=exec_id,
-                          slot_store=service._ctx.state_store)
+                          slot_store=service._ctx.state_store,
+                          workbench_client=workbench_client,
+                          wifi_interface_name=wifi_iface)
 
         event_queue: _asyncio.Queue = _asyncio.Queue()
         cont_evt: _asyncio.Event = _asyncio.Event()
@@ -3507,6 +3641,262 @@ def create_app(
                 "error": str(exc),
             }
 
+    # ---- WifiRack 移动工作台联动接口（按 SSID 动态唤醒 / 动态认槽 / 档案同步） ----
+
+    @app.get("/api/workbench/status")
+    async def workbench_status() -> dict[str, Any]:
+        """读取 WifiRack 移动工作台状态（6 槽动态状态、电压与可见热点）。"""
+        from spider_gd.app import build_workbench_client
+        from spider_gd.infrastructure.hardware_lease import run_hardware_blocking
+
+        client = build_workbench_client(service._ctx, require_enabled=False)
+        try:
+            data = await run_hardware_blocking(client.get_status)
+            return {"ok": True, "enabled": client.enabled, "data": data, "error": ""}
+        except Exception as exc:
+            return {"ok": False, "enabled": client.enabled, "data": None, "error": str(exc)}
+
+    @app.post("/api/workbench/wake")
+    async def workbench_wake(req: WorkbenchWakeRequest) -> dict[str, Any]:
+        """通过工作台动态唤醒指定场站或 SSID（无需固定槽位）。"""
+        from spider_gd.app import build_workbench_client
+        from spider_gd.core.station_profile import find_station, parse_station_profiles
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
+
+        ssid = req.ssid.strip()
+        name = req.name.strip()
+        wifi_pass = ""
+        if req.station_id.strip() or (name and not ssid):
+            try:
+                profiles = parse_station_profiles(
+                    service._ctx.state_store.get_setting("stationProfiles") or ""
+                )
+            except ValueError:
+                profiles = []
+            matched = find_station(profiles, req.station_id.strip() or name)
+            if matched is not None:
+                ssid = ssid or matched.wifi_ssid
+                name = name or matched.name
+                wifi_pass = matched.wifi_password
+
+        client = build_workbench_client(service._ctx, require_enabled=False)
+        try:
+            with hardware_operation():
+                res = await run_hardware_blocking(
+                    client.wake_by_ssid,
+                    ssid,
+                    name=name,
+                    wifi_password=wifi_pass,
+                    slot=req.slot,
+                    allow_cold_boot=req.allow_cold_boot,
+                    wait=req.wait,
+                    timeout_sec=req.timeout_sec,
+                )
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "ok": res.ok,
+            "status": res.status,
+            "ssid": res.ssid,
+            "slot_id": res.slot_id,
+            "rssi": res.rssi,
+            "job_id": res.job_id,
+            "message": res.message,
+            "transport": res.transport,
+        }
+
+    @app.post("/api/workbench/wake-all")
+    async def workbench_wake_all() -> dict[str, Any]:
+        """一键唤醒工作台全部在位随身 WiFi。"""
+        from spider_gd.app import build_workbench_client
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
+
+        client = build_workbench_client(service._ctx, require_enabled=False)
+        try:
+            with hardware_operation():
+                data = await run_hardware_blocking(client.wake_all)
+            return {"ok": True, "data": data, "error": ""}
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            return {"ok": False, "data": None, "error": str(exc)}
+
+    @app.post("/api/workbench/discover")
+    async def workbench_discover(wait: bool = False) -> dict[str, Any]:
+        """触发工作台全槽动态认槽，自动识别每个槽位插的是哪个 WiFi。"""
+        from spider_gd.app import build_workbench_client
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
+
+        client = build_workbench_client(service._ctx, require_enabled=False)
+        try:
+            with hardware_operation():
+                data = await run_hardware_blocking(client.discover_slots, wait=wait)
+            return {"ok": True, "data": data, "error": ""}
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            return {"ok": False, "data": None, "error": str(exc)}
+
+    @app.post("/api/workbench/sync-profiles")
+    async def workbench_sync_profiles() -> dict[str, Any]:
+        """把当前已配置的场站档案（名称 + WiFi SSID + 密码）同步给工作台用于动态认槽。"""
+        from spider_gd.app import build_workbench_client
+        from spider_gd.core.station_profile import parse_station_profiles
+        from spider_gd.infrastructure.hardware_lease import (
+            HardwareBusyError,
+            hardware_operation,
+            run_hardware_blocking,
+        )
+
+        try:
+            profiles = parse_station_profiles(
+                service._ctx.state_store.get_setting("stationProfiles") or ""
+            )
+        except ValueError as exc:
+            return {"ok": False, "count": 0, "error": str(exc)}
+        client = build_workbench_client(service._ctx, require_enabled=False)
+        try:
+            with hardware_operation():
+                data = await run_hardware_blocking(client.sync_profiles, profiles)
+            return {"ok": True, "count": int(data.get("count", len(profiles))), "data": data, "error": ""}
+        except HardwareBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            return {"ok": False, "count": 0, "data": None, "error": str(exc)}
+
+    # ---- 数据总览热力矩阵与框选打包 ----
+
+    class OverviewPackRequest(BaseModel):
+        items: list[dict[str, Any]]
+        target_path: str
+        mode: str = "zip"
+        layout: str = "station_indicator"
+        filename: str = ""
+
+    @app.get("/api/overview/matrix")
+    async def overview_matrix(
+        start: str = "",
+        end: str = "",
+        month_start: str = "",
+        month_end: str = "",
+    ) -> dict[str, Any]:
+        """返回指定日期区间与年度月份区间内各公有/私有指标的本地文件到位与完整度矩阵。"""
+        from datetime import date, timedelta
+
+        from spider_gd.core.overview_matrix import build_overview_matrix
+
+        today = date.today()
+        try:
+            start_d = date.fromisoformat(start) if start else (today - timedelta(days=45))
+            end_d = date.fromisoformat(end) if end else (today + timedelta(days=14))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"日期格式错误: {exc}") from exc
+
+        default_dl = str(getattr(service._ctx.settings.storage, "data_dir", "") or "")
+        return await asyncio.to_thread(
+            build_overview_matrix,
+            service._ctx.state_store,
+            default_download_dir=default_dl,
+            start_date=start_d,
+            end_date=end_d,
+            month_start=month_start.strip(),
+            month_end=month_end.strip(),
+            today=today,
+        )
+
+    @app.get("/api/overview/preview")
+    async def overview_preview(path: str = "", sheet: str = "", limit: int = 80) -> dict[str, Any]:
+        """快速预览本地 Excel / CSV 文件的 Sheet 列表、表头与前 N 行数据。"""
+        from spider_gd.core.overview_matrix import preview_overview_file
+
+        if not path.strip():
+            raise HTTPException(status_code=400, detail="缺少文件路径")
+        return await asyncio.to_thread(
+            preview_overview_file,
+            path.strip(),
+            sheet=sheet.strip(),
+            max_rows=limit,
+        )
+
+    @app.post("/api/overview/pack")
+    async def overview_pack(req: OverviewPackRequest) -> dict[str, Any]:
+        """将总览热力图框选的本地最新文件打包为 ZIP 或导出到用户选定的目录。"""
+        from spider_gd.core.overview_matrix import pack_overview_files
+
+        raw_target = req.target_path.strip()
+        if not raw_target:
+            raise HTTPException(status_code=400, detail="请先选择导出目录")
+        target = Path(raw_target)
+        if not target.is_absolute():
+            raise HTTPException(status_code=400, detail="导出路径必须是绝对路径")
+
+        return await asyncio.to_thread(
+            pack_overview_files,
+            req.items,
+            target_path=target,
+            mode=req.mode,
+            layout=req.layout,
+            filename=req.filename.strip(),
+        )
+
+    @app.post("/api/overview/pack/stream")
+    async def overview_pack_stream(req: OverviewPackRequest) -> StreamingResponse:
+        """流式 SSE 打包/导出接口，实时回传每个文件的处理进度。"""
+        from spider_gd.core.overview_matrix import iter_pack_overview_files
+
+        raw_target = req.target_path.strip()
+        if not raw_target:
+            raise HTTPException(status_code=400, detail="请先选择导出目录")
+        target = Path(raw_target)
+        if not target.is_absolute():
+            raise HTTPException(status_code=400, detail="导出路径必须是绝对路径")
+
+        async def event_stream():
+            queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def _worker() -> None:
+                try:
+                    for ev in iter_pack_overview_files(
+                        req.items,
+                        target_path=target,
+                        mode=req.mode,
+                        layout=req.layout,
+                        filename=req.filename.strip(),
+                    ):
+                        loop.call_soon_threadsafe(queue.put_nowait, ev)
+                except Exception as exc:
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {"event": "done", "ok": False, "count": 0, "missing": [], "output": "", "error": str(exc)},
+                    )
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, None)
+
+            fut = loop.run_in_executor(None, _worker)
+            try:
+                while True:
+                    ev = await queue.get()
+                    if ev is None:
+                        break
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            finally:
+                await fut
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     @app.post("/api/network/route-rules/apply")
     async def apply_route_rules() -> dict[str, Any]:
         """应用路由规则到系统：专网动态 DNS → /32 路由 → 专网/公网验证。"""
@@ -4048,6 +4438,10 @@ def create_app(
             custom_filenames=body.custom_filenames,
             ukey_station_ids=body.ukey_station_ids,
         )
+        if body.station_mode:
+            from spider_gd.core.ukey_plan import normalize_station_mode
+
+            cfg["station_mode"] = normalize_station_mode(body.station_mode)
         return await run_task_stream(
             "catchup",
             cert_password=body.cert_password,
@@ -4057,6 +4451,7 @@ def create_app(
             headless=body.headless,
             minimized=body.minimized,
             prepared=cfg,
+            wait_for_hardware=bool(body.wait_for_hardware),
         )
 
     @app.post("/api/workflows/{name}/step/{step_index}/run/stream")
